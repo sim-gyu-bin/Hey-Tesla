@@ -69,25 +69,25 @@ SDK·라이브러리 버전, 호출어 엔진, 최종 접근 감지 방식은 �
 
 첫 구현 시 Android Studio, JDK, Android SDK, Gradle/AGP, Kotlin/Compose의 호환 버전을 검증해 고정하고, 실제로 성공한 APK 빌드·설치 절차를 여기에 추가한다. USB 디버깅과 ADB는 진단용이며, 특권으로 제한을 우회한 결과를 일반 설치 성공으로 인정하지 않는다.
 
-권한·기본 비서·한국어 모델 설정과 시험 절차는 [초기 설정 및 실기기 검증](docs/wiki/Device-Validation.md)을 참고한다. 현재 미구현 기능의 설정이 이미 가능한 것처럼 안내하지 않는다.
+권한·기본 비서·한국어 모델 설정과 시험 절차는 [초기 설정 및 실기기 검증](wiki/Device-Validation.md)을 참고한다. 현재 미구현 기능의 설정이 이미 가능한 것처럼 안내하지 않는다.
 
 ## Wiki
 
 | 문서 | 내용 |
 | --- | --- |
-| [Wiki 홈](docs/wiki/Home.md) | 전체 문서 지도와 단계별 진행 조건 |
-| [제품 요구사항](docs/wiki/Requirements.md) | 사용자 시나리오, MVP와 비목표, 안전 요구사항 |
-| [네이티브 아키텍처](docs/wiki/Native-Architecture.md) | Kotlin 서비스·오디오·도메인 구조 |
-| [상태 머신과 안전](docs/wiki/State-Machine.md) | 전이·취소·만료·결과 불명과 테스트 계약 |
-| [기술 타당성과 근거](docs/wiki/Feasibility.md) | 문서 확인 사실·가설·실기기 미확인 사항 |
-| [초기 설정 및 실기기 검증](docs/wiki/Device-Validation.md) | 권한, 체크리스트, 배터리와 복구 시험 |
-| [Tesla 연동과 비용](docs/wiki/Tesla-Integration.md) | OAuth, 가상 키, 서명, 상태 확인과 과금 |
+| [Wiki 홈](wiki/Home.md) | 전체 문서 지도와 단계별 진행 조건 |
+| [제품 요구사항](wiki/Requirements.md) | 사용자 시나리오, MVP와 비목표, 안전 요구사항 |
+| [네이티브 아키텍처](wiki/Native-Architecture.md) | Kotlin 서비스·오디오·도메인 구조 |
+| [상태 머신과 안전](wiki/State-Machine.md) | 전이·취소·만료·결과 불명과 테스트 계약 |
+| [기술 타당성과 근거](wiki/Feasibility.md) | 문서 확인 사실·가설·실기기 미확인 사항 |
+| [초기 설정 및 실기기 검증](wiki/Device-Validation.md) | 권한, 체크리스트, 배터리와 복구 시험 |
+| [Tesla 연동과 비용](wiki/Tesla-Integration.md) | OAuth, 가상 키, 서명, 상태 확인과 과금 |
 
-Wiki 원본은 `docs/wiki/`에서 관리한다. **현재는 로컬 문서만 작성하며 GitHub Wiki 게시·커밋·푸시는 하지 않는다.**
+Wiki 원본은 루트의 `wiki/`에서 관리한다. 문서의 커밋·푸시와 별개로 **GitHub Wiki 웹 게시 여부는 따로 관리하며, 아직 게시하지 않았다.**
 
 ## 비용과 현재 제약
 
-Fleet API는 사용량 과금이며 월 할인과 결제수단·한도 조건이 있다. 서버·도메인·선택 음성 SDK 비용은 별도다. 무조건 무료라고 약속하지 않으며 실제 도입 전 승인받는다. 가격과 공식 출처는 [Tesla 연동 문서](docs/wiki/Tesla-Integration.md)에 정리한다.
+Fleet API는 사용량 과금이며 월 할인과 결제수단·한도 조건이 있다. 서버·도메인·선택 음성 SDK 비용은 별도다. 무조건 무료라고 약속하지 않으며 실제 도입 전 승인받는다. 가격과 공식 출처는 [Tesla 연동 문서](wiki/Tesla-Integration.md)에 정리한다.
 
 다음 사항은 아직 검증되지 않았다.
 
