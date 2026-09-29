@@ -1,0 +1,38 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-feature android:name="android.software.companion_device_setup" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
+    <queries>
+        <intent><action android:name="android.speech.RecognitionService" /></intent>
+    </queries>
+    <application android:name=".DiagnosticApp" android:label="Hey Tesla"
+        android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@android:drawable/ic_btn_speak_now"
+        android:theme="@android:style/Theme.Material.NoActionBar" android:supportsRtl="true">
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <service android:name=".PresenceService" android:exported="true" android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE">
+            <intent-filter><action android:name="android.companion.CompanionDeviceService" /></intent-filter>
+        </service>
+        <service android:name=".AssistantService" android:exported="true" android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <intent-filter><action android:name="android.service.voice.VoiceInteractionService" /></intent-filter>
+            <meta-data android:name="android.voice_interaction" android:resource="@xml/voice_interaction" />
+        </service>
+        <service android:name=".AssistantSessionService" android:exported="true" android:permission="android.permission.BIND_VOICE_INTERACTION" />
+        <service android:name=".UnsupportedRecognitionService" android:exported="true" android:permission="android.permission.BIND_SPEECH_RECOGNITION">
+            <intent-filter><action android:name="android.speech.RecognitionService" /></intent-filter>
+        </service>
+        <service android:name=".MicrophoneService" android:exported="false" android:foregroundServiceType="microphone" android:stopWithTask="false" />
+    </application>
+</manifest>

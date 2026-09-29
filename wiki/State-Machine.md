@@ -1,6 +1,6 @@
 # 상태 머신
 
-> 이 페이지는 Android 네이티브 설계 문서다. 앱 구현과 실기기 검증은 아직 완료되지 않았다.
+> 이 페이지는 음성 명령·차량 제어를 포함한 제품 전체 상태 머신 계약이다. 현재 `SessionPolicy`는 제한 캡처의 단일 세션·만료·이탈·cooldown만 구현했고, 5개 정책 테스트 및 수동 마이크 종료를 검증했다. 아래 전체 명령 전이의 구현 완료를 뜻하지 않는다. [실측 기록](Device-Validation.md)
 
 [Wiki 홈](Home.md) · [요구사항](Requirements.md) · [네이티브 아키텍처](Native-Architecture.md)
 
