@@ -2,11 +2,11 @@ package com.heytesla.app
 
 import android.Manifest
 import android.app.Application
+import android.app.NotificationManager
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.companion.CompanionDeviceManager
 import android.companion.DevicePresenceEvent
-import android.companion.ObservingDevicePresenceRequest
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -42,6 +42,8 @@ class DiagnosticApp : Application() {
 
 data class DiagnosticState(
     val enabled: Boolean = false,
+    val observationServiceRunning: Boolean = false,
+    val observationStartPending: Boolean = false,
     val automaticMicrophoneEnabled: Boolean = false,
     val savedPreference: Boolean = false,
     val associations: List<Int> = emptyList(),
@@ -75,7 +77,8 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     val state = mutable.asStateFlow()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val preference = booleanPreferencesKey("user_enabled_preference")
-    private var observationId: Int? = null
+    private val observationPolicy = ObservationPolicy()
+    private var observationService: ObservationService? = null
     var assistant: AssistantService? = null
     var microphone: MicrophoneService? = null
     var activityVisible = false
@@ -91,16 +94,22 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     /** 접근 진단이 false→true가 될 때 만들고 종료 사건까지 유지하는 시험 식별자. */
     private var trialId: String? = null
     val cdm: CompanionDeviceManager? get() = app.getSystemService(CompanionDeviceManager::class.java)
-    private val bluetoothReceiver = object : BroadcastReceiver() {
+    private val readinessReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             refresh()
-            if (!state.value.bluetooth) stop("BLUETOOTH_OFF")
-            event("BLUETOOTH_STATE_CHANGED")
+            if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                if (!state.value.bluetooth && policy.current != null) stop("BLUETOOTH_OFF")
+                event("BLUETOOTH_STATE_CHANGED")
+            }
         }
     }
 
     init {
-        app.registerReceiver(bluetoothReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED), Context.RECEIVER_EXPORTED)
+        app.registerReceiver(readinessReceiver, IntentFilter().apply {
+            addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+            addAction(NotificationManager.ACTION_APP_BLOCK_STATE_CHANGED)
+            addAction(NotificationManager.ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED)
+        }, Context.RECEIVER_EXPORTED)
         fieldLog.onStatusChanged = {
             // 콜백은 최신 sink 상태를 Main에서 읽는다. writer 스레드의 스냅샷을 넘기면 이전 값이 나중에 덮어쓸 수 있다.
             if (Looper.myLooper() == Looper.getMainLooper()) update { it.copy(fieldLog = fieldLog.status()) }
@@ -160,6 +169,8 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
         return linkedMapOf(
             FieldStateKeys.ENABLED to s.enabled,
             FieldStateKeys.AUTOMATIC_MIC to s.automaticMicrophoneEnabled,
+            FieldStateKeys.OBSERVATION_SERVICE_RUNNING to s.observationServiceRunning,
+            FieldStateKeys.OBSERVATION_START_PENDING to s.observationStartPending,
             FieldStateKeys.OBSERVING to s.observing,
             FieldStateKeys.PRESENT to s.present,
             FieldStateKeys.BLUETOOTH to s.bluetooth,
@@ -182,7 +193,8 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     internal fun acquireSpeechDiagnostic(): Boolean {
         check(Looper.myLooper() == Looper.getMainLooper())
         if (!activityVisible || policy.current != null || microphone != null ||
-            state.value.enabled || state.value.speechDiagnosticActive ||
+            state.value.enabled || state.value.observationStartPending ||
+            state.value.observationServiceRunning || state.value.speechDiagnosticActive ||
             !granted(Manifest.permission.RECORD_AUDIO)
         ) return false
         ++generation
@@ -202,41 +214,118 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
         } catch (_: Exception) { event("ASSOCIATION_READ_FAILED"); emptyList() }
         val bt = try { granted(Manifest.permission.BLUETOOTH_CONNECT) && app.getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true } catch (_: SecurityException) { false }
         update { it.copy(associations = ids, bluetooth = bt, assistant = assistantActive(), microphonePermission = granted(Manifest.permission.RECORD_AUDIO), bluetoothPermission = granted(Manifest.permission.BLUETOOTH_CONNECT), notificationPermission = granted(Manifest.permission.POST_NOTIFICATIONS)) }
-        if (observationId != null && observationId !in ids) {
-            observationId = null
-            update { it.copy(observing = false) }
-            stop("ASSOCIATION_REMOVED")
+        if (observationPolicy.pendingRequest != null || observationPolicy.runningRequest != null) {
+            val reason = observationBlockedReason()
+            if (reason != null) stopObservation(reason)
+            else if (observationService?.observedAssociationId?.let { it !in ids } == true) {
+                stopObservation("ASSOCIATION_REMOVED")
+            }
         }
     }
 
     fun setEnabled(enabled: Boolean) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (!enabled) {
+            stopObservation("DISABLED")
+            return
+        }
         val current = state.value
-        if (enabled && current.speechDiagnosticActive) { event("SPEECH_TRIAL_ENABLE_BLOCKED"); return }
-        if (enabled && current.enabled) {
-            // 중복 활성화 요청은 새 시험을 시작하지 않는다. 기존 시험 ID와 관찰을 유지한다.
-            persistPreference(true)
+        if (current.enabled || current.observationStartPending) {
             refresh()
             return
         }
-        if (enabled) {
-            // false→true 실제 전이에서 시험 ID를 먼저 만든다. 관찰 요청·스냅샷·종료 사건이 같은 시험으로 묶인다.
-            trialId = UUID.randomUUID().toString()
+        if (current.speechDiagnosticActive) { event("SPEECH_TRIAL_ENABLE_BLOCKED"); return }
+        if (!activityVisible) { observationStartRejected("OBSERVATION_REQUIRES_VISIBLE_UI"); return }
+        refresh()
+        observationBlockedReason()?.let { observationStartRejected(it); return }
+
+        val token = UUID.randomUUID().toString()
+        if (!observationPolicy.request(token)) return
+        trialId = UUID.randomUUID().toString()
+        resetPresenceBaseline()
+        update { it.copy(observationStartPending = true) }
+        persistPreference(true)
+        event("OBSERVATION_FGS_START_REQUESTED")
+        try {
+            app.startForegroundService(
+                Intent(app, ObservationService::class.java)
+                    .setAction(ObservationService.ACTION_START)
+                    .putExtra(ObservationService.REQUEST_ID, token),
+            )
+            handler.postDelayed({
+                if (observationPolicy.pendingRequest == token) {
+                    stopObservation("OBSERVATION_FGS_START_TIMEOUT", token)
+                }
+            }, 5_000)
+        } catch (_: SecurityException) { stopObservation("OBSERVATION_FGS_SECURITY_DENIED", token) }
+        catch (_: android.app.ForegroundServiceStartNotAllowedException) {
+            stopObservation("OBSERVATION_FGS_BACKGROUND_START_DENIED", token)
+        } catch (_: Exception) { stopObservation("OBSERVATION_FGS_START_FAILED", token) }
+    }
+
+    private fun observationStartRejected(reason: String) {
+        update { it.copy(stopReason = reason) }
+        event(reason)
+    }
+
+    /** 스냅샷은 refresh가 갱신한다. 관찰 전용에는 기본 비서·마이크 권한을 요구하지 않는다. */
+    internal fun observationBlockedReason(): String? {
+        val s = state.value
+        if (!app.packageManager.hasSystemFeature(PackageManager.FEATURE_COMPANION_DEVICE_SETUP)) return "CDM_UNSUPPORTED"
+        if (cdm == null) return "CDM_UNAVAILABLE"
+        if (s.associations.size != 1) return if (s.associations.isEmpty()) "ASSOCIATION_REQUIRED" else "MULTIPLE_ASSOCIATIONS_UNSUPPORTED"
+        if (!s.bluetoothPermission) return "OBSERVATION_BLUETOOTH_PERMISSION_REQUIRED"
+        if (!s.bluetooth) return "BLUETOOTH_OFF"
+        if (!s.notificationPermission) return "OBSERVATION_NOTIFICATION_PERMISSION_REQUIRED"
+        val manager = app.getSystemService(NotificationManager::class.java) ?: return "OBSERVATION_NOTIFICATIONS_BLOCKED"
+        if (!manager.areNotificationsEnabled() ||
+            manager.getNotificationChannel(ObservationService.CHANNEL)?.importance == NotificationManager.IMPORTANCE_NONE
+        ) return "OBSERVATION_NOTIFICATIONS_BLOCKED"
+        return null
+    }
+
+    internal fun acceptsObservationRequest(token: String) = observationPolicy.pendingRequest == token
+
+    internal fun observationStarted(service: ObservationService, token: String): Boolean {
+        if (!observationPolicy.promote(token)) return false
+        observationService = service
+        update { it.copy(enabled = true, observationServiceRunning = true, observationStartPending = false) }
+        event("OBSERVATION_FGS_RUNNING")
+        event(if (state.value.automaticMicrophoneEnabled) "AUTOMATIC_MIC_OPTED_IN" else "OBSERVATION_ONLY")
+        event("FEATURE_ENABLED_THIS_PROCESS")
+        return true
+    }
+
+    internal fun ownsObservation(service: ObservationService, token: String) =
+        observationService === service && observationPolicy.runningRequest == token
+
+    internal fun observationAccepted(service: ObservationService, token: String) {
+        if (!ownsObservation(service, token)) return
+        update { it.copy(observing = true) }
+        event("OBSERVE_REQUEST_ACCEPTED_NOT_PRESENCE_PROOF")
+    }
+
+    /** 사용자 OFF, 알림 OFF, 시작 실패와 서비스 파괴가 모두 이 경계를 통과한다. */
+    internal fun stopObservation(reason: String, token: String? = null) {
+        if (!observationPolicy.finish(token)) return
+        val owner = observationService
+        observationService = null
+        update {
+            it.copy(enabled = false, observationServiceRunning = false, observationStartPending = false,
+                observing = false, present = false, automaticMicrophoneEnabled = false)
         }
-        update { it.copy(enabled = enabled) }
-        persistPreference(enabled)
-        if (!enabled) {
-            stop("DISABLED")
-            update { it.copy(automaticMicrophoneEnabled = false) }
+        try {
+            stop(reason)
+        } finally {
+            // 마이크 해제 실패가 독립적인 CDM·관찰 FGS 정리를 막지 못하게 한다.
             resetPresenceBaseline()
-            stopObserving()
-            event("FEATURE_DISABLED")
-            trialId = null
-        } else {
-            resetPresenceBaseline()
-            refresh()
-            startObserving()
-            event(if (state.value.automaticMicrophoneEnabled) "AUTOMATIC_MIC_OPTED_IN" else "OBSERVATION_ONLY")
-            event("FEATURE_ENABLED_THIS_PROCESS")
+            persistPreference(false)
+            try {
+                owner?.finishObserving()
+            } finally {
+                event("FEATURE_DISABLED")
+                trialId = null
+            }
         }
     }
 
@@ -253,7 +342,10 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
      */
     fun setAutomaticMicrophone(enabled: Boolean) {
         val s = state.value
-        if (s.enabled || s.observing) { event("AUTOMATIC_MIC_REQUIRES_OBSERVATION_OFF"); return }
+        if (s.enabled || s.observing || s.observationStartPending || s.observationServiceRunning) {
+            event("AUTOMATIC_MIC_REQUIRES_OBSERVATION_OFF")
+            return
+        }
         if (s.speechDiagnosticActive) { event("SPEECH_TRIAL_AUTOMATIC_MIC_BLOCKED"); return }
         if (policy.current != null || microphone != null) { event("AUTOMATIC_MIC_BLOCKED_SESSION_RUNNING"); return }
         if (s.automaticMicrophoneEnabled == enabled) return
@@ -276,35 +368,17 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
 
     fun startObserving() {
         refresh()
-        if (!state.value.enabled) { event("OBSERVE_REQUIRES_ENABLE"); return }
-        val ids = state.value.associations
-        if (ids.size != 1) { event(if (ids.isEmpty()) "ASSOCIATION_REQUIRED" else "MULTIPLE_ASSOCIATIONS_UNSUPPORTED"); return }
-        try {
-            cdm?.startObservingDevicePresence(ObservingDevicePresenceRequest.Builder().setAssociationId(ids.single()).build()) ?: error("CDM")
-            observationId = ids.single()
-            update { it.copy(observing = true) }
-            event("OBSERVE_REQUEST_ACCEPTED_NOT_PRESENCE_PROOF")
-        } catch (_: SecurityException) { event("OBSERVE_SECURITY_DENIED") }
-        catch (_: Exception) { event("OBSERVE_UNAVAILABLE") }
-    }
-
-    private fun stopObserving() {
-        val ids = state.value.associations
-        var failed = false
-        for (id in ids) {
-            try { cdm?.stopObservingDevicePresence(ObservingDevicePresenceRequest.Builder().setAssociationId(id).build()) }
-            catch (_: Exception) { failed = true }
-        }
-        observationId = null
-        update { it.copy(observing = false) }
-        event(if (failed) "OBSERVE_STOP_FAILED_LOCAL_GATE_CLOSED" else "OBSERVE_STOPPED")
+        if (!state.value.observationServiceRunning) { event("OBSERVE_REQUIRES_ENABLE"); return }
+        observationService?.startObserving()
     }
 
     fun presence(id: Int, event: Int) {
         if (Looper.myLooper() != Looper.getMainLooper()) { handler.post { presence(id, event) }; return }
         if (state.value.speechDiagnosticActive) { this.event("SPEECH_TRIAL_APPROACH_BLOCKED"); return }
         refresh()
-        if (id !in state.value.associations || id != observationId || !state.value.enabled) {
+        if (id !in state.value.associations || observationService?.observedAssociationId != id ||
+            !state.value.enabled || !state.value.observationServiceRunning || !state.value.observing
+        ) {
             this.event("PRESENCE_IGNORED_NOT_ARMED")
             return
         }
@@ -349,7 +423,8 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     fun automaticAllowed(): Boolean {
         refresh()
         val s = state.value
-        return !s.speechDiagnosticActive && s.enabled && s.automaticMicrophoneEnabled && s.observing &&
+        return !s.speechDiagnosticActive && s.enabled && s.observationServiceRunning &&
+            s.automaticMicrophoneEnabled && s.observing &&
             s.bluetooth && s.assistant && s.microphonePermission
     }
 

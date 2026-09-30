@@ -50,6 +50,20 @@ internal fun HomeScreen(
             nextAction = onStopSession
             nextLabel = "진행 중인 세션 중지"
         }
+        state.observationStartPending -> {
+            status = "접근 관찰 서비스를 시작하고 있어요."
+            nextAction = onOpenDiagnostics
+            nextLabel = "접근 진단 보기"
+        }
+        state.observationServiceRunning -> {
+            status = when {
+                !state.observing -> "관찰 서비스 실행 중 · 관찰 요청 확인이 필요해요."
+                state.present -> "근접 신호를 확인했어요. 차량 제어는 연결되지 않았어요."
+                else -> "접근을 관찰하고 있어요. 차량 감지는 아직 확인되지 않았어요."
+            }
+            nextAction = onOpenDiagnostics
+            nextLabel = "접근 진단 보기"
+        }
         state.associations.isEmpty() -> {
             status = "차량 등록이 필요해요."
             nextAction = onOpenSettings
@@ -66,7 +80,7 @@ internal fun HomeScreen(
             nextLabel = "설정 확인"
         }
         !state.assistant -> {
-            status = "접근 진단에는 기본 비서 설정이 필요해요."
+            status = "자동 마이크 진단에는 기본 비서 설정이 필요해요."
             nextAction = onOpenSettings
             nextLabel = "설정 확인"
         }

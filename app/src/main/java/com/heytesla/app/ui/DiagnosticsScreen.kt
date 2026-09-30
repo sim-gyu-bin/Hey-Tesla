@@ -345,19 +345,19 @@ private fun ApproachDiagnostics(state: DiagnosticState, actions: AppActions) {
 
     AppSection("이번 프로세스의 접근 진단") {
         Button(
-            onClick = { actions.setApproachEnabled(!state.enabled) },
+            onClick = { actions.setApproachEnabled(!(state.enabled || state.observationStartPending)) },
             shape = MaterialTheme.shapes.medium,
-            enabled = !state.speechDiagnosticActive || state.enabled,
+            enabled = !state.speechDiagnosticActive || state.enabled || state.observationStartPending,
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 48.dp),
         ) {
-            Text(if (state.enabled) "접근 진단 비활성화 · 즉시 종료" else "이번 프로세스에서 접근 진단 활성화")
+            Text(if (state.enabled || state.observationStartPending) "접근 관찰 중지" else "접근 관찰 시작")
         }
         OutlinedButton(
             onClick = actions.observeVehicle,
             shape = MaterialTheme.shapes.medium,
-            enabled = state.enabled,
+            enabled = state.enabled && state.observationServiceRunning,
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 48.dp),
@@ -365,6 +365,11 @@ private fun ApproachDiagnostics(state: DiagnosticState, actions: AppActions) {
             Text("CDM 관찰 요청 / 재시도")
         }
         DetailRow("현재 프로세스 활성", state.enabled.toString())
+        DetailRow("관찰 서비스", when {
+            state.observationServiceRunning -> "실행 중 · 지속 알림 표시"
+            state.observationStartPending -> "시작 요청 중"
+            else -> "꺼짐"
+        })
         DetailRow("시험 모드", if (state.automaticMicrophoneEnabled) "자동 마이크 허용 · 최대 90초" else "관찰 전용 · 마이크 시작 안 함")
         DetailRow("관찰 요청 수락", state.observing.toString())
         DetailRow("현재 감지", state.present.toString())
@@ -374,7 +379,7 @@ private fun ApproachDiagnostics(state: DiagnosticState, actions: AppActions) {
         DetailRow("최근 이탈", state.lastDisappeared ?: "없음")
         DetailRow("최근 종료 사유", state.stopReason)
         Text(
-            "차량에서 떨어진 곳에서 시작하세요. 활성화 뒤 수신한 출현만 현재 감지로 표시합니다. 관찰 요청 수락은 실제 출현 증거가 아닙니다. 횟수는 중복 콜백을 포함한 프로세스 누적이며 RAM 기록은 프로세스 종료 시 사라집니다. 실차 제어는 없습니다.",
+            "화면을 벗어나도 관찰 서비스가 실행되는 동안 접근을 관찰합니다. 앱이나 지속 알림에서 종료할 수 있습니다. 관찰 시작은 차량 감지·마이크 시작이 아닙니다. 차량에서 떨어진 곳에서 시작하세요. 횟수는 중복 콜백을 포함한 프로세스 누적이며 실차 제어는 없습니다.",
             style = MaterialTheme.typography.bodySmall,
         )
         AppDisclosure(
@@ -383,10 +388,10 @@ private fun ApproachDiagnostics(state: DiagnosticState, actions: AppActions) {
             collapseLabel = "수명·조건 상세 접기",
             onToggle = { detailsExpanded = !detailsExpanded },
         ) {
-            DetailRow("association", state.associations.joinToString().ifEmpty { "없음" })
+            DetailRow("등록 차량 수", state.associations.size.toString())
             DetailRow("저장된 사용자 선호", state.savedPreference.toString())
             Text(
-                "KWS 토글이 아닙니다. 프로세스 재시작 시 실행은 항상 OFF입니다. 자동 마이크에 별도 동의한 경우에만 실제 BLE 출현 뒤 1.5초 debounce, 활성 기본비서, microphone FGS, AudioRecord 순으로 진행합니다. 자동 세션은 최대 90초이며 종료 뒤 실제 이탈과 30초 cooldown이 필요합니다. BT 재연결만으로 재시작하거나 연장하지 않습니다. 자동 마이크 동의는 저장하지 않습니다.",
+                "관찰 서비스도 시스템 종료를 막지는 못합니다. 프로세스 재시작 시 실행·자동 마이크 동의는 OFF이며 과거 감지를 복원하지 않습니다. 자동 마이크에 별도 동의한 경우에만 새 BLE 출현 뒤 1.5초 debounce와 기본 비서·권한 검사를 거쳐 최대 90초 캡처합니다. 종료 뒤 실제 이탈과 30초 cooldown이 필요하며 BT 재연결로 연장하지 않습니다.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -396,7 +401,7 @@ private fun ApproachDiagnostics(state: DiagnosticState, actions: AppActions) {
         OutlinedButton(
             onClick = { actions.setAutomaticMicrophone(!state.automaticMicrophoneEnabled) },
             shape = MaterialTheme.shapes.medium,
-            enabled = !state.enabled && !state.observing && state.sessionId == null && !state.speechDiagnosticActive,
+            enabled = !state.enabled && !state.observing && !state.observationStartPending && !state.observationServiceRunning && state.sessionId == null && !state.speechDiagnosticActive,
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 48.dp),

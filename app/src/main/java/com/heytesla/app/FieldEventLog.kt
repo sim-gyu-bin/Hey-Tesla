@@ -73,6 +73,8 @@ data class FieldRecord(
 object FieldStateKeys {
     const val ENABLED = "enabled"
     const val AUTOMATIC_MIC = "autoMic"
+    const val OBSERVATION_SERVICE_RUNNING = "observationServiceRunning"
+    const val OBSERVATION_START_PENDING = "observationStartPending"
     const val OBSERVING = "observing"
     const val PRESENT = "present"
     const val BLUETOOTH = "bluetooth"
@@ -88,6 +90,8 @@ object FieldStateKeys {
     val ORDER: List<String> = listOf(
         ENABLED,
         AUTOMATIC_MIC,
+        OBSERVATION_SERVICE_RUNNING,
+        OBSERVATION_START_PENDING,
         OBSERVING,
         PRESENT,
         BLUETOOTH,
@@ -162,6 +166,19 @@ object FieldEvents {
         "MULTIPLE_ASSOCIATIONS_UNSUPPORTED",
         "NOTIFICATION_STOP",
         "OBSERVATION_ONLY",
+        "OBSERVATION_BLUETOOTH_PERMISSION_REQUIRED",
+        "OBSERVATION_FGS_BACKGROUND_START_DENIED",
+        "OBSERVATION_FGS_RUNNING",
+        "OBSERVATION_FGS_SECURITY_DENIED",
+        "OBSERVATION_FGS_START_FAILED",
+        "OBSERVATION_FGS_START_REQUESTED",
+        "OBSERVATION_FGS_START_TIMEOUT",
+        "OBSERVATION_NOTIFICATION_PERMISSION_REQUIRED",
+        "OBSERVATION_NOTIFICATION_STOP",
+        "OBSERVATION_NOTIFICATIONS_BLOCKED",
+        "OBSERVATION_REQUIRES_VISIBLE_UI",
+        "OBSERVATION_SERVICE_DESTROYED",
+        "OBSERVATION_STALE_START_IGNORED",
         "OBSERVE_ONLY_CAPTURE_SUPPRESSED",
         "OBSERVE_REQUEST_ACCEPTED_NOT_PRESENCE_PROOF",
         "OBSERVE_REQUIRES_ENABLE",

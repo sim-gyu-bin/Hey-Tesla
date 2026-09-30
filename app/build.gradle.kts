@@ -11,8 +11,8 @@ android {
         applicationId = "com.heytesla.app"
         minSdk = 36
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.7.0-probe"
+        versionCode = 8
+        versionName = "0.8.0-probe"
     }
 
     buildFeatures {

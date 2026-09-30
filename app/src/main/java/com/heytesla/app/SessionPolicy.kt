@@ -68,3 +68,33 @@ class SessionPolicy {
         const val COOLDOWN_MS = 30_000L
     }
 }
+
+/** 메인 스레드 전용. 요청 토큰은 프로세스에서 새로 발급하며 저장·복원하지 않는다. */
+internal class ObservationPolicy {
+    var pendingRequest: String? = null
+        private set
+    var runningRequest: String? = null
+        private set
+
+    fun request(token: String): Boolean {
+        if (pendingRequest != null || runningRequest != null) return false
+        pendingRequest = token
+        return true
+    }
+
+    fun promote(token: String): Boolean {
+        if (pendingRequest != token) return false
+        pendingRequest = null
+        runningRequest = token
+        return true
+    }
+
+    fun accepts(token: String) = pendingRequest == token || runningRequest == token
+
+    fun finish(token: String? = null): Boolean {
+        if (token != null && !accepts(token)) return false
+        pendingRequest = null
+        runningRequest = null
+        return true
+    }
+}

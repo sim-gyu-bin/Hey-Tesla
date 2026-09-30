@@ -28,13 +28,15 @@ React Native나 JavaScript 브리지는 사용하지 않는다. UI, 권한, Andr
 | `ui/HomeScreen.kt` / `ui/SettingsScreen.kt` | 실제 런타임 상태의 짧은 요약·다음 행동, 차량 등록과 권한·기본 비서 설정. 가짜 차량 상태·명령 버튼 없음 |
 | `ui/DiagnosticsScreen.kt` | 음성·마이크·접근·이벤트 탭, 합성 파일 기본 선택, 고정 중지 영역, 결과 요약·펼친 기술 상세. 탭 전환 전에도 수동 진단 정리 |
 | `ui/AppTheme.kt` / `ui/AppComponents.kt` | 차콜 색상·타이포의 단일 원본과 설정 행·제목·상세 행의 공통 표현 및 접근성 의미 |
-| `DiagnosticApp.kt` | 프로세스 내 상태·이벤트, CDM 관찰, 기본 비서·권한 조건, DataStore의 비민감 활성화 선호. 수동 STT 예약과 기존 접근·캡처의 상호 배제 |
+| `DiagnosticApp.kt` | 프로세스 내 상태·이벤트, 관찰 ON 요청·서비스 소유권 게이트, 기본 비서·권한 조건, DataStore의 비민감 활성화 선호. 수동 STT 예약과 접근·캡처의 상호 배제 |
 | `FieldEventLog.kt` | 허용된 비민감 이벤트의 JSONL 인코딩·단일 IO writer·제한된 큐·2 MiB append 전용 파일. 저장 대기·유실·한도·실패 상태 제공 |
 | `AccessServices.kt` | 시스템 BLE presence 콜백과 기본 비서 경로, 음성 비서 진단 안내 |
+| `ObservationService.kt` | 마이크와 분리된 `connectedDevice` FGS·지속 알림, 등록 차량 CDM 관찰 시작·종료. 앱·알림 OFF·실패·서비스 파괴의 정리 |
 | `MicrophoneService.kt` | microphone FGS, 16 kHz PCM 입력의 개수·RMS 요약, silenced·만료·종료 처리. 오디오 저장·STT 없음 |
-| `SessionPolicy.kt` | 단일 세션, 1.5초 debounce, 자동 90초/수동 10초 정책, 실제 이탈과 30초 cooldown, 세션 ID 경계 |
+| `SessionPolicy.kt` | 캡처 단일 세션·만료·실제 이탈·cooldown과 관찰 요청 토큰 정책. 이전 START·STOP이 새 관찰 소유권을 변경하지 못하게 함 |
 | `UnsupportedRecognitionService.kt` | Android 비서 등록에 필수인 인식 서비스. 인식·지원 검사에는 명시적 비지원 오류를 반환하고 캡처·모델 다운로드·외부 인식을 시작하지 않음 |
 | `SessionPolicyTest.kt` | 정책 경계 8개 회귀 테스트. 감지 기준 초기화 시 대기 세션 폐기·실제 이탈 및 cooldown 유지 포함. 실제 OS·차량 접근 시험의 대체물이 아님 |
+| `ObservationLifecycleTest.kt` | 관찰 시작 중 OFF, 낡은 START·STOP·서비스 종료, 중복 ON, 종료 후 명시적 재시작, 새 프로세스의 이전 intent 거부 경계 6개 |
 | `SpeechSupportProbe.kt` | Activity 소유의 명시적 지원 메타데이터 조회. 온디바이스 API만 사용하고 요청 ID·10초 타임아웃·취소·화면 이탈·destroy를 관리. 녹음·모델 다운로드 없음 |
 | `SpeechSupportPolicy.kt` / `SpeechSupportPolicyTest.kt` | 네 지원 분류와 정확한 `ko-KR`을 구분. 대기·다운로드 가능·온라인 보고의 설치 승격과 일반 한국어 태그 오인을 방어하는 테스트 2개 |
 | `SpeechRecognitionProbe.kt` | Activity 소유 STT. 직접 마이크·캡처 종료 후 RAM PCM·고정 TTS 파일·무음 대조, 최종/분절 결과의 시험문장 일치·신뢰도 요약, 취소·시간 제한·오디오/FD 해제 및 실패 시 재시작 요구 |
@@ -46,6 +48,8 @@ React Native나 JavaScript 브리지는 사용하지 않는다. UI, 권한, Andr
 `0.6.0-probe`의 접근 진단은 기본적으로 관찰 전용이다. `automaticMicrophoneEnabled`는 프로세스 기본값 false·비영속이며, 관찰과 세션·음성 예약이 모두 꺼진 상태에서만 별도 변경한다. 관찰 전용 출현은 정책 debounce를 만들기 전에 반환하고 `automaticAllowed()`도 별도 동의를 요구한다. 진단 비활성화 시 동의·지연 작업을 해제한다. 활성화 시 이전 현재 감지를 지우되 실제 이탈·cooldown 조건은 보존한다. 출현·이탈 콜백 횟수와 최근 이벤트는 비민감 RAM 상태로만 누적하며 중복 콜백도 포함한다.
 
 `0.7.0-probe`는 별도 시험 파일을 `noBackupFilesDir/field-diagnostics/events.jsonl`에 보관한다. 프로세스·시험 UUID와 시각·고정 이벤트 코드·허용 상태만 기록하며 기존 RAM 표시와 구분한다. 파일은 자동 삭제·회전·덮어쓰지 않고 프로세스 재시작 후 추가 기록한다. USB 디버깅의 `run-as`로 디버그 APK 파일을 회수한다. 별도 상주 서비스·마이크·깨우기·외부 전송은 추가하지 않는다. 프로세스 생존이나 수신하지 못한 콜백의 복원을 보장하지 않는다.
+
+`0.8.0-probe`는 접근 ON의 CDM 수명을 `ObservationService`로 옮긴다. `observationStartPending`은 요청 대기, `observationServiceRunning`은 FGS 승격 완료, `observing`은 CDM 요청 수락, `present`는 실제 BLE 출현으로 구분한다. 알림·Bluetooth 조건을 시작 전에 검사하고 앱이 표시된 상태의 명시적 ON에서만 요청한다. 앱·알림 종료와 실패는 동일한 정리 경계를 사용한다. 서비스는 `START_NOT_STICKY`이며 프로세스 재생성 시 OFF다. 별도 자동 마이크 동의·기본 비서·기존 오디오 게이트를 유지하며 관찰 ON 자체는 캡처를 시작하지 않는다. 상시 wake lock·추가 BLE 스캔·주기적 원격 조회는 도입하지 않는다. 유형·권한은 [Android 공식 connectedDevice FGS 조건](https://developer.android.com/develop/background-work/services/fgs/service-types#connected-device)을 따른다.
 
 현재 앱은 프로세스 재생성 시 실행 OFF다. 저장된 선호를 표시하되 자동으로 마이크나 접근 관찰을 복원하지 않는다. 이는 검증 앱의 현재 제한이며 최종 무터치 운영 요구를 충족했다는 뜻이 아니다. `0.1.0-probe`에서 수동 10초 만료·즉시 종료·화면 이탈과 미등록 차량 차단을 확인했고, 후속 지원 조회와 STT·PCM 진단은 아래에 별도로 구분한다.
 
