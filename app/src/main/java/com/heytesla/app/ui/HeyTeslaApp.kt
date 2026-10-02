@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import com.heytesla.app.BleProbeState
 import com.heytesla.app.DiagnosticState
 import com.heytesla.app.SpeechProbeState
 import com.heytesla.app.SpeechTrialState
@@ -35,6 +36,7 @@ internal fun HeyTeslaApp(
     state: DiagnosticState,
     support: SpeechProbeState,
     trial: SpeechTrialState,
+    ble: BleProbeState,
     actions: AppActions,
 ) {
     var destination by rememberSaveable { mutableStateOf(Destination.HOME) }
@@ -91,14 +93,15 @@ internal fun HeyTeslaApp(
                             state = state,
                             support = support,
                             trial = trial,
+                            ble = ble,
                             onOpenSettings = { navigate(Destination.SETTINGS) },
                             onOpenDiagnostics = { navigate(Destination.DIAGNOSTICS) },
                             onStopSession = actions.stopSession,
                         )
-                        Destination.SETTINGS -> SettingsScreen(state, actions) {
+                        Destination.SETTINGS -> SettingsScreen(state, ble, actions) {
                             navigate(Destination.DIAGNOSTICS)
                         }
-                        Destination.DIAGNOSTICS -> DiagnosticsScreen(state, support, trial, actions)
+                        Destination.DIAGNOSTICS -> DiagnosticsScreen(state, support, trial, ble, actions)
                     }
                 }
             }

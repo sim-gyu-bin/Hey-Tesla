@@ -32,6 +32,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.heytesla.app.BleProbeState
+import com.heytesla.app.BleProbeStatus
 import com.heytesla.app.DiagnosticState
 import com.heytesla.app.DiagnosticCommandResult
 import com.heytesla.app.FieldLogFailureCode
@@ -48,6 +50,7 @@ import java.util.Locale
 
 private enum class DiagnosticDestination(val title: String) {
     SPEECH("음성"),
+    BLE("BLE 연결"),
     MICROPHONE("마이크"),
     APPROACH("접근"),
     EVENTS("이벤트"),
@@ -66,6 +69,7 @@ internal fun DiagnosticsScreen(
     state: DiagnosticState,
     support: SpeechProbeState,
     trial: SpeechTrialState,
+    ble: BleProbeState,
     actions: AppActions,
 ) {
     var destination by remember { mutableStateOf(DiagnosticDestination.SPEECH) }
@@ -114,7 +118,7 @@ internal fun DiagnosticsScreen(
                 )
             }
         }
-        if (trial.active || state.sessionId != null || support.status == SpeechProbeStatus.RUNNING) {
+        if (ble.active || trial.active || state.sessionId != null || support.status == SpeechProbeStatus.RUNNING) {
             FlowRow(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -129,6 +133,7 @@ internal fun DiagnosticsScreen(
                 }
                 OutlinedButton(
                     onClick = when {
+                        ble.active -> actions.cancelBle
                         trial.active -> actions.cancelTrial
                         state.sessionId != null -> actions.stopSession
                         else -> actions.cancelSupport
@@ -137,8 +142,9 @@ internal fun DiagnosticsScreen(
                     shape = MaterialTheme.shapes.medium,
                 ) {
                     Text(when {
+                        ble.active -> "BLE 연결 진단 취소"
                         trial.active -> "음성 진단 취소"
-                        state.sessionId != null -> "마이크 진단 중지"
+                        state.sessionId != null -> "진행 중인 세션 중지"
                         else -> "지원 조회 취소"
                     })
                 }
@@ -155,6 +161,7 @@ internal fun DiagnosticsScreen(
             ) {
                 when (destination) {
                     DiagnosticDestination.SPEECH -> SpeechDiagnostics(state, support, trial, actions)
+                    DiagnosticDestination.BLE -> BleDiagnostics(state, support, ble, actions)
                     DiagnosticDestination.MICROPHONE -> MicrophoneDiagnostics(state, actions)
                     DiagnosticDestination.APPROACH -> ApproachDiagnostics(state, actions)
                     DiagnosticDestination.EVENTS -> EventDiagnostics(state, actions)
@@ -162,6 +169,116 @@ internal fun DiagnosticsScreen(
             }
         }
     }
+}
+
+@Composable
+private fun BleDiagnostics(
+    state: DiagnosticState,
+    support: SpeechProbeState,
+    ble: BleProbeState,
+    actions: AppActions,
+) {
+    var detailsExpanded by remember { mutableStateOf(false) }
+    val blocked = when {
+        ble.status == BleProbeStatus.CLEANUP_FAILED ->
+            "로컬 GATT 정리 실패 · 예약 유지 · 앱 재시작 필요"
+        support.reason == "DESTROY_FAILED" ->
+            "지원 조회 정리 실패 · 앱 재시작 필요"
+        state.bleDiagnosticActive && !ble.active ->
+            "BLE 예약 해제 미확인 · 앱 재시작 필요"
+        state.associations.size != 1 ->
+            "설정에서 차량을 정확히 한 대 등록하세요."
+        !state.bluetoothPermission -> "설정에서 Bluetooth 연결 권한을 허용하세요."
+        !state.bluetooth -> "Bluetooth를 켜세요."
+        state.enabled || state.observing || state.observationStartPending || state.observationServiceRunning ->
+            "접근·관찰 진단을 먼저 중지하세요."
+        state.speechDiagnosticActive -> "음성 진단을 먼저 취소하세요."
+        state.sessionId != null -> "진행 중인 마이크·진단을 먼저 중지하세요."
+        else -> null
+    }
+    AppSection("BLE 연결 진단") {
+        DetailRow("현재 단계", bleStatusLabel(ble.status))
+        if (ble.status == BleProbeStatus.CLEANUP_FAILED) {
+            Text(
+                "로컬 GATT 정리 실패 · 예약 유지 · 앱 재시작 필요",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        ble.reason?.let { DetailRow("막힘·진단 코드", it) }
+        Button(
+            onClick = actions.startBle,
+            enabled = !ble.active && !state.bleDiagnosticActive &&
+                ble.status != BleProbeStatus.CLEANUP_FAILED && support.reason != "DESTROY_FAILED",
+            shape = MaterialTheme.shapes.medium,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        ) { Text("BLE 연결 진단 시작") }
+        blocked?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+        if (support.status == SpeechProbeStatus.RUNNING) {
+            Text("시작하면 진행 중 지원 조회를 취소합니다.", style = MaterialTheme.typography.bodySmall)
+        }
+        Text(
+            "등록된 차량만 사용합니다. 마이크 권한·새 스캔·VIN 재입력은 필요하지 않습니다.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            "RX 구독 확인은 차량 인증이나 제어 권한이 아닙니다. 차량 명령은 전송하지 않습니다.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        AppDisclosure(
+            expanded = detailsExpanded,
+            expandLabel = "연결·정리 증거 보기",
+            collapseLabel = "연결·정리 증거 접기",
+            onToggle = { detailsExpanded = !detailsExpanded },
+        ) {
+            DetailRow("GATT 연결 콜백", bleEvidence(ble.connected))
+            DetailRow("Tesla 서비스", bleEvidence(ble.serviceFound))
+            DetailRow("TX characteristic", bleEvidence(ble.txFound))
+            DetailRow("RX characteristic", bleEvidence(ble.rxFound))
+            DetailRow("RX 구독 완료 콜백", bleEvidence(ble.subscriptionConfirmed))
+            DetailRow("원격 구독 해제 (CCCD 읽기)", bleEvidence(ble.remoteUnsubscribeConfirmed))
+            DetailRow("연결 끊김 콜백", bleEvidence(ble.disconnectConfirmed))
+            DetailRow("로컬 close 호출", if (ble.localClosed) "호출 성공" else "성공 미확인")
+            DetailRow("수신 횟수", ble.notificationCount.toString())
+            DetailRow("경과", "${ble.elapsedMs} ms")
+            DetailRow("BLE 예약", if (state.bleDiagnosticActive) "유지 중" else "없음")
+            Text(
+                "원격 해제는 CCCD 값 0을 읽어 확인합니다. 로컬 close 성공은 원격 해제·끊김 확인을 대신하지 않습니다. TX 쓰기·키 등록·인증은 수행하지 않습니다.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+private fun bleEvidence(confirmed: Boolean) = if (confirmed) "확인됨" else "미확인"
+
+private fun bleStatusLabel(status: BleProbeStatus): String = when (status) {
+    BleProbeStatus.IDLE -> "시험 전"
+    BleProbeStatus.BLOCKED -> "시작 조건 미충족"
+    BleProbeStatus.CONNECTING -> "GATT 연결 중"
+    BleProbeStatus.DISCOVERING -> "서비스·TX/RX 확인 중"
+    BleProbeStatus.SUBSCRIBING -> "RX 구독 완료 대기"
+    BleProbeStatus.OBSERVING -> "RX 구독 확인 · 짧은 관찰 중"
+    BleProbeStatus.CLEANING_UP -> "구독 해제·연결 정리 중"
+    BleProbeStatus.COMPLETE -> "진단 종료 · 개별 증거는 상세 확인"
+    BleProbeStatus.CANCELED -> "진단 취소"
+    BleProbeStatus.TIMED_OUT -> "시간 초과"
+    BleProbeStatus.FAILED -> "진단 실패"
+    BleProbeStatus.CLEANUP_FAILED -> "로컬 정리 실패 · 재시작 필요"
+}
+
+private fun supportQueryBlockedReason(
+    state: DiagnosticState,
+    support: SpeechProbeState,
+    trial: SpeechTrialState,
+): String? = when {
+    support.reason == "DESTROY_FAILED" -> "지원 조회 정리 실패 · 앱 재시작 필요"
+    state.bleDiagnosticActive -> "BLE 연결 진단·정리 중에는 지원 조회할 수 없습니다."
+    trial.active || state.speechDiagnosticActive -> "음성 진단을 먼저 취소하세요."
+    state.sessionId != null -> "진행 중인 마이크·진단을 먼저 중지하세요."
+    state.enabled || state.observing || state.observationStartPending || state.observationServiceRunning ->
+        "접근·관찰 진단을 먼저 중지하세요."
+    else -> null
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -175,12 +292,14 @@ private fun SpeechDiagnostics(
     var selectedMode by remember { mutableStateOf(SpeechTrialMode.TTS_PCM) }
     var supportDetailsExpanded by remember { mutableStateOf(false) }
     var conditionsExpanded by remember { mutableStateOf(false) }
-    val canQuery = support.status != SpeechProbeStatus.RUNNING && !trial.active && !state.speechDiagnosticActive
+    val queryBlocked = supportQueryBlockedReason(state, support, trial)
+    val canQuery = support.status != SpeechProbeStatus.RUNNING && queryBlocked == null
     val canStartTrial = support.status == SpeechProbeStatus.COMPLETE &&
         support.metadata?.koKrInstalled == true &&
         state.microphonePermission &&
         !trial.active &&
         !state.speechDiagnosticActive &&
+        !state.bleDiagnosticActive &&
         state.sessionId == null &&
         !state.enabled
 
@@ -193,6 +312,7 @@ private fun SpeechDiagnostics(
         ) {
             Text(if (support.status == SpeechProbeStatus.RUNNING) "지원 조회 취소" else "지원 확인")
         }
+        queryBlocked?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         AppDisclosure(
             expanded = supportDetailsExpanded,
             expandLabel = "지원 상세 보기",
@@ -326,12 +446,15 @@ private fun MicrophoneDiagnostics(state: DiagnosticState, actions: AppActions) {
         Button(
             onClick = actions.startMicrophone,
             shape = MaterialTheme.shapes.medium,
-            enabled = state.sessionId == null && !state.speechDiagnosticActive,
+            enabled = state.sessionId == null && !state.speechDiagnosticActive && !state.bleDiagnosticActive,
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 48.dp),
         ) {
             Text("수동 마이크 10초 시험 시작")
+        }
+        if (state.bleDiagnosticActive) {
+            Text("BLE 연결 진단·정리가 끝나야 마이크 시험을 시작할 수 있습니다.", style = MaterialTheme.typography.bodySmall)
         }
         OutlinedButton(
             onClick = actions.stopSession,
@@ -368,12 +491,16 @@ private fun ApproachDiagnostics(state: DiagnosticState, actions: AppActions) {
         Button(
             onClick = { actions.setApproachEnabled(!(state.enabled || state.observationStartPending)) },
             shape = MaterialTheme.shapes.medium,
-            enabled = !state.speechDiagnosticActive || state.enabled || state.observationStartPending,
+            enabled = (!state.speechDiagnosticActive && !state.bleDiagnosticActive) ||
+                state.enabled || state.observationStartPending,
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 48.dp),
         ) {
             Text(if (state.enabled || state.observationStartPending) "접근 관찰 중지" else "접근 관찰 시작")
+        }
+        if (state.bleDiagnosticActive) {
+            Text("BLE 연결 진단·정리가 끝나야 접근 관찰을 시작할 수 있습니다.", style = MaterialTheme.typography.bodySmall)
         }
         OutlinedButton(
             onClick = actions.observeVehicle,
@@ -422,7 +549,9 @@ private fun ApproachDiagnostics(state: DiagnosticState, actions: AppActions) {
         OutlinedButton(
             onClick = { actions.setAutomaticMicrophone(!state.automaticMicrophoneEnabled) },
             shape = MaterialTheme.shapes.medium,
-            enabled = !state.enabled && !state.observing && !state.observationStartPending && !state.observationServiceRunning && state.sessionId == null && !state.speechDiagnosticActive,
+            enabled = !state.enabled && !state.observing && !state.observationStartPending &&
+                !state.observationServiceRunning && state.sessionId == null &&
+                !state.speechDiagnosticActive && !state.bleDiagnosticActive,
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 48.dp),
@@ -453,6 +582,7 @@ private fun ApproachDiagnostics(state: DiagnosticState, actions: AppActions) {
 }
 
 private fun automaticMicrophoneState(state: DiagnosticState) = when {
+    state.bleDiagnosticActive -> "BLE 연결 진단·정리가 끝나야 모드를 바꿀 수 있습니다."
     state.enabled || state.observing -> "모드 변경 전 접근 진단을 비활성화하세요."
     state.sessionId != null -> "진행 중인 캡처가 끝나야 모드를 바꿀 수 있습니다 · 세션 즉시 종료를 사용하세요."
     state.speechDiagnosticActive -> "음성 진단 오디오 예약이 남아 있어 모드를 바꿀 수 없습니다."
@@ -580,6 +710,8 @@ private fun trialStartBlockedReason(
     trial: SpeechTrialState,
 ) = when {
     trial.reason?.contains("RESTART_REQUIRED") == true -> "자원 정리 실패가 남아 앱 재시작이 필요합니다"
+    support.reason == "DESTROY_FAILED" -> "지원 조회 정리 실패 · 앱 재시작 필요"
+    state.bleDiagnosticActive -> "BLE 연결 진단·정리가 끝나야 음성 시험을 시작할 수 있습니다"
     trial.active -> "진행 중인 음성 시험을 먼저 취소하거나 종료하세요"
     state.speechDiagnosticActive -> "음성 진단 오디오 예약이 남아 있습니다 · 다른 진단의 종료 여부를 확인하세요"
     state.sessionId != null -> "기존 마이크 세션이 점유 중입니다 · 즉시 종료 후 다시 시도하세요"

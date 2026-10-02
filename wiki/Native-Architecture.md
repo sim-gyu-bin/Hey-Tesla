@@ -26,14 +26,15 @@ React Native나 JavaScript 브리지는 사용하지 않는다. UI, 권한, Andr
 | `MainActivity.kt` | Activity 소유 probe와 상태 수집, 사용자 권한·설정 진입, VIN을 RAM에서만 처리하는 정확 광고명 CDM chooser. 화면 이탈 시 수동 진단 정리 |
 | `ui/AppActions.kt` / `ui/HeyTeslaApp.kt` | UI 효과의 기존 Activity 콜백 연결, 홈·설정·진단 목적지와 뒤로 이동. 진단 목적지를 떠나기 전에 명시적 취소 호출 |
 | `ui/HomeScreen.kt` / `ui/SettingsScreen.kt` | 실제 런타임 상태의 짧은 요약·다음 행동, 차량 등록과 권한·기본 비서 설정. 가짜 차량 상태·명령 버튼 없음 |
-| `ui/DiagnosticsScreen.kt` | 음성·마이크·접근·이벤트 탭, 합성 파일 기본 선택, 고정 중지 영역, 결과 요약·펼친 기술 상세. 탭 전환 전에도 수동 진단 정리 |
+| `ui/DiagnosticsScreen.kt` | 음성·BLE 연결·마이크·접근·이벤트 진단, 실행/취소와 접힌 증거 상세. 탭 전환 전 수동 진단 정리 |
 | `ui/AppTheme.kt` / `ui/AppComponents.kt` | 차콜 색상·타이포의 단일 원본과 설정 행·제목·상세 행의 공통 표현 및 접근성 의미 |
-| `DiagnosticApp.kt` | 프로세스 내 상태·이벤트, 관찰 ON 요청·서비스 소유권 게이트, 기본 비서·권한 조건, DataStore의 비민감 활성화 선호. 수동 STT 예약과 접근·캡처의 상호 배제 |
+| `DiagnosticApp.kt` | 프로세스 내 상태·이벤트, 관찰 ON 요청·서비스 소유권 게이트, 기본 비서·권한 조건, DataStore의 비민감 활성화 선호. 수동 STT·BLE 진단 예약과 접근·캡처의 상호 배제 |
 | `FieldEventLog.kt` | 허용된 비민감 이벤트의 JSONL 인코딩·단일 IO writer·제한된 큐·2 MiB append 전용 파일. 저장 대기·유실·한도·실패 상태 제공 |
 | `AccessServices.kt` | 시스템 BLE presence 콜백과 기본 비서 경로, 음성 비서 진단 안내 |
 | `ObservationService.kt` | 마이크와 분리된 `connectedDevice` FGS·지속 알림, 등록 차량 CDM 관찰 시작·종료. 앱·알림 OFF·실패·서비스 파괴의 정리 |
 | `MicrophoneService.kt` | microphone FGS, 16 kHz PCM 입력의 개수·RMS 요약, silenced·만료·종료 처리. 오디오 저장·STT 없음 |
 | `SessionPolicy.kt` | 캡처 단일 세션·만료·실제 이탈·cooldown과 관찰 요청 토큰 정책. 이전 START·STOP이 새 관찰 소유권을 변경하지 못하게 함 |
+| `BleConnectionProbe.kt` / `BleGattSession.kt` / `BleCccdSubscription.kt` | Activity 소유의 등록 차량 GATT 연결·Tesla 서비스/TX/RX 확인·RX 구독·짧은 관찰과 bounded 정리. 주소는 RAM에서 바이트 배열 API로 해석하며 TX 쓰기·인증·명령은 없음. CCCD 해제는 성공한 정확한 `[0, 0]` readback만 증거로 인정 |
 | `UnsupportedRecognitionService.kt` | Android 비서 등록에 필수인 인식 서비스. 인식·지원 검사에는 명시적 비지원 오류를 반환하고 캡처·모델 다운로드·외부 인식을 시작하지 않음 |
 | `SessionPolicyTest.kt` | 정책 경계 8개 회귀 테스트. 감지 기준 초기화 시 대기 세션 폐기·실제 이탈 및 cooldown 유지 포함. 실제 OS·차량 접근 시험의 대체물이 아님 |
 | `ObservationLifecycleTest.kt` | 관찰 시작 중 OFF, 낡은 START·STOP·서비스 종료, 중복 ON, 종료 후 명시적 재시작, 새 프로세스의 이전 intent 거부 경계 6개 |

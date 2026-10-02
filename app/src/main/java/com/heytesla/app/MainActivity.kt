@@ -35,6 +35,9 @@ class MainActivity : ComponentActivity() {
     private val speechTrialState = MutableStateFlow(SpeechTrialState())
     private val speechTrial = speechTrialState.asStateFlow()
     private lateinit var speechRecognitionProbe: SpeechRecognitionProbe
+    private val bleProbeState = MutableStateFlow(BleProbeState())
+    private val bleProbe = bleProbeState.asStateFlow()
+    private lateinit var bleConnectionProbe: BleConnectionProbe
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         runtime.refresh()
         runtime.event("RUNTIME_PERMISSION_RESULT")
@@ -53,6 +56,7 @@ class MainActivity : ComponentActivity() {
         )
         speechSupportProbe = SpeechSupportProbe(applicationContext, speechSupportState) { runtime.event(it) }
         speechRecognitionProbe = SpeechRecognitionProbe(applicationContext, speechTrialState, runtime)
+        bleConnectionProbe = BleConnectionProbe(applicationContext, bleProbeState, runtime)
         val actions = AppActions(
             requestPermission = { permission -> permissionRequest.launch(arrayOf(permission)) },
             openSystemSettings = { action ->
@@ -63,39 +67,42 @@ class MainActivity : ComponentActivity() {
                 })
             },
             associateVehicle = ::associate,
-            setApproachEnabled = runtime::setEnabled,
+            setApproachEnabled = { enabled ->
+                if (!enabled || cancelSupportForStart()) runtime.setEnabled(enabled)
+            },
             setAutomaticMicrophone = runtime::setAutomaticMicrophone,
-            observeVehicle = runtime::startObserving,
+            observeVehicle = { if (cancelSupportForStart()) runtime.startObserving() },
             refresh = runtime::refresh,
-            startMicrophone = { runtime.manualStart(this) },
+            startMicrophone = { if (cancelSupportForStart()) runtime.manualStart(this) },
             stopSession = {
                 speechSupportProbe.cancel()
                 speechRecognitionProbe.cancel()
+                bleConnectionProbe.cancel()
                 runtime.stop("USER_STOP")
             },
-            querySupport = {
-                if (!speechTrialState.value.active && !runtime.state.value.speechDiagnosticActive) {
-                    speechSupportProbe.query()
-                }
-            },
+            querySupport = ::querySupport,
             cancelSupport = { speechSupportProbe.cancel() },
             startTrial = { mode ->
                 val support = speechSupportState.value
-                speechSupportProbe.cancel()
-                speechRecognitionProbe.start(
-                    mode,
-                    support.status == SpeechProbeStatus.COMPLETE && support.metadata?.koKrInstalled == true,
-                )
+                if (cancelSupportForStart()) {
+                    speechRecognitionProbe.start(
+                        mode,
+                        support.status == SpeechProbeStatus.COMPLETE && support.metadata?.koKrInstalled == true,
+                    )
+                }
             },
             finishCapture = { speechRecognitionProbe.finishCapture() },
             cancelTrial = { speechRecognitionProbe.cancel() },
+            startBle = ::startBle,
+            cancelBle = { bleConnectionProbe.cancel() },
             leaveDiagnostics = ::leaveDiagnostics,
         )
         setContent {
             val state by runtime.state.collectAsState()
             val support by speechSupport.collectAsState()
             val trial by speechTrial.collectAsState()
-            HeyTeslaApp(state, support, trial, actions)
+            val ble by bleProbe.collectAsState()
+            HeyTeslaApp(state, support, trial, ble, actions)
         }
     }
 
@@ -104,6 +111,7 @@ class MainActivity : ComponentActivity() {
         speechSupportProbe.cancel()
         runtime.activityVisible = false
         speechRecognitionProbe.cancel()
+        bleConnectionProbe.cancel()
         if (runtime.policy.current?.let { !it.automatic && !it.diagnostic } == true) runtime.stop("MANUAL_UI_HIDDEN")
         runtime.event("UI_PAUSED")
         super.onPause()
@@ -112,14 +120,59 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         speechSupportProbe.cancel()
         speechRecognitionProbe.cancel()
+        bleConnectionProbe.cancel()
         super.onDestroy()
     }
 
     private fun leaveDiagnostics() {
         speechSupportProbe.cancel()
         speechRecognitionProbe.cancel()
+        bleConnectionProbe.cancel()
         // Navigation within this Activity does not invoke onPause.
         if (runtime.policy.current?.let { !it.automatic && !it.diagnostic } == true) runtime.stop("MANUAL_DIAGNOSTICS_HIDDEN")
+    }
+
+    private fun querySupport() {
+        runtime.refresh()
+        val state = runtime.state.value
+        if (speechSupportState.value.reason == "DESTROY_FAILED") return
+        if (!runtime.activityVisible || bleProbeState.value.active || state.bleDiagnosticActive ||
+            speechTrialState.value.active || state.speechDiagnosticActive ||
+            runtime.policy.current != null || runtime.microphone != null ||
+            state.enabled || state.observing || state.observationStartPending ||
+            state.observationServiceRunning
+        ) {
+            if (speechSupportState.value.status != SpeechProbeStatus.RUNNING) {
+                speechSupportState.value = SpeechProbeState(
+                    status = SpeechProbeStatus.FAILED,
+                    reason = "DIAGNOSTIC_BUSY",
+                )
+            }
+            runtime.event("SPEECH_SUPPORT_DIAGNOSTIC_BUSY")
+            return
+        }
+        speechSupportProbe.query()
+    }
+
+    private fun startBle() {
+        speechSupportProbe.cancel()
+        if (bleProbeState.value.active || runtime.state.value.bleDiagnosticActive) return
+        if (speechSupportState.value.reason == "DESTROY_FAILED") {
+            bleProbeState.value = BleProbeState(
+                status = BleProbeStatus.BLOCKED,
+                reason = "SPEECH_SUPPORT_DESTROY_FAILED",
+            )
+            runtime.event("BLE_SUPPORT_CLEANUP_BLOCKED")
+            return
+        }
+        bleConnectionProbe.start()
+    }
+
+    private fun cancelSupportForStart(): Boolean {
+        speechSupportProbe.cancel()
+        if (speechSupportState.value.reason != "DESTROY_FAILED") return true
+        runtime.event("SPEECH_SUPPORT_CLEANUP_BLOCKED")
+        return false
     }
 
     private fun settings(intent: Intent) {

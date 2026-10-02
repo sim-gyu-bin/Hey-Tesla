@@ -67,7 +67,7 @@ Android 앱은 React Native가 아닌 **Kotlin 네이티브**로 개발한다. �
 
 ## 빌드와 실행
 
-현재 소스와 최신 S23 Ultra 설치·통합 실측은 `com.heytesla.app` / `0.11.0-probe`(`versionCode=11`)다. 이전 버전의 직접 발화·PCM 실측은 별도 기록과 구분한다. Android 16(API 36) 이상을 대상으로 하며 단일 `app` 모듈의 AGP 9.3.1, Gradle 9.5.0, 내장 Kotlin, Compose compiler plugin 2.4.10, Compose BOM 2026.06.01을 사용한다.
+현재 소스와 S23 Ultra 설치는 `com.heytesla.app` / `0.12.0-probe`(`versionCode=12`)다. BLE 연결 진단과 이전 `0.11.0-probe`의 음성 통합 실측은 구분한다. Android 16(API 36) 이상을 대상으로 하며 단일 `app` 모듈의 AGP 9.3.1, Gradle 9.5.0, 내장 Kotlin, Compose compiler plugin 2.4.10, Compose BOM 2026.06.01을 사용한다.
 
 1. JDK 21과 Android SDK Platform 36 / Build Tools 36.0.0을 준비한다. 이 저장소의 실제 빌드는 Android Studio bundled JDK 21.0.10으로 수행했다.
 2. `JAVA_HOME`을 JDK에 맞추고, Git에서 제외된 `local.properties`에 자신의 `sdk.dir`을 지정한다. `ANDROID_HOME`과 `ANDROID_SDK_ROOT`를 함께 설정했다면 동일한 SDK를 가리키게 하거나 빌드 명령의 환경에서 일치시킨다. 전역 환경을 자동 변경하지 않는다.
@@ -83,6 +83,8 @@ APK는 `app/build/outputs/apk/debug/app-debug.apk`에 생성된다. 승인된 US
 adb -d install -r app/build/outputs/apk/debug/app-debug.apk
 adb -d shell am start -n com.heytesla.app/.MainActivity
 ```
+
+`0.12.0-probe`는 **설정 → 개발자 진단 → BLE 연결**에 등록 차량의 GATT 연결·Tesla 서비스/TX/RX 확인·RX 구독·짧은 관찰·취소/정리를 추가했다. 원격 해제는 CCCD `[0, 0]` 읽기 성공으로만 확인한다. 키·인증·TX characteristic 쓰기·차량 명령·Fleet API는 없다. APK·전체 71개 회귀·Lint(오류 0, 경고 11) 통과. S23 실제 화면에서 등록 주소 해석 오류 수정 후 GATT 시작·연결 타임아웃·취소/HOME·로컬 close와 예약 해제를 확인했으며, 실제 연결/구독 성공은 확인하지 못했다. [BLE 실측과 한계](wiki/Device-Validation.md#0120-probe--수동-ble-연결-진단)
 
 `0.11.0-probe`는 **최종 STT 판정 → 한 번의 로컬 dry-run → 입력 해제 → 한국어 오프라인 음성 안내 → 출력·포커스 해제**를 같은 진단 소유권에 연결했다. 차량 전송 경로는 없고, 안내도 실제 차량 승인·개방으로 표현하지 않는다. 빌드·58개 테스트 통과, Lint 오류 0·경고 11개. S23에서 정답 처리·거절 입력 7종·중복 시작 차단·입력 및 안내 중 취소/HOME·실제 진단 UI의 처리/안내 완료 표시를 확인했다. 모든 14회차 종료 기록에서 예약 잔존 없음과 입력·출력·포커스 해제를 확인했으며 기존 로그는 보존됐다. 제품 전체의 잠금·접근·실차 게이트 합격은 아니다. [통합 실측](wiki/Device-Validation.md#0110-probe--로컬-dry-run과-오프라인-음성-안내)
 

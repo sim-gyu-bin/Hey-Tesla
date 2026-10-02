@@ -6,6 +6,8 @@
 
 이 문서는 Android 네이티브 앱의 Tesla Fleet API 연동을 위한 설계 전제다. 구현, 인증, 서버, 실차 명령은 아직 수행하지 않았다. 현재 MVP 명령은 **프렁크 1개**이며 기본 실행 모드는 mock/dry-run이다. mock/dry-run은 실차 실패 시 조용히 fallback하는 경로가 아니며, 실차 요청 결과를 대체하거나 숨기지 않는다. 실차 동작은 사용자의 명시적 승인에 따라 별도 단계에서만 수행한다.
 
+`0.12.0-probe`의 수동 BLE 연결 진단은 별도 경로다. 등록 차량 GATT·Tesla 서비스/TX/RX·RX 구독과 정리만 검사하며 `VehicleGateway`는 여전히 로컬 dry-run이다. 연결/구독 확인은 가상 키·권한·차량 인증이 아니며 CCCD 제어 외 TX characteristic 쓰기·차량 명령·Fleet API 호출은 하지 않는다. 실제 검증 범위는 [기기 검증](Device-Validation.md#0120-probe--수동-ble-연결-진단)에 기록한다.
+
 앱 내부 UI·도메인·파서·상태 머신·게이트웨이·테스트는 Kotlin, Compose, Coroutines/StateFlow, DataStore로 구현한다. 서버 필요성이 확인된 경우에만 Node.js+TypeScript를 사용할 수 있으나, Tesla 명령 서명은 공식 Go `vehicle-command` 서명 프록시를 재사용한다. Node 서버를 먼저 개발하는 방식은 채택하지 않는다. SDK·라이브러리 버전은 구현 시 실제 호환성을 검증한 뒤 고정한다. 외부 음성 SDK는 미선정·미승인 상태다.
 
 ## MVP 명령 계약

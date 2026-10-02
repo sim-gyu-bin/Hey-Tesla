@@ -35,6 +35,16 @@ Kotlin domain 계층이 정책 전이를 정의하고, Android 서비스가 단�
 - 처리 전 취소는 `CANCELED`로 처리 차단한다. 로컬 처리 후 취소는 `PROCESSED`/`UNKNOWN`을 보존하고 안내만 중단한다. 처리된 일을 미처리로 가장하지 않는다.
 - 신뢰도 제외는 승인된 로컬 진단에만 해당한다. 아래 실차용 신선한 P·계정/차량 권한·근접·음성 확인·만료 게이트를 생략하지 않는다.
 
+### 구현된 BLE 연결 진단 전이
+
+`0.12.0-probe`의 수동 BLE 진단은 화면 표시·Bluetooth 권한/ON·단일 등록을 요구하며 접근 관찰·오디오 진단과 같은 예약 경계에서 배제한다. `CONNECTING → DISCOVERING → SUBSCRIBING → OBSERVING → CLEANING_UP`를 단계별 제한으로 진행한다. RX 알림은 횟수만 세고 payload는 읽거나 저장하지 않는다.
+
+- 취소·화면 이탈·Bluetooth OFF·권한/등록 상실·단계 만료는 예약을 먼저 풀지 않고 정리로 전환한다. 진행 중 enable 쓰기 뒤 disable을 직렬화한다.
+- write callback은 요청 ID가 없어 중복 enable과 disable을 구별할 수 없다. 원격 구독 해제는 별도 CCCD 읽기가 성공하고 값이 정확한 두 바이트 `[0, 0]`일 때만 확인한다.
+- 구독 확인·원격 해제·disconnect callback·로컬 close 성공은 별도 증거다. close 성공 때만 예약을 해제하며 close 실패는 `CLEANUP_FAILED`와 예약 유지로 재시작을 요구한다. 늦은 다른 token/GATT callback은 현재 소유자를 변경하지 못한다.
+- 종료 상태는 인증·명령 승인·실차 제어 성공이 아니다. 키 등록·TX characteristic 쓰기·Fleet API는 구현 범위 밖이다.
+
+
 
 ## 전이표
 

@@ -20,5 +20,7 @@ internal class AppActions(
     val finishCapture: () -> Unit,
     /** 인식·정리·TTS 어느 단계든 동일 소유권을 취소한다. 정리 불명 예약은 풀지 않는다. */
     val cancelTrial: () -> Unit,
+    val startBle: () -> Unit,
+    val cancelBle: () -> Unit,
     val leaveDiagnostics: () -> Unit,
 )

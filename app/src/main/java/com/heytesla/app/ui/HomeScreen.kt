@@ -15,6 +15,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.heytesla.app.BleProbeState
+import com.heytesla.app.BleProbeStatus
 import com.heytesla.app.DiagnosticState
 import com.heytesla.app.SpeechProbeState
 import com.heytesla.app.SpeechProbeStatus
@@ -25,16 +27,32 @@ internal fun HomeScreen(
     state: DiagnosticState,
     support: SpeechProbeState,
     trial: SpeechTrialState,
+    ble: BleProbeState,
     onOpenSettings: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onStopSession: () -> Unit,
 ) {
-    val restartRequired = trial.reason?.contains("RESTART_REQUIRED") == true
+    val restartRequired = trial.reason?.contains("RESTART_REQUIRED") == true ||
+        ble.status == BleProbeStatus.CLEANUP_FAILED || (state.bleDiagnosticActive && !ble.active)
     val processing = state.sessionId != null || state.speechDiagnosticActive || trial.active
     val status: String
     val nextAction: () -> Unit
     val nextLabel: String
     when {
+        ble.status == BleProbeStatus.CLEANUP_FAILED || (state.bleDiagnosticActive && !ble.active) -> {
+            status = "BLE 정리·예약 해제가 확인되지 않았어요. 앱을 다시 시작해 주세요."
+            nextAction = onOpenDiagnostics
+            nextLabel = "진단 상태 보기"
+        }
+        ble.active -> {
+            status = if (ble.status == BleProbeStatus.CLEANING_UP) {
+                "BLE 연결을 정리하고 있어요."
+            } else {
+                "BLE 연결 진단이 진행 중이에요."
+            }
+            nextAction = onStopSession
+            nextLabel = "BLE 연결 진단 취소"
+        }
         restartRequired -> {
             status = "오디오 정리에 실패했어요. 앱을 다시 시작해 주세요."
             nextAction = onOpenDiagnostics

@@ -66,6 +66,7 @@ data class DiagnosticState(
     val silenced: Boolean? = null,
     val stopReason: String = "PROCESS_START_OFF",
     val speechDiagnosticActive: Boolean = false,
+    val bleDiagnosticActive: Boolean = false,
     val events: List<String> = emptyList(),
     val fieldLog: FieldLogStatus = FieldLogStatus(),
 )
@@ -84,6 +85,9 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     var activityVisible = false
     private var generation = 0L
     private var speechDiagnosticCancel: (() -> Unit)? = null
+    private var speechDiagnosticId: Long? = null
+    private var bleDiagnosticId: Long? = null
+    private var bleDiagnosticCancel: (() -> Unit)? = null
     private val fieldLog = FieldEventSink(File(app.noBackupFilesDir, FIELD_LOG_RELATIVE_PATH))
     private val processId = UUID.randomUUID().toString()
     private val appVersion = try {
@@ -99,7 +103,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
         override fun onReceive(context: Context?, intent: Intent?) {
             refresh()
             if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
-                if (!state.value.bluetooth && policy.current?.diagnostic == false) stop("BLUETOOTH_OFF")
+                if (!state.value.bluetooth && (policy.current?.diagnostic == false || state.value.bleDiagnosticActive)) stop("BLUETOOTH_OFF")
                 event("BLUETOOTH_STATE_CHANGED")
             }
         }
@@ -201,23 +205,61 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     internal fun acquireSpeechDiagnostic(cancel: () -> Unit): SessionPolicy.Session? {
         check(Looper.myLooper() == Looper.getMainLooper())
         if (!activityVisible || policy.current != null || microphone != null ||
-            state.value.enabled || state.value.observationStartPending ||
-            state.value.observationServiceRunning || state.value.speechDiagnosticActive ||
+            state.value.enabled || state.value.observing || state.value.observationStartPending ||
+            state.value.observationServiceRunning || state.value.speechDiagnosticActive || state.value.bleDiagnosticActive ||
             !granted(Manifest.permission.RECORD_AUDIO)
         ) return null
         val session = policy.startDiagnostic(now()) ?: return null
         ++generation
         speechDiagnosticCancel = cancel
+        speechDiagnosticId = session.id
         update { it.copy(speechDiagnosticActive = true) }
         return session
     }
 
     internal fun releaseSpeechDiagnostic(id: Long) {
         check(Looper.myLooper() == Looper.getMainLooper())
-        if (policy.current?.let { it.id == id && it.diagnostic } != true) return
+        if (speechDiagnosticId != id || policy.current?.let { it.id == id && it.diagnostic } != true) return
         policy.finish(id, now())
         speechDiagnosticCancel = null
+        speechDiagnosticId = null
         update { it.copy(speechDiagnosticActive = false) }
+    }
+
+    /** BLE도 기존 current를 사용한다. 오디오·알림·스캔 권한은 BLE 연결 진단의 조건이 아니다. */
+    internal fun acquireBleDiagnostic(cancel: () -> Unit): SessionPolicy.Session? {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        refresh()
+        if (bleDiagnosticBlockedReason() != null) return null
+        val session = policy.startDiagnostic(now()) ?: return null
+        ++generation
+        bleDiagnosticId = session.id
+        bleDiagnosticCancel = cancel
+        update { it.copy(bleDiagnosticActive = true) }
+        return session
+    }
+
+    /** GATT 소유자만 close 성공(또는 GATT 생성 전 거절) 뒤 호출한다. 만료·외부 stop은 해제가 아니다. */
+    internal fun releaseBleDiagnostic(id: Long) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (bleDiagnosticId != id || policy.current?.let { it.id == id && it.diagnostic } != true) return
+        policy.finish(id, now())
+        bleDiagnosticId = null
+        bleDiagnosticCancel = null
+        update { it.copy(bleDiagnosticActive = false) }
+    }
+
+    internal fun bleDiagnosticBlockedReason(): String? {
+        val s = state.value
+        if (!activityVisible) return "VISIBLE_UI_REQUIRED"
+        if (policy.current != null || microphone != null || s.speechDiagnosticActive || s.bleDiagnosticActive) return "LEASE_UNAVAILABLE"
+        if (s.enabled || s.observing || s.observationStartPending || s.observationServiceRunning) return "OBSERVATION_ACTIVE"
+        if (!app.packageManager.hasSystemFeature(PackageManager.FEATURE_COMPANION_DEVICE_SETUP)) return "CDM_UNSUPPORTED"
+        if (cdm == null) return "CDM_UNAVAILABLE"
+        if (s.associations.size != 1) return "SINGLE_ASSOCIATION_REQUIRED"
+        if (!granted(Manifest.permission.BLUETOOTH_CONNECT)) return "BLUETOOTH_PERMISSION_REQUIRED"
+        if (!s.bluetooth) return "BLUETOOTH_OFF"
+        return null
     }
 
     fun refresh() {
@@ -247,6 +289,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
             return
         }
         if (current.speechDiagnosticActive) { event("SPEECH_TRIAL_ENABLE_BLOCKED"); return }
+        if (current.bleDiagnosticActive) { event("BLE_PROBE_ENABLE_BLOCKED"); return }
         if (!activityVisible) { observationStartRejected("OBSERVATION_REQUIRES_VISIBLE_UI"); return }
         refresh()
         observationBlockedReason()?.let { observationStartRejected(it); return }
@@ -283,6 +326,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     /** 스냅샷은 refresh가 갱신한다. 관찰 전용에는 기본 비서·마이크 권한을 요구하지 않는다. */
     internal fun observationBlockedReason(): String? {
         val s = state.value
+        if (s.speechDiagnosticActive || s.bleDiagnosticActive || policy.current?.diagnostic == true) return "DIAGNOSTIC_OBSERVATION_BLOCKED"
         if (!app.packageManager.hasSystemFeature(PackageManager.FEATURE_COMPANION_DEVICE_SETUP)) return "CDM_UNSUPPORTED"
         if (cdm == null) return "CDM_UNAVAILABLE"
         if (s.associations.size != 1) return if (s.associations.isEmpty()) "ASSOCIATION_REQUIRED" else "MULTIPLE_ASSOCIATIONS_UNSUPPORTED"
@@ -299,6 +343,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     internal fun acceptsObservationRequest(token: String) = observationPolicy.pendingRequest == token
 
     internal fun observationStarted(service: ObservationService, token: String): Boolean {
+        if (state.value.speechDiagnosticActive || state.value.bleDiagnosticActive || policy.current?.diagnostic == true) return false
         if (!observationPolicy.promote(token)) return false
         observationService = service
         update { it.copy(enabled = true, observationServiceRunning = true, observationStartPending = false) }
@@ -349,7 +394,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     }
 
     /**
-     * 자동 마이크 동의는 접근 진단이 꺼져 있고 캡처·음성 예약이 없을 때만 바꾼다.
+     * 자동 마이크 동의는 접근 진단이 꺼져 있고 캡처·음성·BLE 예약이 없을 때만 바꾼다.
      * 진단 비활성화는 동의와 지연 작업을 함께 해제한다.
      */
     fun setAutomaticMicrophone(enabled: Boolean) {
@@ -359,6 +404,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
             return
         }
         if (s.speechDiagnosticActive) { event("SPEECH_TRIAL_AUTOMATIC_MIC_BLOCKED"); return }
+        if (s.bleDiagnosticActive) { event("BLE_PROBE_AUTOMATIC_MIC_BLOCKED"); return }
         if (policy.current != null || microphone != null) { event("AUTOMATIC_MIC_BLOCKED_SESSION_RUNNING"); return }
         if (s.automaticMicrophoneEnabled == enabled) return
         if (enabled) {
@@ -379,6 +425,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     }
 
     fun startObserving() {
+        if (state.value.speechDiagnosticActive || state.value.bleDiagnosticActive) { event("DIAGNOSTIC_OBSERVE_BLOCKED"); return }
         refresh()
         if (!state.value.observationServiceRunning) { event("OBSERVE_REQUIRES_ENABLE"); return }
         observationService?.startObserving()
@@ -387,6 +434,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     fun presence(id: Int, event: Int) {
         if (Looper.myLooper() != Looper.getMainLooper()) { handler.post { presence(id, event) }; return }
         if (state.value.speechDiagnosticActive) { this.event("SPEECH_TRIAL_APPROACH_BLOCKED"); return }
+        if (state.value.bleDiagnosticActive) { this.event("BLE_PROBE_APPROACH_BLOCKED"); return }
         refresh()
         if (id !in state.value.associations || observationService?.observedAssociationId != id ||
             !state.value.enabled || !state.value.observationServiceRunning || !state.value.observing
@@ -435,13 +483,15 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     fun automaticAllowed(): Boolean {
         refresh()
         val s = state.value
-        return !s.speechDiagnosticActive && s.enabled && s.observationServiceRunning &&
+        return !s.speechDiagnosticActive && !s.bleDiagnosticActive && policy.current?.diagnostic != true &&
+            s.enabled && s.observationServiceRunning &&
             s.automaticMicrophoneEnabled && s.observing &&
             s.bluetooth && s.assistant && s.microphonePermission
     }
 
     fun manualStart(context: Context) {
         if (state.value.speechDiagnosticActive) { event("SPEECH_TRIAL_MANUAL_BLOCKED"); return }
+        if (state.value.bleDiagnosticActive) { event("BLE_PROBE_MANUAL_BLOCKED"); return }
         if (!activityVisible || !granted(Manifest.permission.RECORD_AUDIO)) { event("MANUAL_REQUIRES_VISIBLE_UI_AND_MIC_PERMISSION"); return }
         val session = policy.startManual(now()) ?: run { event("SESSION_ALREADY_RUNNING"); return }
         ++generation
@@ -459,6 +509,8 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
 
     fun launchMicrophone(context: Context, session: SessionPolicy.Session) {
         if (state.value.speechDiagnosticActive) { event("SPEECH_TRIAL_MICROPHONE_BLOCKED"); return }
+        if (state.value.bleDiagnosticActive) { event("BLE_PROBE_MICROPHONE_BLOCKED"); return }
+        if (session.diagnostic || !policy.accepts(session.id)) { event("MICROPHONE_SESSION_REJECTED"); return }
         try {
             context.startForegroundService(Intent(context, MicrophoneService::class.java).putExtra("session_id", session.id))
         } catch (_: SecurityException) { stop("FGS_SECURITY_WHILE_IN_USE_DENIED") }
@@ -467,9 +519,11 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     }
 
     fun stop(reason: String) {
-        // 진단 current는 STT·TTS 실제 해제 뒤 소유자만 종료한다. 외부 stop은 취소만 전달한다.
-        if (policy.current?.diagnostic == true) {
-            speechDiagnosticCancel?.invoke()
+        // 진단 current는 STT·TTS/GATT 실제 해제 뒤 소유자만 종료한다. 외부 stop은 취소만 전달한다.
+        val diagnostic = policy.current?.takeIf { it.diagnostic }
+        if (diagnostic != null) {
+            if (bleDiagnosticId == diagnostic.id) bleDiagnosticCancel?.invoke()
+            else if (speechDiagnosticId == diagnostic.id) speechDiagnosticCancel?.invoke()
             event(reason)
             return
         }

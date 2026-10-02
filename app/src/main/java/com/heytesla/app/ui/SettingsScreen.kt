@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -14,6 +15,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -25,6 +27,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.heytesla.app.BleProbeState
+import com.heytesla.app.BleProbeStatus
 import com.heytesla.app.DiagnosticState
 
 private enum class SettingsDetail { VEHICLE, PERMISSIONS, ASSISTANT }
@@ -32,6 +36,7 @@ private enum class SettingsDetail { VEHICLE, PERMISSIONS, ASSISTANT }
 @Composable
 internal fun SettingsScreen(
     state: DiagnosticState,
+    ble: BleProbeState,
     actions: AppActions,
     onOpenDiagnostics: () -> Unit,
 ) {
@@ -105,6 +110,22 @@ internal fun SettingsScreen(
         }
 
         AppSection(title = "개발자") {
+            if (ble.status == BleProbeStatus.CLEANUP_FAILED || (state.bleDiagnosticActive && !ble.active)) {
+                Text(
+                    "BLE 정리·예약 해제 미확인 · 앱 재시작 필요",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else if (ble.active) {
+                Text(
+                    if (ble.status == BleProbeStatus.CLEANING_UP) "BLE 연결 정리 중" else "BLE 연결 진단 중",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                OutlinedButton(
+                    onClick = actions.cancelBle,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) { Text("BLE 연결 진단 취소") }
+            }
             AppRow(
                 title = "개발자 진단",
                 subtitle = "인식·마이크 시험 · 이벤트",

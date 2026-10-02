@@ -6,7 +6,7 @@
 
 제품 검증 계획과 실제 실행 결과를 구분한다. 2026-09-22에 S23 Ultra에서 `0.1.0-probe` 수동 마이크, `0.2.0-probe` 지원 조회, `0.3.0-probe` 수동 STT·RAM PCM에 이어 **`0.4.0-probe` TTS 파일 무음 인식**을 실행했다. 고정 한국어 문장 일치 2회·무음 대조 NO_MATCH·취소·재실행·해제를 확인했다. 사용자 발화·스피커 재생 없이 실행했고 새 앱 마이크 사용은 관측되지 않았다. 신뢰도 `0.0`으로 명령 실행 합격은 아니다. 실제 발화·음향·네트워크 차단·차량 association·접근·잠금·주머니는 별도다.
 
-최신 설치·통합 실측 버전은 **`0.11.0-probe`**다. 최종 STT 판정·한 번의 로컬 dry-run·입력 해제·한국어 오프라인 음성 안내·출력/포커스 해제와 실제 진단 UI·v4 종료 행을 S23에서 확인했다. 이전 버전 직접 발화·PCM 증거와 합성 입력 실측은 구분하며, 아래 기록을 실제 잠금·차량 접근·실차 명령 안전성 합격으로 확대하지 않는다.
+최신 설치·실측 버전은 **`0.12.0-probe`**다. S23에서 수동 BLE 진단의 실제 화면 조작·등록 주소 해석·GATT 시작·연결 타임아웃·로컬 close를 확인했다. 차량 연결·RX 구독 성공은 확인하지 못했다. 이전 버전 음성 통합·직접 발화·합성 입력 실측과 구분하며 잠금·차량 접근·실차 명령 안전성 합격으로 확대하지 않는다.
 
 초기 대상은 개인 사용자 1인·1차 조합이다.
 
@@ -481,6 +481,17 @@ adb -d exec-out run-as com.heytesla.app cat no_backup/field-diagnostics/events.j
 - 계측의 Activity 터치 전달로 홈→설정→음성 진단을 실제 전환했다. UI 계층에서 “호출어 확인 · 명령 후보 (전송 안 함)”, “로컬 처리됨 · 차량 승인 아님”, “음성 안내 완료”, “차량 전송 안 함”을 확인했다. 화면 보호 유지로 픽셀·큰 글자·TalkBack은 미검증이다.
 - 사용자 추가 발화·마이크 참여 시험은 보류했다. 단위 회귀의 만료·UNKNOWN 증거를 기기의 실제 만료·정리 실패·권한 철회 증거로 승격하지 않는다. 자동 접근·잠금·주머니·실차 요청은 미검증/미구현이다.
 - 일회성 host fixture·APK·계측 산출물과 기기의 시험 패키지 `com.heytesla.smoke`는 삭제 승인 없이 보존했다. 시험용 코드는 저장소에 추가하지 않았으며 앱의 상시 녹음·자동 실행 경로도 추가하지 않았다.
+
+## 0.12.0-probe — 수동 BLE 연결 진단
+
+- APK·전체 단위 회귀 71개(실패·오류·건너뜀 0)·Lint 오류 0/경고 11개. BLE 세션 10개와 CCCD readback 3개 회귀는 늦은 token/중복 callback·정리 중 예약 유지·close 실패와 정확한 해제 값 경계를 다룬다.
+- S23에 데이터 보존 업데이트했다. 새 스캔·VIN 재입력·권한 대리 승인·기본 비서 변경·OAuth·키 등록·TX characteristic 쓰기·차량 명령은 수행하지 않았다. 등록 주소는 probe 내부 RAM에만 두며 RX payload는 읽거나 저장하지 않는다.
+- 최초 실제 시작은 `BLOCKED / ASSOCIATION_RESOLVE_FAILED`였다. 같은 등록 주소를 Android SDK에 직접 전달하여 `MacAddress.toString()`은 `IllegalArgumentException`, 바이트 배열 overload는 정상 해석됨을 재현했다. 주소 원문은 기록하지 않았으며 바이트 배열 API로 수정했다.
+- 수정 후 실제 홈 → 설정 → 개발자 진단 → BLE 연결 → 시작 → 증거 펼침의 Compose 의미 계층과 물리 shell tap 9개 확인을 통과했다. 결과는 `TIMED_OUT / CONNECTING_TIMEOUT`, 연결·구독·원격 해제·disconnect 확인 false, 로컬 close true였다. 차량 거리·수면·광고 주소 안정성은 확인하지 않았으므로 원격 연결 실패의 원인을 단정하지 않는다.
+- 중복 enable/disable write callback만으로 원격 해제를 확인하지 않는다. 별도의 CCCD 읽기 성공 및 정확한 두 바이트 `[0, 0]`만 인정한다. 실차 RX 구독·CCCD readback·disconnect 성공은 이번 기기 시험에서 미확인이다.
+- Mobile MCP ref 클릭은 주입된 `mobilecli.so`의 `AgentSpec::Attach` 경로에서 SIGSEGV를 일으켰다. 도구 문제를 보고하고 해당 클릭 경로를 중단했다. 기존 자동화 브리지의 UiAutomation 독점으로 일회성 계측도 충돌했으며, 브리지를 종료한 뒤 native 계측·물리 shell tap으로 실제 화면을 검증했다. `FLAG_SECURE`는 유지했으므로 픽셀 기반 시각 검증은 미완료다.
+- 별도 취소 시험의 실제 화면 조작 11개 확인을 통과했다. UI 취소는 `CANCELED / USER_CANCELED`, HOME 이탈도 `CANCELED`로 종료됐다. 두 경로 모두 로컬 close true·BLE 예약 false였다. 연결 타임아웃 종료에서도 런타임 예약 false를 별도로 단언했다. 실제 차량 연결이 없는 상태의 정리 증거이며 구독된 실차의 원격 해제 성공으로 확대하지 않는다.
+- 검증 뒤 사용자 승인으로 일회성 host 스모크 폴더·시험 AVD(`heytesla_ble_api36`)·S23 시험 패키지 `com.heytesla.gattsmoke`를 삭제했다. 시험 프로세스도 종료했다. 앱 본체·차량 등록·기존 로그·Android SDK 이미지는 삭제하지 않았으며 저장소에는 스모크 코드를 추가하지 않았다.
 
 ## 빌드 전제
 
