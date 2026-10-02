@@ -104,7 +104,7 @@ class MainActivity : ComponentActivity() {
         speechSupportProbe.cancel()
         runtime.activityVisible = false
         speechRecognitionProbe.cancel()
-        if (runtime.policy.current?.automatic == false) runtime.stop("MANUAL_UI_HIDDEN")
+        if (runtime.policy.current?.let { !it.automatic && !it.diagnostic } == true) runtime.stop("MANUAL_UI_HIDDEN")
         runtime.event("UI_PAUSED")
         super.onPause()
     }
@@ -119,7 +119,7 @@ class MainActivity : ComponentActivity() {
         speechSupportProbe.cancel()
         speechRecognitionProbe.cancel()
         // Navigation within this Activity does not invoke onPause.
-        if (runtime.policy.current?.automatic == false) runtime.stop("MANUAL_DIAGNOSTICS_HIDDEN")
+        if (runtime.policy.current?.let { !it.automatic && !it.diagnostic } == true) runtime.stop("MANUAL_DIAGNOSTICS_HIDDEN")
     }
 
     private fun settings(intent: Intent) {

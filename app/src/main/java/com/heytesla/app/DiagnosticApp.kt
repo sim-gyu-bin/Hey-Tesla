@@ -83,6 +83,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     var microphone: MicrophoneService? = null
     var activityVisible = false
     private var generation = 0L
+    private var speechDiagnosticCancel: (() -> Unit)? = null
     private val fieldLog = FieldEventSink(File(app.noBackupFilesDir, FIELD_LOG_RELATIVE_PATH))
     private val processId = UUID.randomUUID().toString()
     private val appVersion = try {
@@ -98,7 +99,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
         override fun onReceive(context: Context?, intent: Intent?) {
             refresh()
             if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
-                if (!state.value.bluetooth && policy.current != null) stop("BLUETOOTH_OFF")
+                if (!state.value.bluetooth && policy.current?.diagnostic == false) stop("BLUETOOTH_OFF")
                 event("BLUETOOTH_STATE_CHANGED")
             }
         }
@@ -131,20 +132,26 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     fun granted(permission: String) = app.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
     fun assistantActive() = VoiceInteractionService.isActiveService(app, ComponentName(app, AssistantService::class.java))
     fun update(block: (DiagnosticState) -> DiagnosticState) { mutable.value = block(mutable.value) }
-    fun event(code: String) {
-        if (Looper.myLooper() != Looper.getMainLooper()) { handler.post { event(code) }; return }
-        record(code)
+    fun event(code: String) = event(code, null)
+
+    /**
+     * 회차 종료처럼 상세 요약이 있는 사건. 요약은 이 호출이 만든 그 행에만 붙고 다음 사건으로 넘어가지 않는다.
+     * 시작·게이트 사건은 코드 하나만 받는 형태를 그대로 쓰므로 요약 필드는 `null`로 남는다.
+     */
+    internal fun event(code: String, speechTrial: SpeechTrialSummary?) {
+        if (Looper.myLooper() != Looper.getMainLooper()) { handler.post { event(code, speechTrial) }; return }
+        record(code, speechTrial)
     }
 
     /** RAM 최근 32 목록과 영속 로그에 같은 사건을 남긴다. */
-    private fun record(code: String): String {
+    private fun record(code: String, speechTrial: SpeechTrialSummary? = null): String {
         val line = stamp(code)
         recordEvent(line)
-        persist(code)
+        persist(code, speechTrial)
         return line
     }
 
-    private fun persist(code: String) {
+    private fun persist(code: String, speechTrial: SpeechTrialSummary?) {
         try {
             // allowlist 판정과 allowlist 밖 집계는 sink가 단독으로 담당한다.
             fieldLog.enqueue(
@@ -156,6 +163,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
                     appVersion = appVersion,
                     event = code,
                     state = fieldSnapshot(),
+                    speechTrial = speechTrial,
                 ),
             )
         } catch (_: Exception) {
@@ -190,21 +198,25 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
         update { it.copy(events = (listOf(line) + it.events).take(32)) }
     }
 
-    internal fun acquireSpeechDiagnostic(): Boolean {
+    internal fun acquireSpeechDiagnostic(cancel: () -> Unit): SessionPolicy.Session? {
         check(Looper.myLooper() == Looper.getMainLooper())
         if (!activityVisible || policy.current != null || microphone != null ||
             state.value.enabled || state.value.observationStartPending ||
             state.value.observationServiceRunning || state.value.speechDiagnosticActive ||
             !granted(Manifest.permission.RECORD_AUDIO)
-        ) return false
+        ) return null
+        val session = policy.startDiagnostic(now()) ?: return null
         ++generation
-        policy.cancelPending()
+        speechDiagnosticCancel = cancel
         update { it.copy(speechDiagnosticActive = true) }
-        return true
+        return session
     }
 
-    internal fun releaseSpeechDiagnostic() {
+    internal fun releaseSpeechDiagnostic(id: Long) {
         check(Looper.myLooper() == Looper.getMainLooper())
+        if (policy.current?.let { it.id == id && it.diagnostic } != true) return
+        policy.finish(id, now())
+        speechDiagnosticCancel = null
         update { it.copy(speechDiagnosticActive = false) }
     }
 
@@ -455,6 +467,12 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     }
 
     fun stop(reason: String) {
+        // 진단 current는 STT·TTS 실제 해제 뒤 소유자만 종료한다. 외부 stop은 취소만 전달한다.
+        if (policy.current?.diagnostic == true) {
+            speechDiagnosticCancel?.invoke()
+            event(reason)
+            return
+        }
         ++generation
         policy.cancelPending()
         val session = policy.current

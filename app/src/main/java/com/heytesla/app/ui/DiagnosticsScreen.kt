@@ -33,11 +33,14 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.heytesla.app.DiagnosticState
+import com.heytesla.app.DiagnosticCommandResult
 import com.heytesla.app.FieldLogFailureCode
 import com.heytesla.app.FieldLogHealth
 import com.heytesla.app.FieldLogStatus
+import com.heytesla.app.SpeechCommandDecision
 import com.heytesla.app.SpeechProbeState
 import com.heytesla.app.SpeechProbeStatus
+import com.heytesla.app.SpeechResponseStatus
 import com.heytesla.app.SpeechTrialMode
 import com.heytesla.app.SpeechTrialState
 import com.heytesla.app.SpeechTrialStatus
@@ -226,7 +229,7 @@ private fun SpeechDiagnostics(
                 .fillMaxWidth()
                 .heightIn(min = 48.dp),
         ) {
-            Text("선택한 입력으로 시험 시작")
+            Text("선택한 입력으로 진단 시작")
         }
         if (!canStartTrial && !trial.active) {
             Text(trialStartBlockedReason(state, support, trial), style = MaterialTheme.typography.bodySmall)
@@ -273,9 +276,13 @@ private fun SpeechResult(trial: SpeechTrialState, speechDiagnosticActive: Boolea
         } else {
             DetailRow("최종 결과 수신", if (trial.finalReceived) "예" else "아니오")
             DetailRow("시험 문장 일치", when (trial.phraseMatched) { true -> "예"; false -> "아니오"; null -> "미판정" })
+            DetailRow("호출어·명령 판정", commandDecisionLabel(trial.decision))
             DetailRow("첫 결과 신뢰도", trial.confidence?.let { String.format(Locale.ROOT, "%.4f", it) } ?: "미제공·유효하지 않음")
             DetailRow("진단 상태", trial.status.label)
-            Text("낮은 점수·0.0·미제공을 합격으로 처리하지 않습니다.", style = MaterialTheme.typography.bodySmall)
+            DetailRow("로컬 dry-run", dryRunResultLabel(trial.commandResult))
+            DetailRow("음성 안내", speechResponseLabel(trial.responseStatus))
+            Text("차량 전송 안 함", style = MaterialTheme.typography.bodyMedium)
+            Text("신뢰도는 기록만 하며 이번 진단 판정에서 제외합니다. 명령 후보는 차량 실행 허가가 아닙니다.", style = MaterialTheme.typography.bodySmall)
             AppDisclosure(
                 expanded = detailsExpanded,
                 expandLabel = "결과 상세 보기",
@@ -288,6 +295,20 @@ private fun SpeechResult(trial: SpeechTrialState, speechDiagnosticActive: Boolea
                 DetailRow("PCM 전송 바이트", "${trial.pcmBytesWritten} · 소비 확인 아님")
                 DetailRow("진단 경과", trial.elapsedMs?.let { "$it ms" } ?: "미완료")
                 DetailRow("오디오 예약", speechDiagnosticActive.toString())
+                DetailRow("입력 해제 확인", if (trial.inputReleased) "확인됨" else "미확인")
+                DetailRow("한국어 오프라인 voice", if (trial.offlineVoiceSelected) "선택 확인됨" else "선택되지 않음")
+                DetailRow("출력 해제 확인", when {
+                    trial.outputReleased -> "해제됨·출력 없음"
+                    trial.active -> "사용 중 · 정리 전"
+                    else -> "해제 불명 · 재시작 필요"
+                })
+                DetailRow("오디오 포커스 반납", when {
+                    trial.audioFocusReleased -> "반납됨·획득 없음"
+                    trial.active -> "사용 중 · 정리 전"
+                    else -> "반납 불명 · 재시작 필요"
+                })
+                trial.responseReason?.let { DetailRow("음성 안내 코드", it.name) }
+                if (trial.responseCleanupFailed) DetailRow("음성 출력 정리", "정리 API 실패 기록 있음")
                 Text(
                     "무음 ERROR7은 인식 결과 없음일 수 있지만 성공 상태로 바꾸지 않습니다. 지원 조회, 최종 결과, 문장 일치, 외부 PCM 소비, 네트워크 차단 실측은 서로 다른 증거입니다.",
                     style = MaterialTheme.typography.bodySmall,
@@ -509,6 +530,36 @@ private fun mebibytes(bytes: Long) = String.format(Locale.US, "%.2f MiB", bytes 
 
 private fun reported(value: Boolean) = if (value) "보고됨" else "보고되지 않음"
 
+/** 문장 판정을 화면 문구로만 옮긴다. 어느 값도 실제 전송·합격으로 표시하지 않는다. */
+private fun commandDecisionLabel(decision: SpeechCommandDecision?) = when (decision) {
+    null -> "확인 안 됨 · 판정 없음"
+    SpeechCommandDecision.WAKE_MISSING -> "호출어 없음"
+    SpeechCommandDecision.COMMAND_MISSING -> "호출어 확인 · 명령 없음"
+    SpeechCommandDecision.COMMAND_UNSUPPORTED -> "호출어 확인 · 허용 외"
+    SpeechCommandDecision.COMMAND_CANCELED -> "호출어 확인 · 취소·부정 거절"
+    SpeechCommandDecision.FRUNK_OPEN_CANDIDATE -> "호출어 확인 · 명령 후보 (전송 안 함)"
+}
+
+private fun dryRunResultLabel(result: DiagnosticCommandResult) = when (result) {
+    DiagnosticCommandResult.NOT_ATTEMPTED -> "처리 전"
+    DiagnosticCommandResult.REJECTED -> "거절 · 실행 안 함"
+    DiagnosticCommandResult.CANCELED -> "취소 · 실행 안 함"
+    DiagnosticCommandResult.EXPIRED -> "만료 · 실행 안 함"
+    DiagnosticCommandResult.PROCESSED -> "로컬 처리됨 · 차량 승인 아님"
+    DiagnosticCommandResult.UNKNOWN -> "결과 불명 · 재시도 안 함"
+}
+
+private fun speechResponseLabel(status: SpeechResponseStatus) = when (status) {
+    SpeechResponseStatus.NOT_STARTED -> "시작 전"
+    SpeechResponseStatus.INITIALIZING -> "한국어 오프라인 음성 준비 중"
+    SpeechResponseStatus.SPEAKING -> "음성 안내 중"
+    SpeechResponseStatus.COMPLETE -> "음성 안내 완료"
+    SpeechResponseStatus.FAILED -> "음성 안내 실패"
+    SpeechResponseStatus.CANCELED -> "음성 안내 취소됨"
+    SpeechResponseStatus.EXPIRED -> "만료로 음성 안내 중단"
+    SpeechResponseStatus.SKIPPED -> "입력 해제 미확인 · 안내 안 함"
+}
+
 private fun modeChipLabel(mode: SpeechTrialMode) = when (mode) {
     SpeechTrialMode.TTS_PCM -> "합성 음성"
     SpeechTrialMode.SILENT_PCM -> "무음 대조"
@@ -517,8 +568,8 @@ private fun modeChipLabel(mode: SpeechTrialMode) = when (mode) {
 }
 
 private fun selectedModeDescription(mode: SpeechTrialMode) = when (mode) {
-    SpeechTrialMode.TTS_PCM -> "발화·스피커 재생 없이 파일을 인식합니다. 일부 인식기는 자체 마이크를 열 수 있어요."
-    SpeechTrialMode.SILENT_PCM -> "같은 길이의 무음 입력입니다. 인식 결과가 없어야 해요. 일부 인식기는 자체 마이크를 열 수 있어요."
+    SpeechTrialMode.TTS_PCM -> "발화 없이 합성 파일을 인식하고 입력 해제 후 결과를 음성 안내합니다. 일부 인식기는 자체 마이크를 열 수 있어요."
+    SpeechTrialMode.SILENT_PCM -> "같은 길이의 무음 입력입니다. 후보가 없으면 거절하고 입력 해제 후 음성 안내합니다. 일부 인식기는 자체 마이크를 열 수 있어요."
     SpeechTrialMode.DIRECT_MIC -> "시스템 마이크로 최대 10초 인식합니다. 캡처 중 시험 문장을 말해 주세요."
     SpeechTrialMode.BUFFERED_PCM -> "최대 10초 녹음한 뒤 마이크를 해제하고 인식합니다. 캡처 중 말하고 인계 중에는 조용히 기다리세요. 일부 인식기는 자체 마이크를 열 수 있어요."
 }

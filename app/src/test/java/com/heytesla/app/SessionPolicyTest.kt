@@ -93,4 +93,36 @@ class SessionPolicyTest {
         assertTrue(policy.appeared(42_000))
         assertNotNull(policy.startAutomatic(43_500))
     }
+    @Test fun diagnosticOwnershipBlocksMicrophoneUntilExplicitReleaseEvenAfterExpiry() {
+        val policy = SessionPolicy()
+        policy.appeared(0)
+        val diagnostic = policy.startDiagnostic(100)!!
+        assertTrue(diagnostic.diagnostic)
+        assertNull(policy.startAutomatic(1_500))
+        assertNull(policy.startManual(1_501))
+        assertNull(policy.startDiagnostic(1_502))
+        assertEquals(diagnostic, policy.current)
+        assertTrue(policy.expired(diagnostic.id, diagnostic.deadline))
+        assertNull(policy.startManual(diagnostic.deadline + 1))
+        assertEquals(diagnostic, policy.current)
+        assertTrue(policy.finish(diagnostic.id, diagnostic.deadline + 2))
+        assertNotNull(policy.startManual(diagnostic.deadline + 3))
+    }
+
+    @Test fun manualSessionCannotBeReplacedByDiagnostic() {
+        val policy = SessionPolicy()
+        val manual = policy.startManual(0)!!
+        assertNull(policy.startDiagnostic(1))
+        assertEquals(manual, policy.current)
+    }
+
+    @Test fun oldDiagnosticFinishCannotReleaseReplacementOwnership() {
+        val policy = SessionPolicy()
+        val old = policy.startDiagnostic(0)!!
+        policy.finish(old.id, 1)
+        val replacement = policy.startDiagnostic(2)!!
+        assertFalse(policy.finish(old.id, 3))
+        assertNull(policy.startManual(4))
+        assertEquals(replacement, policy.current)
+    }
 }

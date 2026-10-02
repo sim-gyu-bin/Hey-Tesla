@@ -64,6 +64,36 @@ class FieldEventLogTest {
         assertEquals(file.length(), second.status().fileBytes)
     }
 
+    @Test fun currentVersionRowsAppendWithoutRewritingLegacyVersionOneRows() {
+        val file = newFile()
+        // 예전 실행이 남긴 v1 행: speechTrial 키 자체가 없다.
+        val legacy = "{\"version\":1,\"processId\":\"legacy\",\"appVersion\":\"0.8.0-probe\"," +
+            "\"event\":\"PROCESS_START_OFF\",\"state\":{}}\n"
+        writeExisting(file, legacy)
+
+        val sink = startSink(file)
+        assertTrue(
+            sink.enqueue(
+                record(
+                    "SPEECH_TRIAL_FINAL_RECEIVED_TTS_PCM",
+                    speechTrial = summary(confidence = 0.25f, decision = SpeechCommandDecision.FRUNK_OPEN_CANDIDATE),
+                ),
+            ),
+        )
+        assertTrue(sink.sync())
+
+        val text = file.readText()
+        // 기존 v1 행은 바이트까지 그대로 남고 새 행만 현재 버전으로 덧붙는다.
+        assertEquals(legacy, text.substring(0, legacy.length))
+        val lines = text.split('\n').dropLastWhile { it.isEmpty() }
+        assertEquals(2, lines.size)
+        assertFalse(lines[0].contains("speechTrial"))
+        assertTrue(lines[1].startsWith("{\"version\":$FIELD_LOG_RECORD_VERSION,"))
+        assertEquals("0.25", confidenceOf(lines[1]))
+        assertTrue(trialValue(lines[1]).contains("\"mode\":\"TTS_PCM\""))
+        assertTrue(trialValue(lines[1]).contains("\"commandDecision\":\"FRUNK_OPEN_CANDIDATE\""))
+    }
+
     @Test fun limitStopsWritingWithoutDeletingExistingRows() {
         val file = newFile()
         val prefix = "EARLIER-ROW\n"
@@ -246,6 +276,169 @@ class FieldEventLogTest {
         assertEquals(0, observed.pending)
     }
 
+    @Test
+    fun trialSummariesStayOnTheirOwnRowsAcrossReopen() {
+        val file = newFile()
+        val first = startSink(file)
+        assertTrue(first.enqueue(record("SPEECH_TRIAL_START_TTS_PCM")))
+        assertTrue(
+            first.enqueue(
+                record(
+                    "SPEECH_TRIAL_FINAL_RECEIVED_TTS_PCM",
+                    speechTrial = summary(
+                        mode = "TTS_PCM",
+                        status = "COMPLETE",
+                        reason = "FINAL_RECEIVED",
+                        finalReceived = true,
+                        phraseMatched = true,
+                        confidence = 0.5f,
+                        elapsedMs = 1_200L,
+                        samples = 48_000L,
+                        pcmBytesWritten = 96_000,
+                        audioLeaseRetained = false,
+                        decision = SpeechCommandDecision.FRUNK_OPEN_CANDIDATE,
+                    ),
+                ),
+            ),
+        )
+        assertTrue(first.sync())
+
+        // 프로세스 재시작: 앞선 행을 고치지 않고 이어 쓰며, 두 번째 회차는 자기 값만 남긴다.
+        val second = startSink(file)
+        assertTrue(second.enqueue(record("SPEECH_TRIAL_START_SILENT_PCM")))
+        assertTrue(
+            second.enqueue(
+                record(
+                    "SPEECH_TRIAL_RECOGNITION_TIMEOUT_SILENT_PCM",
+                    speechTrial = summary(
+                        mode = "SILENT_PCM",
+                        status = "TIMED_OUT",
+                        reason = "RECOGNITION_TIMEOUT",
+                        finalReceived = false,
+                        phraseMatched = null,
+                        confidence = null,
+                        elapsedMs = 10_000L,
+                        samples = 0L,
+                        pcmBytesWritten = 0,
+                        audioLeaseRetained = true,
+                    ),
+                ),
+            ),
+        )
+        assertTrue(second.sync())
+
+        val lines = file.readText().split('\n').dropLastWhile { it.isEmpty() }
+        assertEquals(4, lines.size)
+        // 시작 행에는 요약이 붙지 않는다.
+        assertEquals("null", trialValue(lines[0]))
+        assertEquals("null", trialValue(lines[2]))
+
+        val firstTrial = trialValue(lines[1])
+        assertTrue(firstTrial.contains("\"mode\":\"TTS_PCM\""))
+        assertTrue(firstTrial.contains("\"status\":\"COMPLETE\""))
+        assertTrue(firstTrial.contains("\"reason\":\"FINAL_RECEIVED\""))
+        assertTrue(firstTrial.contains("\"finalReceived\":true"))
+        assertTrue(firstTrial.contains("\"phraseMatched\":true"))
+        assertTrue(firstTrial.contains("\"confidence\":0.5"))
+        assertTrue(firstTrial.contains("\"elapsedMs\":1200"))
+        assertTrue(firstTrial.contains("\"samples\":48000"))
+        assertTrue(firstTrial.contains("\"pcmBytesWritten\":96000"))
+        assertTrue(firstTrial.contains("\"audioLeaseRetained\":false"))
+        assertTrue(firstTrial.contains("\"commandDecision\":\"FRUNK_OPEN_CANDIDATE\""))
+        // 회차 추적: 요약의 모드·사유가 그 행의 이벤트 code와 같은 값이어야 한다.
+        assertTrue(lines[1].contains("\"event\":\"SPEECH_TRIAL_FINAL_RECEIVED_TTS_PCM\""))
+
+        val secondTrial = trialValue(lines[3])
+        assertTrue(secondTrial.contains("\"mode\":\"SILENT_PCM\""))
+        assertTrue(secondTrial.contains("\"status\":\"TIMED_OUT\""))
+        assertTrue(secondTrial.contains("\"reason\":\"RECOGNITION_TIMEOUT\""))
+        assertTrue(secondTrial.contains("\"finalReceived\":false"))
+        assertTrue(secondTrial.contains("\"phraseMatched\":null"))
+        assertTrue(secondTrial.contains("\"confidence\":null"))
+        assertTrue(secondTrial.contains("\"elapsedMs\":10000"))
+        assertTrue(secondTrial.contains("\"samples\":0"))
+        assertTrue(secondTrial.contains("\"pcmBytesWritten\":0"))
+        assertTrue(secondTrial.contains("\"audioLeaseRetained\":true"))
+        // 실패·취소·시간 초과 회차에는 판정이 없고, 앞 회차 성공 판정이 이어지지 않는다.
+        assertTrue(secondTrial.contains("\"commandDecision\":null"))
+        assertFalse(secondTrial.contains("FRUNK_OPEN_CANDIDATE"))
+
+        // 회차 값이 서로 섞이지 않는다.
+        assertFalse(firstTrial.contains("RECOGNITION_TIMEOUT"))
+        assertFalse(firstTrial.contains("10000"))
+        assertFalse(secondTrial.contains("FINAL_RECEIVED"))
+        assertFalse(secondTrial.contains("48000"))
+    }
+
+    @Test
+    fun trialConfidenceOutsideUnitRangeBecomesNull() {
+        val file = newFile()
+        val sink = startSink(file)
+        // 유효 경계 0.0·1.0은 그대로 남기고 범위 밖·비유한 점수만 버린다.
+        val valid = listOf(0f, 1f)
+        val invalid = listOf(-0.1f, 2f, Float.NaN, Float.POSITIVE_INFINITY)
+        for (confidence in valid + invalid) {
+            assertTrue(
+                sink.enqueue(
+                    record("SPEECH_TRIAL_FINAL_RECEIVED_TTS_PCM", speechTrial = summary(confidence = confidence)),
+                ),
+            )
+        }
+        assertTrue(sink.sync())
+
+        val lines = file.readText().split('\n').dropLastWhile { it.isEmpty() }
+        assertEquals(valid.size + invalid.size, lines.size)
+        assertEquals("0.0", confidenceOf(lines[0]))
+        assertEquals("1.0", confidenceOf(lines[1]))
+        for (index in valid.size until lines.size) {
+            assertEquals("null", confidenceOf(lines[index]))
+            // 점수만 버리고 그 회차 행과 나머지 수치는 남는다.
+            assertTrue(trialValue(lines[index]).contains("\"samples\":12000"))
+        }
+        val text = file.readText()
+        assertFalse(text.contains("NaN"))
+        assertFalse(text.contains("Infinity"))
+        assertFalse(text.contains("\"confidence\":2"))
+    }
+
+    @Test
+    fun trialSummaryStringsOutsideAllowlistBecomeNullAndRowStays() {
+        val file = newFile()
+        val sink = startSink(file)
+        assertTrue(
+            sink.enqueue(
+                record(
+                    "SPEECH_TRIAL_INTERNAL_FAILURE_DIRECT_MIC",
+                    speechTrial = summary(
+                        mode = "VIN_1HGCM82633A004352",
+                        status = "enabled",
+                        reason = "RAW_TEXT_1HGCM82633A004352",
+                        phraseMatched = null,
+                        confidence = null,
+                        elapsedMs = 0L,
+                        samples = 0L,
+                        pcmBytesWritten = 0,
+                    ),
+                ),
+            ),
+        )
+        assertTrue(sink.sync())
+
+        val text = file.readText()
+        val trial = trialValue(text.split('\n').first { it.isNotEmpty() })
+        assertTrue(trial.contains("\"mode\":null"))
+        assertTrue(trial.contains("\"status\":null"))
+        assertTrue(trial.contains("\"reason\":null"))
+        // 모르는 값은 성공값으로 채우지 않는다.
+        assertTrue(trial.contains("\"confidence\":null"))
+        assertTrue(trial.contains("\"phraseMatched\":null"))
+        assertTrue(trial.contains("\"elapsedMs\":0"))
+        // allowlist 밖 원문은 값으로도 남지 않는다.
+        assertFalse(text.contains("1HGCM82633A004352"))
+        assertFalse(text.contains("RAW_TEXT"))
+        assertFalse(text.contains("enabled"))
+    }
+
     private fun newDir(): File = Files.createTempDirectory("field-log-test").toFile()
 
     private fun newFile(): File = File(newDir(), FIELD_LOG_RELATIVE_PATH)
@@ -262,7 +455,11 @@ class FieldEventLogTest {
         return sink
     }
 
-    private fun record(event: String, state: Map<String, Any?> = emptyMap()) = FieldRecord(
+    private fun record(
+        event: String,
+        state: Map<String, Any?> = emptyMap(),
+        speechTrial: SpeechTrialSummary? = null,
+    ) = FieldRecord(
         processId = "11111111-2222-3333-4444-555555555555",
         trialId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         wallTimeMs = 1_700_000_000_000L,
@@ -270,5 +467,61 @@ class FieldEventLogTest {
         appVersion = "0.1.0-test",
         event = event,
         state = state,
+        speechTrial = speechTrial,
     )
+
+    private fun summary(
+        mode: String = "TTS_PCM",
+        status: String = "COMPLETE",
+        reason: String = "FINAL_RECEIVED",
+        finalReceived: Boolean = true,
+        phraseMatched: Boolean? = true,
+        confidence: Float? = 0.5f,
+        elapsedMs: Long? = 1_000L,
+        samples: Long = 12_000L,
+        pcmBytesWritten: Int = 24_000,
+        audioLeaseRetained: Boolean = false,
+        decision: SpeechCommandDecision? = null,
+    ) = SpeechTrialSummary(
+        mode = mode,
+        status = status,
+        reason = reason,
+        finalReceived = finalReceived,
+        phraseMatched = phraseMatched,
+        confidence = confidence,
+        elapsedMs = elapsedMs,
+        samples = samples,
+        pcmBytesWritten = pcmBytesWritten,
+        audioLeaseRetained = audioLeaseRetained,
+        decision = decision,
+    )
+
+    /** 한 행의 `speechTrial` 값만 뽑는다. 키 순서가 바뀌어도 값만 보도록 중괄호 짝으로 자른다. */
+    private fun trialValue(line: String): String {
+        val key = "\"speechTrial\":"
+        val start = line.indexOf(key)
+        assertTrue("speechTrial 키가 없다: $line", start >= 0)
+        val value = line.substring(start + key.length)
+        if (value.startsWith("null")) return "null"
+        var depth = 0
+        for ((index, ch) in value.withIndex()) {
+            when (ch) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return value.substring(0, index + 1)
+                }
+            }
+        }
+        fail("speechTrial 객체가 닫히지 않았다: $line")
+        return ""
+    }
+
+    /** 한 행의 `confidence` 값만 뽑는다. */
+    private fun confidenceOf(line: String): String {
+        val key = "\"confidence\":"
+        val start = line.indexOf(key)
+        assertTrue("confidence 키가 없다: $line", start >= 0)
+        return line.substring(start + key.length).substringBefore(',')
+    }
 }

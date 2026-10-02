@@ -2,7 +2,7 @@ package com.heytesla.app
 
 /** Main-thread confined. Only an actual BLE departure rearms automatic approach. */
 class SessionPolicy {
-    data class Session(val id: Long, val automatic: Boolean, val deadline: Long)
+    data class Session(val id: Long, val automatic: Boolean, val deadline: Long, val diagnostic: Boolean = false)
     var current: Session? = null
         private set
     var present = false
@@ -51,6 +51,13 @@ class SessionPolicy {
         return Session(++nextId, false, now + MANUAL_MS).also { current = it }
     }
 
+    /** STT→dry-run→입력 해제→TTS→출력 해제를 동일 current 안에서 소유한다. */
+    internal fun startDiagnostic(now: Long): Session? {
+        if (current != null) return null
+        pendingAt = null
+        return Session(++nextId, false, now + DIAGNOSTIC_MS, diagnostic = true).also { current = it }
+    }
+
     fun expired(id: Long, now: Long) = current?.let { it.id == id && now >= it.deadline } == true
     fun accepts(id: Long) = current?.id == id
     fun finish(id: Long, now: Long): Boolean {
@@ -65,6 +72,7 @@ class SessionPolicy {
         const val DEBOUNCE_MS = 1_500L
         const val AUTOMATIC_MS = 90_000L
         const val MANUAL_MS = 10_000L
+        const val DIAGNOSTIC_MS = 40_000L
         const val COOLDOWN_MS = 30_000L
     }
 }

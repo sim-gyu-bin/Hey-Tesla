@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
     <queries>
         <intent><action android:name="android.speech.RecognitionService" /></intent>
+        <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
     </queries>
     <application android:name=".DiagnosticApp" android:label="Hey Tesla"
         android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules"

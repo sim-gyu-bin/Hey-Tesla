@@ -11,8 +11,15 @@ import java.util.concurrent.atomic.AtomicReference
 /** 영속 로그 경로 조각. `Context.noBackupFilesDir` 기준 상대 경로다. */
 const val FIELD_LOG_RELATIVE_PATH = "field-diagnostics/events.jsonl"
 
-/** JSONL 레코드 스키마 버전. */
-const val FIELD_LOG_RECORD_VERSION = 1
+/**
+ * JSONL 레코드 스키마 버전.
+ *
+ * 4 = 로컬 dry-run·오프라인 TTS 결과와 입력·출력·포커스 해제 요약.
+ * 3 = `speechTrial.commandDecision`, 2 = 판정 없는 `speechTrial`, 1 = 요약 없는 과거 행.
+ * 앱은 항상 현재 버전으로만 덧붙이고 기존 행을 고치지 않으므로 이전 버전과 공존한다.
+ * 파서는 행마다 `version`을 보고, 없어진 필드를 가정하지 않는다.
+ */
+const val FIELD_LOG_RECORD_VERSION = 4
 
 /** 이 시험의 로그 상한. 도달하면 회전·삭제·덮어쓰기 없이 기록만 멈춘다. */
 const val FIELD_LOG_LIMIT_BYTES = 2L * 1024L * 1024L
@@ -57,6 +64,12 @@ data class FieldLogStatus(
 /**
  * 한 줄로 기록할 사건. 값은 Boolean·Int·Long·String만 허용하며 키는 [FieldStateKeys]에 고정된 것만 쓴다.
  * VIN·association ID·BT 주소·위치·음성·인식 원문·예외 메시지는 어떤 필드로도 담지 않는다.
+ *
+ * [trialId]는 접근 관찰 쪽 세션 식별자이며 STT 회차 ID가 아니다. 음성 시험 회차는 [speechTrial]과
+ * 이 행의 `event`·`wallMs`·`elapsedMs`로 구분한다.
+ *
+ * [speechTrial]은 회차를 끝내는 그 행에만 붙는 상세요약이다. 시작·게이트·다른 사건 행은 null이므로
+ * 직전 회차 값이 다음 행으로 이어지지 않는다. 요약도 문자열 allowlist와 유한한 신뢰도만 통과시킨다.
  */
 data class FieldRecord(
     val processId: String,
@@ -66,6 +79,7 @@ data class FieldRecord(
     val appVersion: String,
     val event: String,
     val state: Map<String, Any?>,
+    val speechTrial: SpeechTrialSummary? = null,
     val version: Int = FIELD_LOG_RECORD_VERSION,
 )
 
@@ -258,6 +272,9 @@ object FieldEvents {
         "RECOGNITION_TIMEOUT",
         "STOP_FAILED",
         "USER_CANCELED",
+        "SESSION_EXPIRED",
+        "VOICE_GUIDANCE_FAILED",
+        "TTS_RELEASE_FAILED_RESTART_REQUIRED",
     )
 
     /** 정리 실패를 `_AND_`로 이어 붙일 때 쓰는 조각. */
@@ -325,7 +342,7 @@ object FieldEvents {
  * `state`의 문자열 값도 [FieldEvents] allowlist를 통과한 것만 기록하므로 임의 문자열이 파일로 새지 않는다.
  */
 internal object FieldJson {
-    fun encode(record: FieldRecord): String = buildString(320) {
+    fun encode(record: FieldRecord): String = buildString(384) {
         append("{\"version\":").append(record.version)
         append(",\"processId\":").append(quote(record.processId))
         append(",\"trialId\":").append(record.trialId?.let { quote(it) } ?: "null")
@@ -333,6 +350,8 @@ internal object FieldJson {
         append(",\"elapsedMs\":").append(record.elapsedRealtimeMs)
         append(",\"appVersion\":").append(quote(record.appVersion))
         append(",\"event\":").append(quote(record.event))
+        // 요약은 이 행에만 붙는다. 없는 행은 명시적 null이라 이전 회차 값으로 해석될 여지가 없다.
+        append(",\"speechTrial\":").append(record.speechTrial?.let { SpeechTrialSummaryJson.encode(it) } ?: "null")
         append(",\"state\":{")
         var first = true
         for (key in FieldStateKeys.ORDER) {
