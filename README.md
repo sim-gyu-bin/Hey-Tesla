@@ -2,7 +2,7 @@
 
 **차량 근처에서만 작동하는 Android 네이티브 음성 리모컨.** 잠긴 휴대폰을 주머니에서 꺼내지 않고, 차량에 접근해 “헤이 테슬라, 프렁크 열어줘”라고 말하는 사용 경험을 목표로 한다.
 
-> 현재 소스·APK는 **`0.8.0-probe` 접근 관찰 포그라운드 서비스 버전**이다. 접근 ON 시 마이크와 분리된 지속 알림·`connectedDevice` 서비스를 시작하며 화면 이탈 중 CDM 관찰을 관리한다. S23에서 서비스 시작·HOME·짧은 화면 꺼짐 중 유지, 앱·알림 종료, 프로세스 재생성 OFF와 기존 로그 보존을 확인했다. 실제 차량 접근·잠금·주머니 장기 대기와 감지 지연은 이번 버전에서 미검증이다. 자동 호출어·실차 제어는 제공하지 않는다. [시험 절차와 실측 기록](wiki/Device-Validation.md), [18단계 구현 계획](wiki/Implementation-Plan.md)을 구분해 관리한다.
+> 현재 소스·S23 설치는 **`0.19.0-probe` 조회 결과 표시 개선 버전**이다. 조회 버튼 근처와 화면 상단에 진행은 파랑, 성공은 초록, 실패·시간 초과는 빨강으로 크게 표시하고 종료 근거를 바로 보여준다. JVM 139개와 S23 기존 계측 5개·합성 RAM 상태 9종의 실제 화면 검증을 통과했다. **실차 인증·암호 상태 수신 성공은 미확인**이며 프로토콜·기한·재시도·등록 승인 경계는 바꾸지 않았다. 프렁크 열기·UWB 거리 측정·음성 자동 제어는 연결하지 않았다. [실측 기록](wiki/Device-Validation.md), [18단계 구현 계획](wiki/Implementation-Plan.md)을 구분해 관리한다.
 >
 > 프로젝트 전용 [hey-tesla-ui 스킬](.omp/skills/hey-tesla-ui/SKILL.md)을 적용해 차콜 테마, 상태 중심 홈, 설정 행, 입력 선택·결과 상세를 분리한 진단 화면을 구현했다. 설계 근거와 검증 경계는 [UI 개편 기록](wiki/UI-Design.md)에 둔다.
 
@@ -67,7 +67,7 @@ Android 앱은 React Native가 아닌 **Kotlin 네이티브**로 개발한다. �
 
 ## 빌드와 실행
 
-현재 소스와 S23 Ultra 설치는 `com.heytesla.app` / `0.12.0-probe`(`versionCode=12`)다. BLE 연결 진단과 이전 `0.11.0-probe`의 음성 통합 실측은 구분한다. Android 16(API 36) 이상을 대상으로 하며 단일 `app` 모듈의 AGP 9.3.1, Gradle 9.5.0, 내장 Kotlin, Compose compiler plugin 2.4.10, Compose BOM 2026.06.01을 사용한다.
+현재 소스와 S23 Ultra 설치는 `com.heytesla.app` / `0.19.0-probe`(`versionCode=19`)다. 수동 키 등록·암호 상태 조회, UWB 지원 조회·BLE 감지 대조 시험·이전 음성 통합 실측은 구분한다. Android 16(API 36) 이상을 대상으로 하며 단일 `app` 모듈의 AGP 9.3.1, Gradle 9.5.0, 내장 Kotlin, Compose compiler plugin 2.4.10, Compose BOM 2026.06.01을 사용한다. Tesla 공식 schema를 protobuf plugin 0.10.0 / protoc·javalite 4.36.2로 생성한다.
 
 1. JDK 21과 Android SDK Platform 36 / Build Tools 36.0.0을 준비한다. 이 저장소의 실제 빌드는 Android Studio bundled JDK 21.0.10으로 수행했다.
 2. `JAVA_HOME`을 JDK에 맞추고, Git에서 제외된 `local.properties`에 자신의 `sdk.dir`을 지정한다. `ANDROID_HOME`과 `ANDROID_SDK_ROOT`를 함께 설정했다면 동일한 SDK를 가리키게 하거나 빌드 명령의 환경에서 일치시킨다. 전역 환경을 자동 변경하지 않는다.
@@ -83,6 +83,25 @@ APK는 `app/build/outputs/apk/debug/app-debug.apk`에 생성된다. 승인된 US
 adb -d install -r app/build/outputs/apk/debug/app-debug.apk
 adb -d shell am start -n com.heytesla.app/.MainActivity
 ```
+**설정 → 개발자 진단 → UWB 지원 → UWB 지원 확인**은 Android 16 `RangingManager`의 공개 capability만 조회한다. 하드웨어 feature·framework backend·원 가용 코드·거리 측정용 권한을 분리하고, 상세 지원 값은 RAM에만 둔다. 새 권한 선언/승인·실제 거리 세션·peer/address/STS 생성·BLE TX는 없다. 조회 중 다른 진단을 예약 차단하고 정리 불명은 Activity 재생성으로 풀지 않는다. S23에서는 두 거리 권한 미승인에서도 응답을 받았으며, `ENABLED`는 차량 인증·거리 준비의 증거가 아니다.
+
+**설정 → 개발자 진단 → 차량 키**는 별도의 초기 설정 시험이다. **현재 방문 결과는 등록 불명이므로 재방문·등록 반복을 권하지 않는다.** 아래 버튼 설명은 새 실행 지시가 아니다. 잠금 해제·다른 진단 중지 후 VIN을 일회성으로 입력하며, 등록에는 직접 동의한 **키 추가 요청 · 카드 승인 후 상태 1회 조회**와 실제 키 카드 승인이 필요하다. 앱은 Driver 역할의 새 Android 키만 추가하며 기존 폰키를 제거·교체하지 않는다. **우리 앱 키로 인증·상태 1회 조회**는 등록 요청과 별개다.
+
+키 생성과 차량 등록, 인증 전 등록 보고와 검증된 암호 상태 수신은 별개다. 중간 인증 `OK` 응답은 기존 기한 안의 대기이며 서명·HMAC 검증을 생략하지 않는다. 키 미등록 응답도 실제 미등록의 인증된 증거가 아닌 보고로 표시한다. 진행 중에는 단계와 취소를 표시하고 VIN·동의·두 시작 버튼은 잠근다. 자기 예약을 다른 진단 충돌로 표시하지 않지만 실제 외부 예약과 정리 실패 차단은 유지한다. 표시되는 잠금·프렁크 값은 응답 시점의 보고이며 주차 P·실제 제어 준비를 추정하지 않는다. VIN·주소·키·원시 응답은 로그에 쓰지 않으며 VIN 입력은 시작·화면 이탈 때 비운다. 전송 뒤 취소/시간 초과와 로컬 연결 종료는 차량 등록 철회를 보장하지 않는다. [방문 결과와 수정 검증](wiki/Device-Validation.md#0180-probe--인증-ack-처리와-실패-근거-분리)
+
+
+
+BLE 감지 대조 시험은 **설정 → 개발자 진단 → BLE 연결**에서 기준/개선 방식과 개별 옵션을 선택한 뒤 명시적으로 시작한다. 기준은 CDM BLE 출현당 한 회차이며 기본값이다. 개선은 BT 보조·필터 스캔·제한 재시도를 켜고 `autoConnect`는 여전히 false다. **감지만 · GATT 없음**은 후보만 집계하며 GATT·회차 wake lock을 발급하지 않는다. 옵션은 RAM에서만 선택하고 실행 중 고정한다. SCAN 요청/승인은 시작과 별개이며 권한을 대신 승인하지 않는다.
+
+개선 후보는 CDM·외부 BT·필터 스캔을 병합한다. 자체 GATT 중/close 후 15초의 BT 신호는 억제한다. CDM 이탈은 30초 유예하고 스캔 증거는 180초 뒤 만료한다. 재시도는 선택된 실패에만 후보당 최대 2회·정리 포함 총 40초이며 이전 close 후 2초와 남은 12초 이상을 요구한다. COMPLETE·BLOCKED·프로필 없음·중지·close 실패는 재시도하지 않는다. 필터 LOW_POWER 스캔은 최대 40초·시작 간격 최소 120초, GATT 중 정지하며 무필터 fallback은 없다.
+
+파일은 기존 `noBackupFilesDir/field-diagnostics/events.jsonl`에 추가하며 새 행은 스키마 v6다. 실행 `trialId`·후보·회차, 최초 수신/처리 지연·거절, GATT 요청 반환/콜백·첫 RX와 본시험/정리 SDK status를 분리한다. root `elapsedMs`는 boot monotonic이고 `wallMs`는 wall clock이며 회차/phase 상대 경과와 구분한다. RX payload·차량 주소·키는 기록하지 않는다. 기존 v1~v5 바이트를 보존하며 2 MiB 한도에서 자동 삭제·회전하지 않는다. 대기 중 wake lock은 없고 GATT 회차만 최대 45초다. 앱·알림 중지와 필수 조건 상실은 종료하며 프로세스 종료·재부팅 뒤 자동 복원하지 않는다.
+
+`0.15` APK·110개 회귀 통과, Lint 오류 0·경고 13개다. 이전 `0.14` S23 실측에서는 실제 Compose 조작·감지만 후보 1/GATT 0·자기 BT 억제·실제 GATT 타임아웃 2회 제한·백그라운드 연결 요청 정리·알림 중지·계측 HOME/화면 OFF 15초 유지를 확인했다. 사용자 수동 SCAN 승인 뒤 실제 스캔 40초 종료/120초 재개·GATT 중 정지·최종 중지 뒤 재개 없음도 확인했다. 합성 입력은 실차 방문이 아니며 광고 match·차량 인증·UWB 거리를 증명하지 않는다. [0.14 실측과 한계](wiki/Device-Validation.md#0140-probe--ble-감지-대조-시험), [0.15 지원 조회 실측](wiki/Device-Validation.md#0150-probe--차량-방문-전-준비)
+현장 분석기는 Python 표준 라이브러리만 사용하는 `tools/analyze_field_log.py`다. `python3 tools/analyze_field_log.py LOG --json`으로 보존 JSONL을 읽기 전용 분석한다(`LOG`는 실제 파일 경로). 기본 출력은 한국어이며 v1~v6·null/SDK 0·최종 회차·본시험/정리를 구분한다. 전화기 단독/합성 실행은 `--exclude-trial UUID`를 반복해 제외한다. `--visits CSV --observer-offset-ms INTEGER`는 실제 관찰자 기록과 측정한 시계 차이만 전달한다. `tools/field_visits.csv`는 헤더만 있는 양식이며, 빈 기록·시계 미확인에서는 비율을 만들지 않는다. [대조 조건·시각·제외 목록](wiki/Device-Validation.md#실행-조건과-관찰자-csv)을 먼저 확인한다. 오류 0은 로그 완전성·물리 감지 성공의 증거가 아니다.
+휴대폰 단독 실측은 일반 앱 FGS의 35분 생존·30분 heartbeat, 별도 65초 `Dozing` 유지, Bluetooth OFF 종료/ON 후 자동 복원 없음, 사용자 잠금 해제 후 실제 `USER_STOP`까지 확인했다. **35분 화면 OFF는 입증되지 않았고**, 비충전 deep Doze·배터리 비용·실차 감지율은 미확인이다. 시험 종료 시 서비스/오디오/GATT wake lock 없음·Bluetooth ON, 1,277행 로그와 이전 1,156행 전체 prefix 보존을 확인했다.
+
+
 
 `0.12.0-probe`는 **설정 → 개발자 진단 → BLE 연결**에 등록 차량의 GATT 연결·Tesla 서비스/TX/RX 확인·RX 구독·짧은 관찰·취소/정리를 추가했다. 원격 해제는 CCCD `[0, 0]` 읽기 성공으로만 확인한다. 키·인증·TX characteristic 쓰기·차량 명령·Fleet API는 없다. APK·전체 71개 회귀·Lint(오류 0, 경고 11) 통과. S23 실제 화면에서 등록 주소 해석 오류 수정 후 GATT 시작·연결 타임아웃·취소/HOME·로컬 close와 예약 해제를 확인했으며, 실제 연결/구독 성공은 확인하지 못했다. [BLE 실측과 한계](wiki/Device-Validation.md#0120-probe--수동-ble-연결-진단)
 

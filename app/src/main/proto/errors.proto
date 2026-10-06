@@ -1,0 +1,27 @@
+// 출처: Tesla vehicle-command a4b43c1eff0e09d77deb9f2dce97031141fe8c8a
+// https://github.com/teslamotors/vehicle-command/tree/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/protocol/protobuf
+// Apache-2.0. 동봉 라이선스: licenses/Tesla-vehicle-command-LICENSE
+// Hey Tesla 변경: Java outer class명만 명시적으로 고정. wire contract는 변경하지 않는다.
+syntax = "proto3";
+
+package Errors;
+
+option go_package = "github.com/teslamotors/vehicle-command/pkg/protocol/protobuf/errors";
+option java_package = "com.tesla.generated.errors";
+option java_outer_classname = "Errors";
+
+enum GenericError_E
+{
+    GENERICERROR_NONE = 0;
+    GENERICERROR_UNKNOWN = 1;
+    GENERICERROR_CLOSURES_OPEN = 2;
+    GENERICERROR_ALREADY_ON = 3;
+    GENERICERROR_DISABLED_FOR_USER_COMMAND = 4;
+    GENERICERROR_VEHICLE_NOT_IN_PARK = 5;
+    GENERICERROR_UNAUTHORIZED = 6;
+    GENERICERROR_NOT_ALLOWED_OVER_TRANSPORT = 7;
+}
+
+message NominalError {
+    GenericError_E  genericError = 1;
+}

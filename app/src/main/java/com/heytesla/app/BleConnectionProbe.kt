@@ -17,110 +17,128 @@ import android.os.Looper
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 
-/** 등록 주소와 GATT는 이 소유자 내부 RAM에만 둔다. 키·인증·차량 characteristic write는 없다. */
+/** 등록 주소와 GATT는 서비스 소유자 내부 RAM에만 둔다. 키·인증·차량 characteristic write는 없다. */
 internal class BleConnectionProbe(
     context: Context,
     private val state: MutableStateFlow<BleProbeState>,
     private val runtime: DiagnosticRuntime,
+    private val service: ObservationService,
+    private val requestId: String,
+    private val onStage: (Long, BleProbeState) -> Unit,
+    private val onFinished: (Long, BleProbeState, Boolean) -> Unit,
 ) {
     private val app = context.applicationContext
     private val bluetooth = app.getSystemService(BluetoothManager::class.java)
-    private var current: BleGattSession? = null
-    private var associationId: Int? = null
-    private var watchdog: Runnable? = null
+    private val ownership = BleGattOwnership(runtime::releaseBleDiagnostic) { runtime.handler.removeCallbacks(it) }
+    private var startingGatt = false
+
+    /** 실제 handle 발급 전부터 정리·close까지 봉인한다. close 실패이면 소유권과 예약을 유지한다. */
+    val hasActiveGatt: Boolean get() = startingGatt || ownership.current != null
 
     @SuppressLint("MissingPermission")
-    fun start() {
+    fun start(attempt: Long, backgroundConnect: Boolean = false, deadline: Long? = null) {
         mainThread()
-        val previous = current
-        if (previous != null) {
-            runtime.event(if (previous.state.status == BleProbeStatus.CLEANUP_FAILED) "BLE_PROBE_RESTART_REQUIRED" else "BLE_PROBE_BUSY")
-            return
-        }
-        val session = runtime.acquireBleDiagnostic(::cancel)
+        check(!hasActiveGatt) // 반복 발급은 서비스 정책이 close 후에만 수행한다.
+        startingGatt = true
+        val session = runtime.acquireBleDiagnostic(service, requestId) { cancel("USER_STOP") }
         if (session == null) {
-            blocked(runtime.bleDiagnosticBlockedReason() ?: "LEASE_UNAVAILABLE")
+            blocked(attempt, runtime.bleFieldAttemptBlockedReason(service, requestId) ?: "LEASE_UNAVAILABLE", backgroundConnect)
             return
         }
-        // acquire와 resolve는 같은 Main turn이다. BLUETOOTH_CONNECT 외 권한·새 스캔을 요구하지 않는다.
         val device: BluetoothDevice
+        val selectedAssociationId: Int
         try {
             val selected = singleAssociation()
             val address = selected?.deviceMacAddress
             val adapter = bluetooth?.adapter
             val reason = when {
                 selected == null -> "SINGLE_ASSOCIATION_REQUIRED"
+                selected.id != service.observedAssociationId -> "ASSOCIATION_REMOVED"
                 address == null -> "ASSOCIATION_ADDRESS_UNAVAILABLE"
                 adapter == null -> "BLUETOOTH_UNAVAILABLE"
                 !adapter.isEnabled -> "BLUETOOTH_OFF"
                 else -> null
             }
             if (reason != null) {
-                runtime.releaseBleDiagnostic(session.id) // GATT는 아직 생성하지 않았다.
-                blocked(reason)
+                runtime.stopBleFieldTrial(reason)
+                runtime.releaseBleDiagnostic(session.id) // GATT를 생성하지 않았으므로 반환 가능하다.
+                blocked(attempt, reason, backgroundConnect)
                 return
             }
-            // MacAddress 문자열은 소문자이며 String overload는 대문자만 허용한다.
             device = checkNotNull(adapter).getRemoteDevice(checkNotNull(address).toByteArray())
-            associationId = checkNotNull(selected).id
+            selectedAssociationId = checkNotNull(selected).id
         } catch (_: SecurityException) {
+            runtime.stopBleFieldTrial("BLUETOOTH_PERMISSION_REQUIRED")
             runtime.releaseBleDiagnostic(session.id)
-            blocked("BLUETOOTH_PERMISSION_REQUIRED")
+            blocked(attempt, "BLUETOOTH_PERMISSION_REQUIRED", backgroundConnect)
             return
         } catch (_: Exception) {
             runtime.releaseBleDiagnostic(session.id)
-            blocked("ASSOCIATION_RESOLVE_FAILED")
+            blocked(attempt, "ASSOCIATION_RESOLVE_FAILED", backgroundConnect)
             return
         }
-        val port = AndroidBleGattPort(app, device, session.id, runtime.handler) {
-            val owner = current
-            if (owner != null) advance(owner)
-            owner
+        val port = AndroidBleGattPort(app, device, session.id, runtime.handler, backgroundConnect) {
+            // 이전 GATT callback은 새 회차의 watchdog/prerequisite까지 실행할 수 없다.
+            ownership.current?.takeIf { it.token == session.id }?.also(::advance)
         }
+        var lastStatus = BleProbeStatus.IDLE
         val trial = BleGattSession(
             session.id, session.deadline, port, runtime::now,
             publish = { next ->
-                state.value = next
-                if (!next.active && next.status != BleProbeStatus.IDLE) runtime.event("BLE_PROBE_${next.status.name}")
+                if (ownership.current?.token == session.id) {
+                    state.value = next
+                    if (next.status != lastStatus) {
+                        lastStatus = next.status
+                        if (next.active) onStage(attempt, next)
+                    }
+                }
             },
-            release = {
-                runtime.releaseBleDiagnostic(session.id)
-                watchdog?.let { runtime.handler.removeCallbacks(it) }
-                watchdog = null
-                associationId = null
-                current = null
+            release = { ownership.release(session.id) },
+            finishedCallback = { result ->
+                ownership.stopWatchdog(session.id)
+                runtime.event("BLE_PROBE_${result.status.name}")
+                onFinished(attempt, result, !result.localClosed)
             },
+            attempt = attempt,
+            backgroundConnect = backgroundConnect,
+            deadline = deadline,
+            recordEvidence = runtime::recordBleEvidence,
         )
-        current = trial
+        ownership.attach(trial, selectedAssociationId)
+        startingGatt = false
         runtime.event("BLE_PROBE_STARTED")
         trial.start()
-        if (current !== trial || !trial.state.active) return
+        if (ownership.current !== trial || !trial.state.active) return
         val tick = object : Runnable {
             override fun run() {
-                if (current !== trial) return
+                if (ownership.current !== trial) return
                 advance(trial)
-                if (current === trial && trial.state.active) runtime.handler.postDelayed(this, WATCHDOG_MS)
-                else watchdog = null
+                if (ownership.current === trial && trial.state.active) runtime.handler.postDelayed(this, WATCHDOG_MS)
             }
         }
-        watchdog = tick
+        ownership.watch(session.id, tick)
         runtime.handler.postDelayed(tick, WATCHDOG_MS)
     }
 
-    fun cancel() {
+    fun cancel(reason: String = "USER_STOP") {
         mainThread()
-        current?.cancel()
+        ownership.current?.cancel(reason)
     }
 
-    private fun blocked(reason: String) {
-        associationId = null
-        state.value = BleProbeState(status = BleProbeStatus.BLOCKED, reason = reason)
+    private fun blocked(attempt: Long, reason: String, backgroundConnect: Boolean) {
+        startingGatt = false
+        val result = BleProbeState(status = BleProbeStatus.BLOCKED, reason = reason, backgroundConnect = backgroundConnect)
+        state.value = result
         runtime.event("BLE_PROBE_BLOCKED")
+        onFinished(attempt, result, false)
     }
 
     private fun advance(trial: BleGattSession) {
         if (!trial.state.active) return
-        trial.tick(if (trial.state.status == BleProbeStatus.CLEANING_UP) null else prerequisiteReason(trial.token))
+        val reason = if (trial.state.status == BleProbeStatus.CLEANING_UP) null else prerequisiteReason(trial.token)
+        // 조건 상실도 CDM 신규 트리거 봉인→GATT 정리 순서. 회차 timeout은 전체 주말 대기를 끝내지 않는다.
+        if (reason != null) runtime.stopBleFieldTrial(reason)
+        if (ownership.current === trial) trial.tick(reason)
     }
 
     private fun singleAssociation(): AssociationInfo? {
@@ -136,11 +154,11 @@ internal class BleConnectionProbe(
     @SuppressLint("MissingPermission")
     private fun prerequisiteReason(token: Long): String? {
         if (!runtime.policy.accepts(token)) return "LEASE_LOST"
-        if (!runtime.activityVisible) return "VISIBLE_UI_REQUIRED"
+        if (!runtime.ownsBleField(service, requestId) || runtime.state.value.bleFieldTrialStopping) return "FIELD_OWNER_NOT_ARMED"
         if (!runtime.granted(Manifest.permission.BLUETOOTH_CONNECT)) return "BLUETOOTH_PERMISSION_REVOKED"
         val snapshot = runtime.state.value
-        if (snapshot.enabled || snapshot.observing || snapshot.observationStartPending || snapshot.observationServiceRunning ||
-            snapshot.speechDiagnosticActive || runtime.microphone != null
+        if (!snapshot.observing || snapshot.speechDiagnosticActive || runtime.microphone != null ||
+            service.observedAssociationId != ownership.associationId
         ) return "DIAGNOSTIC_EXCLUSIVITY_LOST"
         return try {
             val adapter = bluetooth?.adapter
@@ -149,21 +167,16 @@ internal class BleConnectionProbe(
                 !adapter.isEnabled -> "BLUETOOTH_OFF"
                 else -> {
                     val selected = singleAssociation()
-                    if (selected == null || selected.id != associationId || selected.deviceMacAddress == null) "ASSOCIATION_REMOVED" else null
+                    if (selected == null || selected.id != ownership.associationId || selected.deviceMacAddress == null) "ASSOCIATION_REMOVED" else null
                 }
             }
-        } catch (_: SecurityException) {
-            "BLUETOOTH_PERMISSION_REVOKED"
-        } catch (_: Exception) {
-            "PREREQUISITE_READ_FAILED"
-        }
+        } catch (_: SecurityException) { "BLUETOOTH_PERMISSION_REVOKED" }
+        catch (_: Exception) { "PREREQUISITE_READ_FAILED" }
     }
 
     private fun mainThread() = check(Looper.myLooper() == Looper.getMainLooper())
 
-    private companion object {
-        const val WATCHDOG_MS = 100L
-    }
+    private companion object { const val WATCHDOG_MS = 100L }
 }
 
 /** 각 callback은 token과 동일 BluetoothGatt·RX/CCCD handle을 확인한 뒤 Main에 전달한다. */
@@ -173,6 +186,7 @@ private class AndroidBleGattPort(
     private val device: BluetoothDevice,
     private val token: Long,
     private val handler: Handler,
+    private val backgroundConnect: Boolean,
     private val listener: () -> BleGattListener?,
 ) : BleGattPort {
     private var gatt: BluetoothGatt? = null
@@ -184,11 +198,11 @@ private class AndroidBleGattPort(
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (newState != BluetoothProfile.STATE_CONNECTED && newState != BluetoothProfile.STATE_DISCONNECTED) return
-            dispatch(gatt) { it.connection(token, this@AndroidBleGattPort, status == BluetoothGatt.GATT_SUCCESS, newState == BluetoothProfile.STATE_CONNECTED) }
+            dispatch(gatt) { it.connection(token, this@AndroidBleGattPort, status == BluetoothGatt.GATT_SUCCESS, newState == BluetoothProfile.STATE_CONNECTED, status) }
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            dispatch(gatt) { it.services(token, this@AndroidBleGattPort, status == BluetoothGatt.GATT_SUCCESS) }
+            dispatch(gatt) { it.services(token, this@AndroidBleGattPort, status == BluetoothGatt.GATT_SUCCESS, status) }
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
@@ -196,15 +210,16 @@ private class AndroidBleGattPort(
                 if (descriptor !== cccd) return@dispatch
                 when (subscription.writeCompleted(status == BluetoothGatt.GATT_SUCCESS)) {
                     BleCccdWriteResult.IGNORE -> Unit
-                    BleCccdWriteResult.ENABLED -> owner.descriptor(token, this@AndroidBleGattPort, true, true)
-                    BleCccdWriteResult.ENABLE_FAILED -> owner.descriptor(token, this@AndroidBleGattPort, true, false)
-                    BleCccdWriteResult.DISABLE_FAILED -> owner.descriptor(token, this@AndroidBleGattPort, false, false)
+                    BleCccdWriteResult.ENABLED -> owner.descriptor(token, this@AndroidBleGattPort, true, true, status)
+                    BleCccdWriteResult.ENABLE_FAILED -> owner.descriptor(token, this@AndroidBleGattPort, true, false, status)
+                    BleCccdWriteResult.DISABLE_FAILED -> owner.descriptor(token, this@AndroidBleGattPort, false, false, status)
                     BleCccdWriteResult.VERIFY_DISABLED -> {
                         // 중복 enable callback을 disable 완료로 추정하지 않는다. 실제 CCCD 0을 읽어 확인한다.
-                        val accepted = try { gatt.readDescriptor(descriptor) } catch (_: Exception) { false }
+                        val accepted = owner.verifyUnsubscribe(token, this@AndroidBleGattPort, status) {
+                            gatt.readDescriptor(descriptor)
+                        }
                         if (!accepted) {
                             subscription.abort()
-                            owner.descriptor(token, this@AndroidBleGattPort, false, false)
                         }
                     }
                 }
@@ -215,7 +230,7 @@ private class AndroidBleGattPort(
             dispatch(gatt) { owner ->
                 if (descriptor !== cccd) return@dispatch
                 val disabled = subscription.readCompleted(status == BluetoothGatt.GATT_SUCCESS, value) ?: return@dispatch
-                owner.descriptor(token, this@AndroidBleGattPort, false, disabled)
+                owner.descriptor(token, this@AndroidBleGattPort, false, disabled, status, BleEvidenceAction.DESCRIPTOR_READ_CALLBACK)
             }
         }
 
@@ -242,7 +257,7 @@ private class AndroidBleGattPort(
 
     override fun connect(): Boolean {
         check(gatt == null)
-        gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M_MASK, handler)
+        gatt = device.connectGatt(context, backgroundConnect, callback, BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M_MASK, handler)
         return gatt != null
     }
 

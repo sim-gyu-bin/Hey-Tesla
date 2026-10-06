@@ -35,16 +35,33 @@ Kotlin domain 계층이 정책 전이를 정의하고, Android 서비스가 단�
 - 처리 전 취소는 `CANCELED`로 처리 차단한다. 로컬 처리 후 취소는 `PROCESSED`/`UNKNOWN`을 보존하고 안내만 중단한다. 처리된 일을 미처리로 가장하지 않는다.
 - 신뢰도 제외는 승인된 로컬 진단에만 해당한다. 아래 실차용 신선한 P·계정/차량 권한·근접·음성 확인·만료 게이트를 생략하지 않는다.
 
-### 구현된 BLE 연결 진단 전이
+### 구현된 주말 BLE 반복 시험 전이
 
-`0.12.0-probe`의 수동 BLE 진단은 화면 표시·Bluetooth 권한/ON·단일 등록을 요구하며 접근 관찰·오디오 진단과 같은 예약 경계에서 배제한다. `CONNECTING → DISCOVERING → SUBSCRIBING → OBSERVING → CLEANING_UP`를 단계별 제한으로 진행한다. RX 알림은 횟수만 세고 payload는 읽거나 저장하지 않는다.
+`0.14.0-probe`는 명시적으로 시작한 서비스가 실행 조건·후보·GATT 회차를 소유한다. 기준 방식은 `WAITING_FOR_APPEARANCE → 실제 CDM BLE 출현 → GATT 회차 → WAITING_FOR_DEPARTURE → 실제 BLE 이탈 → WAITING_FOR_APPEARANCE`다. 개선 방식은 선택된 CDM·외부 BT·필터 스캔을 한 후보로 병합하고 신호 철회/만료 뒤 재무장한다. HOME·잠금·Activity 재생성은 취소하지 않는다. 기존 관찰 전용·오디오 진단은 시작/대기/정리 전체와 배타적이다.
 
-- 취소·화면 이탈·Bluetooth OFF·권한/등록 상실·단계 만료는 예약을 먼저 풀지 않고 정리로 전환한다. 진행 중 enable 쓰기 뒤 disable을 직렬화한다.
+- 매 회차는 `CONNECTING → DISCOVERING → SUBSCRIBING → OBSERVING → CLEANING_UP`의 단계별·전체 제한을 따른다. 서비스 대기 전체에는 회차의 40초 제한을 적용하지 않는다. RX 알림은 횟수만 세고 payload는 읽거나 저장하지 않는다.
+- 기준은 완료·실패 뒤 실제 이탈을 요구하며 중복 출현/BT로 재시도하지 않는다. 개선은 자체 GATT·최근 close BT 신호를 억제하고 CDM 이탈 30초·스캔 증거 180초의 유예/만료를 적용한다. BT 해제는 기존 증거를 철회할 뿐 자기 연결 직후 새 후보를 만들지 않는다.
+- 선택된 재시도는 실패 경계에서 후보당 최대 2회·정리 포함 40초다. 이전 close 후 2초와 잔여 12초 이상을 요구하고 COMPLETE·BLOCKED·프로필 없음·중지·close 실패는 제외한다. 정리 중 다음 후보는 이전 close·lease 반환·watchdog/association/current 비움 뒤에만 진행한다.
+- 감지만 모드는 후보만 집계하고 probe/회차 wake lock을 발급하지 않는다. 기준/개선·개별 옵션은 RAM에서 선택하며 실행 중 고정한다. `autoConnect=true`는 별도 비교 옵션이고 기본 false다. 필터 스캔은 40초/120초로 제한하며 GATT 중 정지·실제 close 후 재개한다.
+- 기준의 실제 이탈 또는 개선 후보의 최종 철회/만료는 당회차를 정리하고 시험을 유지한다. 앱·알림 중지·Bluetooth OFF·권한/등록/로그 조건 상실은 새 트리거를 봉인한 뒤 정리·서비스 종료로 전환한다. 진행 중 enable 쓰기 뒤 disable을 직렬화한다.
 - write callback은 요청 ID가 없어 중복 enable과 disable을 구별할 수 없다. 원격 구독 해제는 별도 CCCD 읽기가 성공하고 값이 정확한 두 바이트 `[0, 0]`일 때만 확인한다.
 - 구독 확인·원격 해제·disconnect callback·로컬 close 성공은 별도 증거다. close 성공 때만 예약을 해제하며 close 실패는 `CLEANUP_FAILED`와 예약 유지로 재시작을 요구한다. 늦은 다른 token/GATT callback은 현재 소유자를 변경하지 못한다.
-- 종료 상태는 인증·명령 승인·실차 제어 성공이 아니다. 키 등록·TX characteristic 쓰기·Fleet API는 구현 범위 밖이다.
+- 최초 수신/처리 지연·거절과 GATT 요청 반환/콜백·첫 RX는 별도 증거다. 원 SDK status 미수신은 null이며 본시험/정리 status를 분리한다. 구독 COMPLETE는 0 RX에서도 가능하며 실차 인증 성공으로 승격하지 않는다.
+- 종료 상태는 인증·명령 승인·실차 제어 성공이 아니다. **주말 BLE 반복 시험**에는 키 등록·TX characteristic 쓰기·Fleet API가 없다. 별도 수동 차량 키 경로는 아래에 정의한다.
+- 강제 종료 후 자동 복원하지 않는다. 미정상 marker는 최종 회차와 `BLE_FIELD_STOPPED`까지 파일 동기화·pending 0이 확인된 경우에만 정상 종료로 지운다. close/로그 실패는 유지하며 새 실행은 이전 비동기 완료가 새 marker를 지우지 못하게 봉인한다.
 
 
+
+### 수동 차량 키 등록·읽기 전이
+
+`0.16.0-probe`에서 도입한 경로를 `0.18.0-probe`에서도 유지한다. Application 소유의 단일 예약·token으로 `PREPARING_KEY → CONNECTING → DISCOVERING → NEGOTIATING_MTU → SUBSCRIBING`을 실행한다. 등록 요청은 `CARD → HANDSHAKING → READING_STATUS`, 이미 등록한 키의 조회는 `HANDSHAKING → READING_STATUS`로 진행한다. 키카드 대기는 120초, 전체는 180초 이내이며 기존 음성 세션의 40초 정책을 늘리지 않는다.
+
+- 모든 기존 관찰·BLE 반복·오디오 진단과 배타적이다. 화면 이탈·배경 전환·잠금·Bluetooth/권한/대상 조건 상실은 새 전송을 봉인하고 `CLEANING`으로 이동한다. Activity 재생성이나 재연결로 재등록·재조회하지 않는다.
+- 시작 전 입장 차단과 진행 중 자기 예약을 UI에서 구분한다. 자기 예약/활성 실행은 외부 진단 충돌 문구를 표시하지 않으며 VIN·동의·두 시작 버튼은 비활성화한다. 활성 실행에는 단계·취소를 제공한다. 정리 실패가 표시 우선순위이며 실제 외부 예약과 runtime 입장·전송 검사는 그대로 유지한다.
+- 등록 응답 `registrationReported`는 인증 전 보고다. 새 세션의 HMAC·요청 대응·AES-GCM 검증과 상태 필드 수신이 성공했을 때만 `VERIFIED_STATUS`다. 이 결과에도 주차 P·차량 신원 인증서·제어 완료 증거는 없다.
+- 요청 대응·명시적 무오류 `OK` ACK에는 `HANDSHAKING`을 유지한다. ACK 반복은 기존 단계/전체 기한을 늘리거나 상태 요청을 만들지 않는다. 서명·태그·HMAC을 검증한 session info만 `READING_STATUS`로 진행시킨다. 인증 실패의 고정 event를 `UNKNOWN`보다 먼저 기록하며, 인증 전 키 미등록 보고는 실제 키 부재·등록 철회의 증거가 아니다.
+- 등록 전송 뒤 취소·시간 초과는 `UNKNOWN`과 등록 불명을 보존한다. GATT close 성공은 로컬 해제이며 원격 등록 철회·구독 해제 증거가 아니다. close 실패는 `CLEANUP_FAILED`와 예약을 유지하고 다른 진단을 차단한다.
+- 늦은 이전 token/GATT 응답·재전송·재사용 counter·기한 경계 `now >= deadline`은 새 상태나 전송을 만들지 않는다. 완료/실패는 `CLEANING` 뒤 봉인하며 키·VIN·응답 버퍼를 로그에 복사하지 않는다.
 
 ## 전이표
 

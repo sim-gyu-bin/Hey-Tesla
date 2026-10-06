@@ -14,12 +14,14 @@ const val FIELD_LOG_RELATIVE_PATH = "field-diagnostics/events.jsonl"
 /**
  * JSONL 레코드 스키마 버전.
  *
+ * 6 = BLE 후보·스캔·GATT 요청/콜백의 enum 기반 `bleEvidence`, 비교 조건 및 오류 분리.
+ * 5 = 서비스 소유 주말 BLE 회차의 typed `bleTrial` 증거 요약.
  * 4 = 로컬 dry-run·오프라인 TTS 결과와 입력·출력·포커스 해제 요약.
  * 3 = `speechTrial.commandDecision`, 2 = 판정 없는 `speechTrial`, 1 = 요약 없는 과거 행.
  * 앱은 항상 현재 버전으로만 덧붙이고 기존 행을 고치지 않으므로 이전 버전과 공존한다.
  * 파서는 행마다 `version`을 보고, 없어진 필드를 가정하지 않는다.
  */
-const val FIELD_LOG_RECORD_VERSION = 4
+const val FIELD_LOG_RECORD_VERSION = 6
 
 /** 이 시험의 로그 상한. 도달하면 회전·삭제·덮어쓰기 없이 기록만 멈춘다. */
 const val FIELD_LOG_LIMIT_BYTES = 2L * 1024L * 1024L
@@ -70,6 +72,7 @@ data class FieldLogStatus(
  *
  * [speechTrial]은 회차를 끝내는 그 행에만 붙는 상세요약이다. 시작·게이트·다른 사건 행은 null이므로
  * 직전 회차 값이 다음 행으로 이어지지 않는다. 요약도 문자열 allowlist와 유한한 신뢰도만 통과시킨다.
+ * [bleTrial]도 해당 사건의 회차 증거만 담는다. 없는 행은 null이고 다른 회차 값을 자동 재사용하지 않는다.
  */
 data class FieldRecord(
     val processId: String,
@@ -81,6 +84,8 @@ data class FieldRecord(
     val state: Map<String, Any?>,
     val speechTrial: SpeechTrialSummary? = null,
     val version: Int = FIELD_LOG_RECORD_VERSION,
+    val bleTrial: BleTrialSummary? = null,
+    val bleEvidence: BleEventEvidence? = null,
 )
 
 /** JSON `state` 객체에 쓸 수 있는 키. 여기 없는 키는 인코딩 단계에서 버린다. */
@@ -99,6 +104,22 @@ object FieldStateKeys {
     const val ASSOCIATIONS = "associations"
     const val SESSION_ACTIVE = "sessionActive"
     const val STOP_REASON = "stopReason"
+    const val BLE_FIELD_TRIAL_ACTIVE = "bleFieldTrialActive"
+    const val BLE_FIELD_TRIAL_STARTING = "bleFieldTrialStarting"
+    const val BLE_FIELD_TRIAL_STOPPING = "bleFieldTrialStopping"
+    const val BLE_FIELD_TRIAL_WAITING_FOR_DEPARTURE = "bleFieldTrialWaitingForDeparture"
+    const val BLE_FIELD_TRIAL_ATTEMPT_COUNT = "bleFieldTrialAttemptCount"
+    const val BLE_FIELD_TRIAL_COMPLETED_COUNT = "bleFieldTrialCompletedCount"
+    const val BLE_FIELD_TRIAL_STOP_REASON = "bleFieldTrialStopReason"
+    const val BLE_SCAN_PERMISSION = "bluetoothScanPermission"
+    const val BLE_FIELD_OBSERVATION_ONLY = "bleFieldObservationOnly"
+    const val BLE_FIELD_SUPPLEMENTAL_SCAN = "bleFieldSupplementalScan"
+    const val BLE_FIELD_BT_ASSIST = "bleFieldBtAssist"
+    const val BLE_FIELD_BACKGROUND_CONNECT = "bleFieldBackgroundConnect"
+    const val BLE_FIELD_RETRY_ENABLED = "bleFieldRetryEnabled"
+    const val BLE_FIELD_CANDIDATE_COUNT = "bleFieldCandidateCount"
+    const val BLE_FIELD_SCAN_RUNNING = "bleFieldScanRunning"
+    const val BLE_FIELD_SCAN_FAILURE = "bleFieldScanFailure"
 
     /** 기록 순서를 고정한 허용 키 목록. */
     val ORDER: List<String> = listOf(
@@ -116,6 +137,22 @@ object FieldStateKeys {
         ASSOCIATIONS,
         SESSION_ACTIVE,
         STOP_REASON,
+        BLE_FIELD_TRIAL_ACTIVE,
+        BLE_FIELD_TRIAL_STARTING,
+        BLE_FIELD_TRIAL_STOPPING,
+        BLE_FIELD_TRIAL_WAITING_FOR_DEPARTURE,
+        BLE_FIELD_TRIAL_ATTEMPT_COUNT,
+        BLE_FIELD_TRIAL_COMPLETED_COUNT,
+        BLE_FIELD_TRIAL_STOP_REASON,
+        BLE_SCAN_PERMISSION,
+        BLE_FIELD_OBSERVATION_ONLY,
+        BLE_FIELD_SUPPLEMENTAL_SCAN,
+        BLE_FIELD_BT_ASSIST,
+        BLE_FIELD_BACKGROUND_CONNECT,
+        BLE_FIELD_RETRY_ENABLED,
+        BLE_FIELD_CANDIDATE_COUNT,
+        BLE_FIELD_SCAN_RUNNING,
+        BLE_FIELD_SCAN_FAILURE,
     )
 }
 
@@ -126,6 +163,89 @@ object FieldStateKeys {
  */
 object FieldEvents {
     private val fixedCodes = setOf(
+        "TESLA_KEY_STARTED",
+        "TESLA_KEY_START_BLOCKED",
+        "TESLA_KEY_CREDENTIAL_READY",
+        "TESLA_KEY_SUBSCRIBED",
+        "TESLA_KEY_TX_ATTEMPTED",
+        "TESLA_KEY_REGISTRATION_REPORTED",
+        "TESLA_KEY_STATUS_VERIFIED",
+        "TESLA_KEY_RESULT_UNKNOWN",
+        "TESLA_KEY_CANCELED",
+        "TESLA_KEY_TIMEOUT",
+        "TESLA_KEY_COMPLETE",
+        "TESLA_KEY_FAILED",
+        "TESLA_KEY_CLEANUP_FAILED",
+        "TESLA_KEY_LOCAL_CLOSED",
+        "TESLA_KEY_OTHER_DIAGNOSTIC_BLOCKED",
+        "TESLA_KEY_AUTH_ACKNOWLEDGED",
+        "TESLA_KEY_AUTH_REQUEST_REJECTED",
+        "TESLA_KEY_AUTH_KEY_NOT_PAIRED_REPORTED",
+        "TESLA_KEY_AUTH_OPERATION_REJECTED",
+        "TESLA_KEY_AUTH_UNEXPECTED_PAYLOAD",
+        "TESLA_KEY_AUTH_SESSION_STATUS_UNSUPPORTED",
+        "TESLA_KEY_AUTH_SIGNATURE_MISSING",
+        "TESLA_KEY_AUTH_TAG_MISSING",
+        "TESLA_KEY_AUTH_TAG_LENGTH_INVALID",
+        "TESLA_KEY_AUTH_PARAMETERS_INVALID",
+        "TESLA_KEY_AUTH_HMAC_MISMATCH",
+        "TESLA_KEY_AUTH_SESSION_INFO_INVALID",
+        "UWB_SUPPORT_REQUESTED",
+        "UWB_SUPPORT_DIAGNOSTIC_BUSY",
+        "UWB_SUPPORT_BACKEND_UNAVAILABLE",
+        "UWB_SUPPORT_REQUEST_FAILED",
+        "UWB_SUPPORT_METADATA_RECEIVED",
+        "UWB_SUPPORT_METADATA_FAILED",
+        "UWB_SUPPORT_TIMEOUT",
+        "UWB_SUPPORT_CANCELED",
+        "UWB_SUPPORT_CLEANUP_FAILED",
+        "UWB_SUPPORT_OTHER_DIAGNOSTIC_BLOCKED",
+        "BLE_EVIDENCE",
+        "BLUETOOTH_SCAN_PERMISSION_REQUIRED",
+        "BLE_SCAN_ADDRESS_UNAVAILABLE",
+        "BLE_SCAN_PERMISSION_REQUIRED",
+        "BLE_SCAN_PERMISSION_REVOKED",
+        "BLE_SCAN_NO_OFFLOADED_FILTER",
+        "BLE_SCAN_UNAVAILABLE",
+        "BLE_SCAN_START_FAILED",
+        "BLE_SCAN_STOP_FAILED",
+        "BLE_SCAN_CALLBACK_FAILED",
+        "BLE_FIELD_START_REQUESTED",
+        "BLE_FIELD_RUNNING",
+        "BLE_FIELD_WAITING",
+        "BLE_FIELD_APPEARED",
+        "BLE_FIELD_DISAPPEARED",
+        "BLE_FIELD_DUPLICATE_APPEARANCE",
+        "BLE_FIELD_STAGE",
+        "BLE_FIELD_TRIAL_FINISHED",
+        "BLE_FIELD_HEARTBEAT",
+        "BLE_FIELD_STOP_REQUESTED",
+        "BLE_FIELD_STOPPED",
+        "BLE_FIELD_PREVIOUS_RUN_UNCLOSED",
+        "BLE_FIELD_START_REJECTED",
+        "BLE_FIELD_CLEANUP_FAILED",
+        "BLE_PROBE_STARTED",
+        "BLE_PROBE_BUSY",
+        "BLE_PROBE_RESTART_REQUIRED",
+        "BLE_PROBE_BLOCKED",
+        "BLE_PROBE_COMPLETE",
+        "BLE_PROBE_CANCELED",
+        "BLE_PROBE_TIMED_OUT",
+        "BLE_PROBE_FAILED",
+        "BLE_PROBE_CLEANUP_FAILED",
+        "BLE_SUPPORT_CLEANUP_BLOCKED",
+        "BLE_PROBE_ENABLE_BLOCKED",
+        "BLE_PROBE_AUTOMATIC_MIC_BLOCKED",
+        "BLE_PROBE_APPROACH_BLOCKED",
+        "BLE_PROBE_MANUAL_BLOCKED",
+        "BLE_PROBE_MICROPHONE_BLOCKED",
+        "DIAGNOSTIC_OBSERVE_BLOCKED",
+        "BLE_FIELD_MARKER_READ_FAILED",
+        "BLE_FIELD_MARKER_WRITE_FAILED",
+        "BLE_FIELD_OTHER_DIAGNOSTIC_BLOCKED",
+        "BLE_FIELD_NOTIFICATION_STOP",
+        "BLE_FIELD_WAKE_LOCK_UNAVAILABLE",
+        "BLE_FIELD_WAKE_LOCK_RELEASE_FAILED",
         "ASSOCIATION_CREATED",
         "ASSOCIATION_FAILED",
         "ASSOCIATION_READ_FAILED",
@@ -352,24 +472,29 @@ internal object FieldJson {
         append(",\"event\":").append(quote(record.event))
         // 요약은 이 행에만 붙는다. 없는 행은 명시적 null이라 이전 회차 값으로 해석될 여지가 없다.
         append(",\"speechTrial\":").append(record.speechTrial?.let { SpeechTrialSummaryJson.encode(it) } ?: "null")
+        append(",\"bleTrial\":").append(record.bleTrial?.let { BleTrialSummaryJson.encode(it) } ?: "null")
+        append(",\"bleEvidence\":").append(record.bleEvidence?.encode() ?: "null")
         append(",\"state\":{")
         var first = true
         for (key in FieldStateKeys.ORDER) {
             if (!record.state.containsKey(key)) continue
             if (!first) append(',')
             first = false
-            append(quote(key)).append(':').append(primitive(record.state[key]))
+            append(quote(key)).append(':').append(primitive(key, record.state[key]))
         }
         append("}}")
     }
 
     /** 허용 타입 밖의 값과 allowlist 밖 문자열은 `null`로 낮춘다. */
-    private fun primitive(value: Any?): String = when (value) {
+    private fun primitive(key: String, value: Any?): String = when (value) {
         null -> "null"
         is Boolean -> if (value) "true" else "false"
         is Int -> value.toString()
         is Long -> value.toString()
-        is String -> if (FieldEvents.isAllowed(value)) quote(value) else "null"
+        is String -> if (
+            if (key == FieldStateKeys.BLE_FIELD_TRIAL_STOP_REASON) BleTrialSummaryJson.isAllowedReason(value)
+            else FieldEvents.isAllowed(value)
+        ) quote(value) else "null"
         else -> "null"
     }
 

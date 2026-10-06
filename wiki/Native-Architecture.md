@@ -23,18 +23,21 @@ React Native나 JavaScript 브리지는 사용하지 않는다. UI, 권한, Andr
 
 | 파일 | 실제 책임 |
 | --- | --- |
-| `MainActivity.kt` | Activity 소유 probe와 상태 수집, 사용자 권한·설정 진입, VIN을 RAM에서만 처리하는 정확 광고명 CDM chooser. 화면 이탈 시 수동 진단 정리 |
-| `ui/AppActions.kt` / `ui/HeyTeslaApp.kt` | UI 효과의 기존 Activity 콜백 연결, 홈·설정·진단 목적지와 뒤로 이동. 진단 목적지를 떠나기 전에 명시적 취소 호출 |
+| `MainActivity.kt` | Activity 소유 음성 probe와 런타임 상태 수집, 사용자 권한·설정 진입, VIN을 RAM에서만 처리하는 정확 광고명 CDM chooser. 화면 이탈 시 수동 음성 진단 정리; 주말 BLE 시험은 취소하지 않음 |
+| `ui/AppActions.kt` / `ui/HeyTeslaApp.kt` | UI 효과의 기존 Activity/런타임 콜백 연결, 홈·설정·진단 목적지와 뒤로 이동. 진단 이탈은 음성 probe만 정리하며 서비스 시험은 유지 |
 | `ui/HomeScreen.kt` / `ui/SettingsScreen.kt` | 실제 런타임 상태의 짧은 요약·다음 행동, 차량 등록과 권한·기본 비서 설정. 가짜 차량 상태·명령 버튼 없음 |
-| `ui/DiagnosticsScreen.kt` | 음성·BLE 연결·마이크·접근·이벤트 진단, 실행/취소와 접힌 증거 상세. 탭 전환 전 수동 진단 정리 |
+| `ui/DiagnosticsScreen.kt` | 음성·주말 BLE·마이크·접근·이벤트 진단, 실행/중지와 접힌 증거 상세. 서비스 시작/대기/정리·회차 수·로그 건강을 구분 |
 | `ui/AppTheme.kt` / `ui/AppComponents.kt` | 차콜 색상·타이포의 단일 원본과 설정 행·제목·상세 행의 공통 표현 및 접근성 의미 |
-| `DiagnosticApp.kt` | 프로세스 내 상태·이벤트, 관찰 ON 요청·서비스 소유권 게이트, 기본 비서·권한 조건, DataStore의 비민감 활성화 선호. 수동 STT·BLE 진단 예약과 접근·캡처의 상호 배제 |
+| `DiagnosticApp.kt` | 프로세스 내 상태·이벤트, 관찰/주말 시험 요청·서비스 소유권 게이트, 기본 비서·권한 조건, DataStore의 비민감 선호. 시작/대기/정리 전체의 음성·기존 관찰 상호 배제. association ID는 내부 RAM에 두고 공개 상태는 count만 제공 |
 | `FieldEventLog.kt` | 허용된 비민감 이벤트의 JSONL 인코딩·단일 IO writer·제한된 큐·2 MiB append 전용 파일. 저장 대기·유실·한도·실패 상태 제공 |
 | `AccessServices.kt` | 시스템 BLE presence 콜백과 기본 비서 경로, 음성 비서 진단 안내 |
-| `ObservationService.kt` | 마이크와 분리된 `connectedDevice` FGS·지속 알림, 등록 차량 CDM 관찰 시작·종료. 앱·알림 OFF·실패·서비스 파괴의 정리 |
+| `ObservationService.kt` | 관찰 전용과 `BLE_FIELD` 모드의 `connectedDevice` FGS·지속 알림·CDM 소유권. 실행 조건 고정·후보/회차·보조 스캔·제한 재시도·bounded 정리. GATT 회차만 최대 45초 partial wake lock·30분 heartbeat |
 | `MicrophoneService.kt` | microphone FGS, 16 kHz PCM 입력의 개수·RMS 요약, silenced·만료·종료 처리. 오디오 저장·STT 없음 |
 | `SessionPolicy.kt` | 캡처 단일 세션·만료·실제 이탈·cooldown과 관찰 요청 토큰 정책. 이전 START·STOP이 새 관찰 소유권을 변경하지 못하게 함 |
-| `BleConnectionProbe.kt` / `BleGattSession.kt` / `BleCccdSubscription.kt` | Activity 소유의 등록 차량 GATT 연결·Tesla 서비스/TX/RX 확인·RX 구독·짧은 관찰과 bounded 정리. 주소는 RAM에서 바이트 배열 API로 해석하며 TX 쓰기·인증·명령은 없음. CCCD 해제는 성공한 정확한 `[0, 0]` readback만 증거로 인정 |
+| `BleConnectionProbe.kt` / `BleGattSession.kt` / `BleCccdSubscription.kt` | 서비스 소유 등록 차량 GATT 연결·Tesla 서비스/TX/RX 확인·RX 구독·짧은 관찰과 bounded 정리. 주소는 RAM에서 바이트 배열 API로 해석하며 TX 쓰기·인증·명령은 없음. CCCD 해제는 성공한 정확한 `[0, 0]` readback만 증거로 인정 |
+| `BleFieldConfig.kt` / `BleFieldTrialPolicy.kt` / `BleGattOwnership.kt` | 기준/개선·감지만·스캔·BT·백그라운드 연결·재시도의 불변 실행 조건. 신호 병합/만료·자기 GATT 억제·후보당 2회/40초. 실제 close→예약 반환→watchdog/association/current 비움→완료 callback의 재진입 순서 |
+| `BleSupplementalScanner.kt` | 등록 주소 단일 LOW_POWER 필터·offloaded filtering 요구·40초/120초 duty cycle·GATT 중 정지·세대별 낡은 콜백 거부. 스캔의 원 monotonic 시각·RSSI만 전달하며 주소/광고 원문은 출력하지 않음 |
+| `BleEventEvidence.kt` / `BleTrialSummary.kt` | JSONL v6의 최초 수신/처리 지연·거절·후보·회차·GATT 요청 반환/콜백·첫 RX·본시험/정리 SDK status·단계시간·정리 증거. 미수신 status는 null, 주소·RX bytes·이전 회차 자동 carry-over 없음 |
 | `UnsupportedRecognitionService.kt` | Android 비서 등록에 필수인 인식 서비스. 인식·지원 검사에는 명시적 비지원 오류를 반환하고 캡처·모델 다운로드·외부 인식을 시작하지 않음 |
 | `SessionPolicyTest.kt` | 정책 경계 8개 회귀 테스트. 감지 기준 초기화 시 대기 세션 폐기·실제 이탈 및 cooldown 유지 포함. 실제 OS·차량 접근 시험의 대체물이 아님 |
 | `ObservationLifecycleTest.kt` | 관찰 시작 중 OFF, 낡은 START·STOP·서비스 종료, 중복 ON, 종료 후 명시적 재시작, 새 프로세스의 이전 intent 거부 경계 6개 |
@@ -44,13 +47,21 @@ React Native나 JavaScript 브리지는 사용하지 않는다. UI, 권한, Andr
 | `SpeechPcmFixture.kt` / `SpeechPcmFixtureTest.kt` | 크기 제한 WAV 디코더와 4개 경계 테스트. PCM16·16 kHz·mono만 허용하며 filler/padding·잘림·초과 데이터·취소 처리 |
 | `res/raw/speech_trial_ko.wav` | 설치된 macOS Yuna로 생성한 고정 비개인 시험 문장. 음성 모델·개인 녹음이 아닌 재현용 합성 데이터 |
 
-`0.5.0-probe`에서 UI 책임을 위와 같이 분리했다. probe는 화면 재구성마다 만들지 않고 계속 Activity가 소유한다. `onPause`/`onDestroy` 정리를 보존하며 같은 Activity의 진단 이탈은 `leaveDiagnostics()`로 지원 조회·STT·수동 마이크를 정리한다. 자동 접근 세션의 독립 수명은 바꾸지 않는다. 목적지 복원은 진단 자동 재시작이 아니며 VIN은 저장 가능한 UI 상태로 옮기지 않는다. 설정 상세는 하나만 펼치며 전환·제출 시 VIN 입력을 비운다. 2026-09-29 새 화면의 S23 설치·일부 조작을 확인했으며 전체 회귀와 구분한 근거는 [실측 기록](Device-Validation.md)을 따른다.
+`0.5.0-probe`에서 UI 책임을 위와 같이 분리했다. 음성 probe는 화면 재구성마다 만들지 않고 Activity가 소유한다. `onPause`/`onDestroy` 정리를 보존하며 같은 Activity의 진단 이탈은 `leaveDiagnostics()`로 지원 조회·STT·수동 마이크를 정리한다. `0.13.0-probe`의 BLE 시험은 별도로 서비스가 소유하여 화면 이탈·HOME·Activity 재생성에도 유지한다. 목적지 복원은 진단 자동 재시작이 아니며 VIN은 저장 가능한 UI 상태로 옮기지 않는다. 설정 상세는 하나만 펼치며 전환·제출 시 VIN 입력을 비운다. 화면 실측 범위는 [실측 기록](Device-Validation.md)을 따른다.
 
 `0.6.0-probe`의 접근 진단은 기본적으로 관찰 전용이다. `automaticMicrophoneEnabled`는 프로세스 기본값 false·비영속이며, 관찰과 세션·음성 예약이 모두 꺼진 상태에서만 별도 변경한다. 관찰 전용 출현은 정책 debounce를 만들기 전에 반환하고 `automaticAllowed()`도 별도 동의를 요구한다. 진단 비활성화 시 동의·지연 작업을 해제한다. 활성화 시 이전 현재 감지를 지우되 실제 이탈·cooldown 조건은 보존한다. 출현·이탈 콜백 횟수와 최근 이벤트는 비민감 RAM 상태로만 누적하며 중복 콜백도 포함한다.
 
 `0.7.0-probe`는 별도 시험 파일을 `noBackupFilesDir/field-diagnostics/events.jsonl`에 보관한다. 프로세스·시험 UUID와 시각·고정 이벤트 코드·허용 상태만 기록하며 기존 RAM 표시와 구분한다. 파일은 자동 삭제·회전·덮어쓰지 않고 프로세스 재시작 후 추가 기록한다. USB 디버깅의 `run-as`로 디버그 APK 파일을 회수한다. 별도 상주 서비스·마이크·깨우기·외부 전송은 추가하지 않는다. 프로세스 생존이나 수신하지 못한 콜백의 복원을 보장하지 않는다.
 
 `0.8.0-probe`는 접근 ON의 CDM 수명을 `ObservationService`로 옮긴다. `observationStartPending`은 요청 대기, `observationServiceRunning`은 FGS 승격 완료, `observing`은 CDM 요청 수락, `present`는 실제 BLE 출현으로 구분한다. 알림·Bluetooth 조건을 시작 전에 검사하고 앱이 표시된 상태의 명시적 ON에서만 요청한다. 앱·알림 종료와 실패는 동일한 정리 경계를 사용한다. 서비스는 `START_NOT_STICKY`이며 프로세스 재생성 시 OFF다. 별도 자동 마이크 동의·기본 비서·기존 오디오 게이트를 유지하며 관찰 ON 자체는 캡처를 시작하지 않는다. 상시 wake lock·추가 BLE 스캔·주기적 원격 조회는 도입하지 않는다. 유형·권한은 [Android 공식 connectedDevice FGS 조건](https://developer.android.com/develop/background-work/services/fgs/service-types#connected-device)을 따른다.
+
+`0.13.0-probe`는 같은 서비스의 `BLE_FIELD` 모드에 반복 BLE 회차를 이관한다. 실제 BLE 출현당 한 회차이며 종료 후 실제 이탈을 요구한다. 회차 정리 중 재출현은 이전 소유권을 모두 비운 뒤에만 진행한다. `BT_CONNECTED`는 접근 트리거가 아니다. 화면/HOME/잠금과 독립적이나 명시적 중지·Bluetooth/권한/등록/로그 조건 상실은 신규 트리거를 봉인하고 서비스 정리로 이어진다. 대기 중에는 마이크·wake lock·주기적 GATT 연결을 사용하지 않는다. heartbeat는 CPU 절전 중 지연될 수 있으며 파일 공백만으로 서비스 종료나 차량 미접근을 단정하지 않는다.
+
+`0.14.0-probe`는 위 동작을 기준 방식으로 보존하고 같은 정책의 선택 조건으로 개선 방식을 제공한다. BT 보조 미선택은 shadow 계측만 남긴다. 선택된 외부 BT·CDM·필터 스캔은 후보로 병합하며 자체 GATT 중/close 후 15초의 BT 연결은 억제한다. 개선 후보의 CDM 이탈은 30초 유예하고 스캔 증거는 180초 뒤 만료한다. 감지만은 후보를 기록하되 probe·wake lock을 만들지 않는다. 재시도는 선택된 실패에만 2회/총 40초·실제 close 후 2초·잔여 12초 이상을 요구하며 정리 실패·COMPLETE·BLOCKED·프로필 없음·중지는 재시도하지 않는다.
+
+필터 스캔은 등록 주소 문자열을 SDK 요구 대문자로 변환한 단일 필터를 사용한다. LOW_POWER·최대 40초·시작 간격 최소 120초이며 GATT 동안 정지하고 실제 close 후에만 재개한다. `ScanResult.timestampNanos`의 원 monotonic 시각을 사용해 지연 배치가 증거 수명을 늘리지 못하게 한다. 권한·offloaded filtering·scanner 불가와 시작/중지 실패를 구분하고 무필터 fallback은 없다. 정상 duty cycle마다 파일을 채우지 않으며 첫 실행·GATT 일시정지/재개·최종/실패와 후보 첫 match만 기록한다.
+
+실행의 비민감 미정상 marker는 시작 전에 동기 `commit()`으로 기록하고 최종 회차·중지 행의 `fd.sync`와 pending 0 확인 후에만 정상 종료로 지운다. 새 실행은 이전 비동기 완료가 새 marker를 지우지 못하도록 봉인한다. close/로그 실패는 marker를 유지한다. 다음 프로세스는 이전 미정상 실행을 원인 불명으로 남길 뿐 실행을 자동 복원하지 않는다. JSONL v6의 `bleTrial`과 `bleEvidence`는 해당 증거 행에만 있으며 시작/heartbeat는 attempt 0·IDLE·단계시간 null로 이전 회차를 재사용하지 않는다. 기존 v1~v5 바이트는 유지한다.
 
 현재 앱은 프로세스 재생성 시 실행 OFF다. 저장된 선호를 표시하되 자동으로 마이크나 접근 관찰을 복원하지 않는다. 이는 검증 앱의 현재 제한이며 최종 무터치 운영 요구를 충족했다는 뜻이 아니다. `0.1.0-probe`에서 수동 10초 만료·즉시 종료·화면 이탈과 미등록 차량 차단을 확인했고, 후속 지원 조회와 STT·PCM 진단은 아래에 별도로 구분한다.
 

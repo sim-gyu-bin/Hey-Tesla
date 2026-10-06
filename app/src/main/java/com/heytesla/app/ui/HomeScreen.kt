@@ -31,6 +31,7 @@ internal fun HomeScreen(
     onOpenSettings: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onStopSession: () -> Unit,
+    onStopBle: () -> Unit,
 ) {
     val restartRequired = trial.reason?.contains("RESTART_REQUIRED") == true ||
         ble.status == BleProbeStatus.CLEANUP_FAILED || (state.bleDiagnosticActive && !ble.active)
@@ -44,14 +45,10 @@ internal fun HomeScreen(
             nextAction = onOpenDiagnostics
             nextLabel = "진단 상태 보기"
         }
-        ble.active -> {
-            status = if (ble.status == BleProbeStatus.CLEANING_UP) {
-                "BLE 연결을 정리하고 있어요."
-            } else {
-                "BLE 연결 진단이 진행 중이에요."
-            }
-            nextAction = onStopSession
-            nextLabel = "BLE 연결 진단 취소"
+        state.bleFieldBusy() || ble.active -> {
+            status = bleFieldStatus(state, ble)
+            nextAction = onStopBle
+            nextLabel = "주말 BLE 시험 중지"
         }
         restartRequired -> {
             status = "오디오 정리에 실패했어요. 앱을 다시 시작해 주세요."
@@ -82,7 +79,7 @@ internal fun HomeScreen(
             nextAction = onOpenDiagnostics
             nextLabel = "접근 진단 보기"
         }
-        state.associations.isEmpty() -> {
+        state.associationCount == 0 -> {
             status = "차량 등록이 필요해요."
             nextAction = onOpenSettings
             nextLabel = "차량 등록 열기"
@@ -165,10 +162,13 @@ internal fun HomeScreen(
             )
             DetailRow(
                 label = "차량 등록",
-                value = if (state.associations.isEmpty()) "등록 필요" else "등록됨",
+                value = if (state.associationCount == 0) "등록 필요" else "등록됨",
             )
             DetailRow(label = "권한", value = permissionSummary(state))
             DetailRow(label = "한국어 모델", value = supportSummary(support))
+            DetailRow("주말 BLE 시험", bleFieldStatus(state, ble))
+            DetailRow("시도 / 종료 회차", "${state.bleFieldTrialAttemptCount} / ${state.bleFieldTrialCompletedCount}")
+            DetailRow("로그 건강 · 상한", bleFieldLogStatus(state))
         }
     }
 }

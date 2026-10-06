@@ -28,6 +28,8 @@ import com.heytesla.app.BleProbeState
 import com.heytesla.app.DiagnosticState
 import com.heytesla.app.SpeechProbeState
 import com.heytesla.app.SpeechTrialState
+import com.heytesla.app.UwbProbeState
+import com.heytesla.app.TeslaKeyProbeState
 
 private enum class Destination { HOME, SETTINGS, DIAGNOSTICS }
 
@@ -37,6 +39,8 @@ internal fun HeyTeslaApp(
     support: SpeechProbeState,
     trial: SpeechTrialState,
     ble: BleProbeState,
+    uwb: UwbProbeState,
+    teslaKey: TeslaKeyProbeState,
     actions: AppActions,
 ) {
     var destination by rememberSaveable { mutableStateOf(Destination.HOME) }
@@ -87,6 +91,13 @@ internal fun HeyTeslaApp(
                         ) { Text("홈") }
                     }
                 }
+                if (state.teslaKeyCleanupFailed && destination != Destination.DIAGNOSTICS) {
+                    Text(
+                        "차량 키 진단 정리 불명 · 새 진단 차단 · 앱 프로세스 재시작 필요",
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                    )
+                }
                 Box(Modifier.weight(1f)) {
                     when (destination) {
                         Destination.HOME -> HomeScreen(
@@ -97,11 +108,12 @@ internal fun HeyTeslaApp(
                             onOpenSettings = { navigate(Destination.SETTINGS) },
                             onOpenDiagnostics = { navigate(Destination.DIAGNOSTICS) },
                             onStopSession = actions.stopSession,
+                            onStopBle = actions.cancelBle,
                         )
                         Destination.SETTINGS -> SettingsScreen(state, ble, actions) {
                             navigate(Destination.DIAGNOSTICS)
                         }
-                        Destination.DIAGNOSTICS -> DiagnosticsScreen(state, support, trial, ble, actions)
+                        Destination.DIAGNOSTICS -> DiagnosticsScreen(state, support, trial, ble, uwb, teslaKey, actions)
                     }
                 }
             }

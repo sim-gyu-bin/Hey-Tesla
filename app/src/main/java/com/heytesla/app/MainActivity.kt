@@ -32,12 +32,11 @@ class MainActivity : ComponentActivity() {
     private val speechSupportState = MutableStateFlow(SpeechProbeState())
     private val speechSupport = speechSupportState.asStateFlow()
     private lateinit var speechSupportProbe: SpeechSupportProbe
+    private val uwbSupportState = MutableStateFlow(UwbProbeState())
+    private lateinit var uwbSupportProbe: UwbSupportProbe
     private val speechTrialState = MutableStateFlow(SpeechTrialState())
     private val speechTrial = speechTrialState.asStateFlow()
     private lateinit var speechRecognitionProbe: SpeechRecognitionProbe
-    private val bleProbeState = MutableStateFlow(BleProbeState())
-    private val bleProbe = bleProbeState.asStateFlow()
-    private lateinit var bleConnectionProbe: BleConnectionProbe
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         runtime.refresh()
         runtime.event("RUNTIME_PERMISSION_RESULT")
@@ -55,8 +54,8 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
         speechSupportProbe = SpeechSupportProbe(applicationContext, speechSupportState) { runtime.event(it) }
+        uwbSupportProbe = UwbSupportProbe(applicationContext, uwbSupportState, runtime)
         speechRecognitionProbe = SpeechRecognitionProbe(applicationContext, speechTrialState, runtime)
-        bleConnectionProbe = BleConnectionProbe(applicationContext, bleProbeState, runtime)
         val actions = AppActions(
             requestPermission = { permission -> permissionRequest.launch(arrayOf(permission)) },
             openSystemSettings = { action ->
@@ -68,20 +67,22 @@ class MainActivity : ComponentActivity() {
             },
             associateVehicle = ::associate,
             setApproachEnabled = { enabled ->
-                if (!enabled || cancelSupportForStart()) runtime.setEnabled(enabled)
+                if (!bleFieldBusy() && (!enabled || cancelSupportForStart())) runtime.setEnabled(enabled)
             },
-            setAutomaticMicrophone = runtime::setAutomaticMicrophone,
+            setAutomaticMicrophone = { if (cancelSupportForStart()) runtime.setAutomaticMicrophone(it) },
             observeVehicle = { if (cancelSupportForStart()) runtime.startObserving() },
             refresh = runtime::refresh,
             startMicrophone = { if (cancelSupportForStart()) runtime.manualStart(this) },
             stopSession = {
+                uwbSupportProbe.cancel()
                 speechSupportProbe.cancel()
                 speechRecognitionProbe.cancel()
-                bleConnectionProbe.cancel()
                 runtime.stop("USER_STOP")
             },
             querySupport = ::querySupport,
             cancelSupport = { speechSupportProbe.cancel() },
+            queryUwbSupport = ::queryUwbSupport,
+            cancelUwbSupport = { uwbSupportProbe.cancel() },
             startTrial = { mode ->
                 val support = speechSupportState.value
                 if (cancelSupportForStart()) {
@@ -94,49 +95,61 @@ class MainActivity : ComponentActivity() {
             finishCapture = { speechRecognitionProbe.finishCapture() },
             cancelTrial = { speechRecognitionProbe.cancel() },
             startBle = ::startBle,
-            cancelBle = { bleConnectionProbe.cancel() },
+            cancelBle = { runtime.stopBleFieldTrial() },
+            bleFieldBlockedReason = runtime::bleFieldTrialBlockedReason,
+            startTeslaKey = ::startTeslaKey,
+            cancelTeslaKey = { runtime.cancelTeslaKey() },
+            teslaKeyBlockedReason = runtime::teslaKeyBlockedReason,
             leaveDiagnostics = ::leaveDiagnostics,
         )
         setContent {
             val state by runtime.state.collectAsState()
             val support by speechSupport.collectAsState()
             val trial by speechTrial.collectAsState()
-            val ble by bleProbe.collectAsState()
-            HeyTeslaApp(state, support, trial, ble, actions)
+            val ble by runtime.bleProbeState.collectAsState()
+            val uwb by uwbSupportState.collectAsState()
+            val teslaKey by runtime.teslaKeyState.collectAsState()
+            HeyTeslaApp(state, support, trial, ble, uwb, teslaKey, actions)
         }
     }
 
     override fun onResume() { super.onResume(); runtime.activityVisible = true; runtime.refresh(); runtime.event("UI_RESUMED") }
     override fun onPause() {
-        speechSupportProbe.cancel()
         runtime.activityVisible = false
+        runtime.cancelTeslaKey("UI_PAUSED")
+        uwbSupportProbe.cancel()
+        speechSupportProbe.cancel()
+        // Visibility is revoked before cancellation to block reentrant starts.
         speechRecognitionProbe.cancel()
-        bleConnectionProbe.cancel()
         if (runtime.policy.current?.let { !it.automatic && !it.diagnostic } == true) runtime.stop("MANUAL_UI_HIDDEN")
         runtime.event("UI_PAUSED")
         super.onPause()
     }
 
     override fun onDestroy() {
+        runtime.activityVisible = false
+        runtime.cancelTeslaKey("UI_DESTROYED")
+        uwbSupportProbe.cancel()
         speechSupportProbe.cancel()
         speechRecognitionProbe.cancel()
-        bleConnectionProbe.cancel()
         super.onDestroy()
     }
 
     private fun leaveDiagnostics() {
+        runtime.cancelTeslaKey("DIAGNOSTICS_HIDDEN")
+        uwbSupportProbe.cancel()
         speechSupportProbe.cancel()
         speechRecognitionProbe.cancel()
-        bleConnectionProbe.cancel()
         // Navigation within this Activity does not invoke onPause.
         if (runtime.policy.current?.let { !it.automatic && !it.diagnostic } == true) runtime.stop("MANUAL_DIAGNOSTICS_HIDDEN")
     }
 
     private fun querySupport() {
+        if (!uwbSupportProbe.cancel()) return
         runtime.refresh()
         val state = runtime.state.value
         if (speechSupportState.value.reason == "DESTROY_FAILED") return
-        if (!runtime.activityVisible || bleProbeState.value.active || state.bleDiagnosticActive ||
+        if (!runtime.activityVisible || runtime.teslaKeyReserved() || runtime.bleProbeState.value.active || state.bleDiagnosticActive || bleFieldBusy() ||
             speechTrialState.value.active || state.speechDiagnosticActive ||
             runtime.policy.current != null || runtime.microphone != null ||
             state.enabled || state.observing || state.observationStartPending ||
@@ -154,22 +167,46 @@ class MainActivity : ComponentActivity() {
         speechSupportProbe.query()
     }
 
-    private fun startBle() {
+    private fun queryUwbSupport() {
         speechSupportProbe.cancel()
-        if (bleProbeState.value.active || runtime.state.value.bleDiagnosticActive) return
         if (speechSupportState.value.reason == "DESTROY_FAILED") {
-            bleProbeState.value = BleProbeState(
-                status = BleProbeStatus.BLOCKED,
-                reason = "SPEECH_SUPPORT_DESTROY_FAILED",
-            )
+            runtime.event("UWB_SUPPORT_OTHER_DIAGNOSTIC_BLOCKED")
+            return
+        }
+        runtime.refresh()
+        uwbSupportProbe.query()
+    }
+    /** 화면 버튼만 진입한다. exported Intent·재생성·onResume에서는 시작하지 않는다. */
+    private fun startTeslaKey(input: String, register: Boolean) {
+        if (!uwbSupportProbe.cancel()) return
+        speechSupportProbe.cancel()
+        if (speechSupportState.value.reason == "DESTROY_FAILED") {
+            runtime.event("TESLA_KEY_START_BLOCKED")
+            return
+        }
+        runtime.startTeslaKey(input, register)
+    }
+
+
+    private fun startBle(config: BleFieldConfig) {
+        if (!uwbSupportProbe.cancel()) return
+        speechSupportProbe.cancel()
+        if (speechSupportState.value.reason == "DESTROY_FAILED") {
             runtime.event("BLE_SUPPORT_CLEANUP_BLOCKED")
             return
         }
-        bleConnectionProbe.start()
+        runtime.startBleFieldTrial(config)
+    }
+
+    private fun bleFieldBusy(): Boolean = runtime.state.value.let {
+        it.bleFieldTrialActive || it.bleFieldTrialStarting || it.bleFieldTrialStopping
     }
 
     private fun cancelSupportForStart(): Boolean {
+        if (!uwbSupportProbe.cancel()) return false
         speechSupportProbe.cancel()
+        if (runtime.teslaKeyReserved()) return false
+        if (bleFieldBusy()) return false
         if (speechSupportState.value.reason != "DESTROY_FAILED") return true
         runtime.event("SPEECH_SUPPORT_CLEANUP_BLOCKED")
         return false
@@ -180,6 +217,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun associate(input: String) {
+        if (runtime.teslaKeyReserved()) { runtime.event("TESLA_KEY_OTHER_DIAGNOSTIC_BLOCKED"); return }
         if (!packageManager.hasSystemFeature(PackageManager.FEATURE_COMPANION_DEVICE_SETUP)) { runtime.event("CDM_UNSUPPORTED"); return }
         val normalized = input.trim().uppercase(Locale.ROOT)
         if (!normalized.matches(Regex("[A-HJ-NPR-Z0-9]{17}"))) { runtime.event("VIN_FORMAT_INVALID"); return }

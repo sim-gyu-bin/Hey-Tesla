@@ -1,0 +1,22 @@
+// 출처: Tesla vehicle-command a4b43c1eff0e09d77deb9f2dce97031141fe8c8a
+// https://github.com/teslamotors/vehicle-command/tree/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/protocol/protobuf
+// Apache-2.0. 동봉 라이선스: licenses/Tesla-vehicle-command-LICENSE
+// Hey Tesla 변경: Java outer class명만 명시적으로 고정. wire contract는 변경하지 않는다.
+syntax = "proto3";
+
+package Keys;
+option java_package = "com.tesla.generated.keys";
+option java_outer_classname = "Keys";
+option go_package = "github.com/teslamotors/vehicle-command/pkg/protocol/protobuf/keys";
+
+enum Role
+{
+    ROLE_NONE            = 0;
+    ROLE_SERVICE         = 1;
+    ROLE_OWNER           = 2;
+    ROLE_DRIVER          = 3;
+    ROLE_FM              = 4;
+    ROLE_VEHICLE_MONITOR = 5;
+    ROLE_CHARGING_MANAGER = 6;
+    ROLE_GUEST           = 8;
+}

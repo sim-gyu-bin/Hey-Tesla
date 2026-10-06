@@ -18,6 +18,13 @@ internal data class BleProbeState(
     val localClosed: Boolean = false,
     val notificationCount: Int = 0,
     val elapsedMs: Long = 0,
+    val gattStatus: Int? = null,
+    /** 마지막 전이 때 끝난 단계 또는 현재 단계의 실제 monotonic 경과 시간. */
+    val phaseElapsedMs: Long = 0,
+    val primaryGattStatus: Int? = null,
+    val cleanupGattStatus: Int? = null,
+    val firstRxElapsedMs: Long? = null,
+    val backgroundConnect: Boolean = false,
 ) {
     val active: Boolean get() = when (status) {
         BleProbeStatus.CONNECTING, BleProbeStatus.DISCOVERING, BleProbeStatus.SUBSCRIBING,
@@ -48,9 +55,10 @@ internal interface BleGattPort {
 }
 
 internal interface BleGattListener {
-    fun connection(token: Long, source: BleGattPort, success: Boolean, connected: Boolean)
-    fun services(token: Long, source: BleGattPort, success: Boolean)
-    fun descriptor(token: Long, source: BleGattPort, enabled: Boolean, success: Boolean)
+    fun connection(token: Long, source: BleGattPort, success: Boolean, connected: Boolean, gattStatus: Int? = null)
+    fun services(token: Long, source: BleGattPort, success: Boolean, gattStatus: Int? = null)
+    fun descriptor(token: Long, source: BleGattPort, enabled: Boolean, success: Boolean, gattStatus: Int? = null, action: BleEvidenceAction = BleEvidenceAction.DESCRIPTOR_WRITE_CALLBACK)
+    fun verifyUnsubscribe(token: Long, source: BleGattPort, gattStatus: Int, read: () -> Boolean): Boolean
     fun notification(token: Long, source: BleGattPort)
 }
 
@@ -60,15 +68,22 @@ internal interface BleGattListener {
  */
 internal class BleGattSession(
     val token: Long,
-    private val sessionDeadline: Long,
+    sessionDeadline: Long,
     private val port: BleGattPort,
     private val now: () -> Long,
     private val publish: (BleProbeState) -> Unit,
     private val release: () -> Unit,
+    private val finishedCallback: (BleProbeState) -> Unit = {},
+    private val attempt: Long = token,
+    backgroundConnect: Boolean = false,
+    deadline: Long? = null,
+    private val recordEvidence: (BleEventEvidence) -> Unit = {},
 ) : BleGattListener {
-    var state = BleProbeState()
+    private val sessionDeadline = minOf(sessionDeadline, deadline ?: sessionDeadline)
+    var state = BleProbeState(backgroundConnect = backgroundConnect)
         private set
     private val started = now()
+    private var phaseStarted = started
     private var stageDeadline = 0L
     private var cleanupDeadline = 0L
     private var unsubscribeDeadline = 0L
@@ -83,21 +98,25 @@ internal class BleGattSession(
     private var disableFinished = false
     private var disconnectRequested = false
     private var finished = false
+    private var requestEvidenceCount = 0
+    private var callbackEvidenceCount = 0
 
     fun start() {
         if (state.status != BleProbeStatus.IDLE) return
         enter(BleProbeStatus.CONNECTING, CONNECT_MS)
+        if (finished || state.status != BleProbeStatus.CONNECTING) return
         if (now() >= stageDeadline) {
             cleanup(BleProbeStatus.TIMED_OUT, "SESSION_EXPIRED")
             return
         }
-        allocated = try { port.connect() } catch (_: Exception) { false }
+        request(BleEvidenceAction.CONNECT, received = { allocated = it }) { port.connect() }
         if (!allocated) cleanup(BleProbeStatus.FAILED, "CONNECT_REQUEST_FAILED")
     }
 
-    fun cancel() {
-        if (!finished && state.status != BleProbeStatus.CLEANING_UP && state.status != BleProbeStatus.IDLE) {
-            cleanup(BleProbeStatus.CANCELED, "USER_CANCELED")
+    fun cancel(reason: String = "USER_CANCELED") {
+        // 소유권 부착 뒤 시작 이벤트 기록 중 stop이 재진입하면 IDLE도 먼저 봉인·반환한다.
+        if (!finished && state.status != BleProbeStatus.CLEANING_UP) {
+            cleanup(BleProbeStatus.CANCELED, reason)
         }
     }
 
@@ -120,9 +139,11 @@ internal class BleGattSession(
         }
     }
 
-    override fun connection(token: Long, source: BleGattPort, success: Boolean, connected: Boolean) {
+    override fun connection(token: Long, source: BleGattPort, success: Boolean, connected: Boolean, gattStatus: Int?) {
         if (!accepts(token, source)) return
         tick()
+        if (finished || !state.active) return
+        callback(BleEvidenceAction.CONNECTION_CALLBACK, success, gattStatus)
         if (finished) return
         if (!connected) {
             connectedNow = false
@@ -146,23 +167,32 @@ internal class BleGattSession(
         }
         if (state.status != BleProbeStatus.CONNECTING) return
         enter(BleProbeStatus.DISCOVERING, DISCOVER_MS)
-        val accepted = try { port.discoverServices() } catch (_: Exception) { false }
+        if (finished || state.status != BleProbeStatus.DISCOVERING) return
+        val accepted = request(BleEvidenceAction.DISCOVER) { port.discoverServices() }
         if (!accepted) cleanup(BleProbeStatus.FAILED, "DISCOVERY_REQUEST_FAILED")
     }
 
-    override fun services(token: Long, source: BleGattPort, success: Boolean) {
+    override fun services(token: Long, source: BleGattPort, success: Boolean, gattStatus: Int?) {
         if (!accepts(token, source)) return
         tick()
+        if (finished || state.status != BleProbeStatus.DISCOVERING) return
+        callback(BleEvidenceAction.SERVICES_CALLBACK, success, gattStatus)
         if (finished || state.status != BleProbeStatus.DISCOVERING) return
         if (!success) {
             cleanup(BleProbeStatus.FAILED, "DISCOVERY_FAILED")
             return
         }
-        val profile = try { port.profile() } catch (_: Exception) {
+        val profile = try {
+            port.profile()
+        } catch (_: Exception) {
+            requestEvidence(BleEvidenceAction.PROFILE, BleEvidenceResult.EXCEPTION)
             cleanup(BleProbeStatus.FAILED, "PROFILE_READ_FAILED")
             return
         }
+        requestEvidence(BleEvidenceAction.PROFILE, BleEvidenceResult.COMPLETED)
+        if (finished || state.status != BleProbeStatus.DISCOVERING) return
         emit { state.copy(serviceFound = profile.serviceFound, txFound = profile.txFound, rxFound = profile.rxFound, elapsedMs = it) }
+        if (finished || state.status != BleProbeStatus.DISCOVERING) return
         val missing = when {
             !profile.serviceFound -> "TESLA_SERVICE_MISSING"
             !profile.txFound -> "TESLA_TX_MISSING"
@@ -176,23 +206,47 @@ internal class BleGattSession(
             return
         }
         enter(BleProbeStatus.SUBSCRIBING, SUBSCRIBE_MS)
-        notificationsEnabled = try { port.setNotifications(true) } catch (_: Exception) { false }
+        if (finished || state.status != BleProbeStatus.SUBSCRIBING) return
+        request(BleEvidenceAction.NOTIFICATION_ON, received = { notificationsEnabled = it }) { port.setNotifications(true) }
+        if (finished || state.status != BleProbeStatus.SUBSCRIBING) return
         if (!notificationsEnabled) {
             cleanup(BleProbeStatus.FAILED, "LOCAL_SUBSCRIPTION_FAILED")
             return
         }
         pendingWrite = true
-        enableRequested = try { port.writeSubscription(true) } catch (_: Exception) { false }
+        request(BleEvidenceAction.CCCD_ON, received = { enableRequested = it }) { port.writeSubscription(true) }
         if (!enableRequested) {
             pendingWrite = null
             cleanup(BleProbeStatus.FAILED, "SUBSCRIPTION_REQUEST_FAILED")
         }
     }
 
-    override fun descriptor(token: Long, source: BleGattPort, enabled: Boolean, success: Boolean) {
+    override fun descriptor(token: Long, source: BleGattPort, enabled: Boolean, success: Boolean, gattStatus: Int?, action: BleEvidenceAction) {
         if (!accepts(token, source)) return
         tick()
-        if (finished || pendingWrite != enabled) return
+        if (!acceptsDescriptor(enabled)) return
+        callback(action, success, gattStatus)
+        if (!acceptsDescriptor(enabled)) return
+        completeDescriptor(enabled, success)
+    }
+
+    /** 해제 write 성공은 구독 해제의 증거가 아니다. 실제 CCCD readback 요청/결과를 따로 남긴다. */
+    override fun verifyUnsubscribe(token: Long, source: BleGattPort, gattStatus: Int, read: () -> Boolean): Boolean {
+        if (!accepts(token, source)) return false
+        tick()
+        if (!acceptsDescriptor(false)) return false
+        callback(BleEvidenceAction.DESCRIPTOR_WRITE_CALLBACK, true, gattStatus)
+        if (!acceptsDescriptor(false)) return false
+        val accepted = request(BleEvidenceAction.CCCD_READ, operation = read)
+        if (!accepted && acceptsDescriptor(false)) completeDescriptor(false, false)
+        return accepted
+    }
+
+    private fun acceptsDescriptor(enabled: Boolean) =
+        !finished && pendingWrite == enabled &&
+            (state.status == BleProbeStatus.CLEANING_UP || enabled && state.status == BleProbeStatus.SUBSCRIBING)
+
+    private fun completeDescriptor(enabled: Boolean, success: Boolean) {
         pendingWrite = null
         if (enabled) {
             if (success) emit { state.copy(subscriptionConfirmed = true, elapsedMs = it) }
@@ -213,7 +267,20 @@ internal class BleGattSession(
         if (!accepts(token, source)) return
         tick()
         if (finished || state.status != BleProbeStatus.OBSERVING || !state.subscriptionConfirmed) return
-        if (state.notificationCount != Int.MAX_VALUE) emit { state.copy(notificationCount = state.notificationCount + 1, elapsedMs = it) }
+        if (state.notificationCount == Int.MAX_VALUE) return
+        val first = state.firstRxElapsedMs == null
+        emit(beforePublish = {
+            if (first) recordEvidence(BleEventEvidence(
+                kind = BleEvidenceKind.GATT_FIRST_RX,
+                action = BleEvidenceAction.RX_CALLBACK,
+                phase = BleEvidencePhase.OBSERVING,
+                attempt = attempt,
+                receivedElapsedMs = now(),
+                accepted = true,
+            ))
+        }) {
+            state.copy(notificationCount = state.notificationCount + 1, firstRxElapsedMs = state.firstRxElapsedMs ?: it, elapsedMs = it)
+        }
     }
 
     private fun accepts(token: Long, source: BleGattPort) = !finished && token == this.token && source === port
@@ -232,7 +299,7 @@ internal class BleGattSession(
         unsubscribeDeadline = minOf(now() + UNSUBSCRIBE_MS, cleanupDeadline)
         emit { state.copy(status = BleProbeStatus.CLEANING_UP, reason = reason, elapsedMs = it) }
         if (notificationsEnabled) {
-            try { port.setNotifications(false) } catch (_: Exception) { /* close evidence와 독립이다. */ }
+            request(BleEvidenceAction.NOTIFICATION_OFF) { port.setNotifications(false) }
             notificationsEnabled = false
         }
         advanceCleanup()
@@ -251,21 +318,21 @@ internal class BleGattSession(
             if (!disableAttempted) {
                 disableAttempted = true
                 pendingWrite = false
-                val accepted = try { port.writeSubscription(false) } catch (_: Exception) { false }
+                val accepted = request(BleEvidenceAction.CCCD_OFF) { port.writeSubscription(false) }
                 if (accepted) return
                 pendingWrite = null
                 disableFinished = true
             }
         }
         disconnectRequested = true
-        try { port.disconnect() } catch (_: Exception) { /* disconnected callback과 close를 별도로 확인한다. */ }
+        requestUnit(BleEvidenceAction.DISCONNECT) { port.disconnect() }
     }
 
     private fun closeLocal() {
         if (finished) return
         // callback과 재진입을 먼저 봉인한다. close 실패도 외부 stop이나 늦은 callback으로 재해제하지 않는다.
         finished = true
-        val closed = try { port.close(); true } catch (_: Exception) { false }
+        val closed = requestUnit(BleEvidenceAction.CLOSE) { port.close() }
         emit { elapsed ->
             state.copy(
                 status = if (closed) outcome else BleProbeStatus.CLEANUP_FAILED,
@@ -275,10 +342,96 @@ internal class BleGattSession(
             )
         }
         if (closed) release()
+        // 요약은 예약의 실제 반환 뒤에 기록한다. close 실패는 반환 없이 실패 상태 그대로 전달한다.
+        finishedCallback(state)
     }
 
-    private inline fun emit(copyState: (Long) -> BleProbeState) {
-        state = copyState((now() - started).coerceAtLeast(0))
+    private inline fun request(
+        action: BleEvidenceAction,
+        received: (Boolean) -> Unit = {},
+        operation: () -> Boolean,
+    ): Boolean {
+        val accepted = try {
+            operation()
+        } catch (_: Exception) {
+            received(false)
+            requestEvidence(action, BleEvidenceResult.EXCEPTION)
+            return false
+        }
+        // 기록 consumer가 stop을 재진입해도 이미 접수된 GATT 요청을 정리할 수 있어야 한다.
+        received(accepted)
+        requestEvidence(action, if (accepted) BleEvidenceResult.ACCEPTED else BleEvidenceResult.REJECTED)
+        return accepted
+    }
+
+    private inline fun requestUnit(action: BleEvidenceAction, operation: () -> Unit): Boolean {
+        try {
+            operation()
+        } catch (_: Exception) {
+            requestEvidence(action, BleEvidenceResult.EXCEPTION)
+            return false
+        }
+        requestEvidence(action, BleEvidenceResult.COMPLETED)
+        return true
+    }
+
+    private fun requestEvidence(action: BleEvidenceAction, result: BleEvidenceResult) {
+        if (requestEvidenceCount >= MAX_REQUEST_EVIDENCE) return
+        requestEvidenceCount++
+        recordEvidence(BleEventEvidence(
+            kind = BleEvidenceKind.GATT_REQUEST,
+            action = action,
+            phase = evidencePhase(),
+            result = result,
+            attempt = attempt,
+            receivedElapsedMs = now(),
+            accepted = result == BleEvidenceResult.ACCEPTED || result == BleEvidenceResult.COMPLETED,
+        ))
+    }
+
+    private fun callback(action: BleEvidenceAction, success: Boolean, gattStatus: Int?) {
+        val phase = evidencePhase()
+        // 상태를 먼저 반영하고 publish 직전에 기록한다. 기록 중 stop이 재진입해도 기존 회차 증거다.
+        emit(beforePublish = {
+            if (callbackEvidenceCount < MAX_CALLBACK_EVIDENCE) {
+                callbackEvidenceCount++
+                recordEvidence(BleEventEvidence(
+                    kind = BleEvidenceKind.GATT_CALLBACK,
+                    action = action,
+                    phase = phase,
+                    attempt = attempt,
+                    receivedElapsedMs = now(),
+                    accepted = success,
+                    gattStatus = gattStatus,
+                ))
+            }
+        }) {
+            // 정리 전 마지막 SDK status는 동결한다. status 없는 합성 결과로도 덮지 않는다.
+            state.copy(
+                gattStatus = gattStatus,
+                primaryGattStatus = if (phase == BleEvidencePhase.CLEANING_UP) state.primaryGattStatus else gattStatus ?: state.primaryGattStatus,
+                cleanupGattStatus = if (phase == BleEvidencePhase.CLEANING_UP) gattStatus ?: state.cleanupGattStatus else state.cleanupGattStatus,
+                elapsedMs = it,
+            )
+        }
+    }
+
+    private fun evidencePhase(): BleEvidencePhase? = when (state.status) {
+        BleProbeStatus.CONNECTING -> BleEvidencePhase.CONNECTING
+        BleProbeStatus.DISCOVERING -> BleEvidencePhase.DISCOVERING
+        BleProbeStatus.SUBSCRIBING -> BleEvidencePhase.SUBSCRIBING
+        BleProbeStatus.OBSERVING -> BleEvidencePhase.OBSERVING
+        BleProbeStatus.CLEANING_UP -> BleEvidencePhase.CLEANING_UP
+        else -> null
+    }
+
+    private inline fun emit(beforePublish: () -> Unit = {}, copyState: (Long) -> BleProbeState) {
+        val timestamp = now()
+        val next = copyState((timestamp - started).coerceAtLeast(0))
+        val changed = next.status != state.status
+        state = next.copy(phaseElapsedMs = (timestamp - phaseStarted).coerceAtLeast(0))
+        if (changed) phaseStarted = timestamp
+        beforePublish()
         publish(state)
     }
 
@@ -289,5 +442,8 @@ internal class BleGattSession(
         const val OBSERVE_MS = 3_000L
         const val UNSUBSCRIBE_MS = 2_000L
         const val CLEANUP_MS = 4_000L
+        // RX는 최초 한 건만 기록한다. 요청/콜백 폭주도 회차당 각 32건으로 제한해 2 MiB 로그를 보호한다.
+        const val MAX_REQUEST_EVIDENCE = 32
+        const val MAX_CALLBACK_EVIDENCE = 32
     }
 }

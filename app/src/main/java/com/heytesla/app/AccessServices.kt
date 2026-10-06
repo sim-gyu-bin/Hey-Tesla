@@ -3,6 +3,7 @@ package com.heytesla.app
 import android.companion.CompanionDeviceService
 import android.companion.DevicePresenceEvent
 import android.os.Bundle
+import android.os.SystemClock
 import android.service.voice.VoiceInteractionService
 import android.service.voice.VoiceInteractionSession
 import android.service.voice.VoiceInteractionSessionService
@@ -10,7 +11,8 @@ import android.widget.TextView
 
 class PresenceService : CompanionDeviceService() {
     override fun onDevicePresenceEvent(event: DevicePresenceEvent) {
-        (application as DiagnosticApp).runtime.presence(event.associationId, event.event)
+        val received = SystemClock.elapsedRealtime()
+        (application as DiagnosticApp).runtime.presence(event.associationId, event.event, received)
     }
 }
 

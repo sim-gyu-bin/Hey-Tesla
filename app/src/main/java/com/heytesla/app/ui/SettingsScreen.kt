@@ -19,11 +19,15 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -44,6 +48,17 @@ internal fun SettingsScreen(
     var vin by remember { mutableStateOf("") }
     var expanded by remember { mutableStateOf<SettingsDetail?>(null) }
     val appSettings = Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(owner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_DESTROY) vin = ""
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose {
+            owner.lifecycle.removeObserver(observer)
+            vin = ""
+        }
+    }
 
     fun toggle(detail: SettingsDetail) {
         expanded = if (expanded == detail) null else detail
@@ -61,14 +76,14 @@ internal fun SettingsScreen(
         AppSection(title = "초기 준비") {
             AppRow(
                 title = "차량 등록",
-                subtitle = if (state.associations.isEmpty()) "등록 필요" else "등록됨",
+                subtitle = if (state.associationCount == 0) "등록 필요" else "등록됨",
                 symbol = AppSymbol.VEHICLE,
                 expanded = expanded == SettingsDetail.VEHICLE,
                 onClick = { toggle(SettingsDetail.VEHICLE) },
             )
             if (expanded == SettingsDetail.VEHICLE) {
                 VehicleDetail(
-                    registered = state.associations.isNotEmpty(),
+                    registered = state.associationCount > 0,
                     vin = vin,
                     onVinChange = { vin = it.take(17) },
                     onAssociate = {
@@ -110,25 +125,34 @@ internal fun SettingsScreen(
         }
 
         AppSection(title = "개발자") {
+            if (state.teslaKeyCleanupFailed) {
+                Text("차량 키 진단 정리 불명 · 예약 유지 · 앱 프로세스 재시작 필요", color = MaterialTheme.colorScheme.error)
+            } else if (state.teslaKeyDiagnosticActive) {
+                Text("차량 키 진단 정리 중 · 다른 진단 차단")
+                OutlinedButton(onClick = actions.cancelTeslaKey, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Text("차량 키 진단 취소")
+                }
+            }
             if (ble.status == BleProbeStatus.CLEANUP_FAILED || (state.bleDiagnosticActive && !ble.active)) {
                 Text(
                     "BLE 정리·예약 해제 미확인 · 앱 재시작 필요",
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                 )
-            } else if (ble.active) {
-                Text(
-                    if (ble.status == BleProbeStatus.CLEANING_UP) "BLE 연결 정리 중" else "BLE 연결 진단 중",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
+            } else if (state.bleFieldBusy() || ble.active) {
+                Text(bleFieldStatus(state, ble), style = MaterialTheme.typography.bodyMedium)
                 OutlinedButton(
                     onClick = actions.cancelBle,
+                    enabled = !state.bleFieldTrialStopping,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                ) { Text("BLE 연결 진단 취소") }
+                ) { Text("주말 BLE 시험 중지") }
             }
+            DetailRow("주말 BLE 시험", bleFieldStatus(state, ble))
+            DetailRow("시도 / 종료 회차", "${state.bleFieldTrialAttemptCount} / ${state.bleFieldTrialCompletedCount}")
+            DetailRow("로그 건강 · 상한", bleFieldLogStatus(state))
             AppRow(
                 title = "개발자 진단",
-                subtitle = "인식·마이크 시험 · 이벤트",
+                subtitle = "차량 키·읽기 전용 상태 · BLE·음성 시험",
                 symbol = AppSymbol.DIAGNOSTICS,
                 onClick = onOpenDiagnostics,
             )
@@ -198,6 +222,12 @@ private fun PermissionDetail(
         title = "Bluetooth 연결 및 상태",
         granted = state.bluetoothPermission,
         requestPermission = Manifest.permission.BLUETOOTH_CONNECT,
+        actions = actions,
+    )
+    PermissionRow(
+        title = "Bluetooth 보조 스캔",
+        granted = state.bluetoothScanPermission,
+        requestPermission = Manifest.permission.BLUETOOTH_SCAN,
         actions = actions,
     )
     PermissionRow(

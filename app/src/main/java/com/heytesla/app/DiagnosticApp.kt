@@ -2,6 +2,7 @@ package com.heytesla.app
 
 import android.Manifest
 import android.app.Application
+import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
@@ -13,8 +14,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.os.BatteryManager
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.service.voice.VoiceInteractionService
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -46,12 +49,13 @@ data class DiagnosticState(
     val observationStartPending: Boolean = false,
     val automaticMicrophoneEnabled: Boolean = false,
     val savedPreference: Boolean = false,
-    val associations: List<Int> = emptyList(),
+    val associationCount: Int = 0,
     val observing: Boolean = false,
     val bluetooth: Boolean = false,
     val assistant: Boolean = false,
     val microphonePermission: Boolean = false,
     val bluetoothPermission: Boolean = false,
+    val bluetoothScanPermission: Boolean = false,
     val notificationPermission: Boolean = false,
     val present: Boolean = false,
     val appearedCount: Int = 0,
@@ -67,7 +71,20 @@ data class DiagnosticState(
     val stopReason: String = "PROCESS_START_OFF",
     val speechDiagnosticActive: Boolean = false,
     val bleDiagnosticActive: Boolean = false,
+    val bleFieldTrialActive: Boolean = false,
+    val bleFieldTrialStarting: Boolean = false,
+    val bleFieldTrialStopping: Boolean = false,
+    val bleFieldTrialWaitingForDeparture: Boolean = false,
+    val bleFieldTrialAttemptCount: Int = 0,
+    val bleFieldTrialCompletedCount: Int = 0,
+    val bleFieldTrialStopReason: String? = null,
+    val bleFieldConfig: BleFieldConfig = BleFieldConfig.BASELINE,
+    val bleFieldCandidateCount: Int = 0,
+    val bleFieldScanRunning: Boolean = false,
+    val bleFieldScanFailure: Int? = null,
     val events: List<String> = emptyList(),
+    val teslaKeyDiagnosticActive: Boolean = false,
+    val teslaKeyCleanupFailed: Boolean = false,
     val fieldLog: FieldLogStatus = FieldLogStatus(),
 )
 
@@ -76,10 +93,20 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     val policy = SessionPolicy()
     private val mutable = MutableStateFlow(DiagnosticState())
     val state = mutable.asStateFlow()
+    internal val bleProbeState = MutableStateFlow(BleProbeState())
+    internal val teslaKeyState = MutableStateFlow(TeslaKeyProbeState())
+    private val teslaKeyProbe by lazy { TeslaBleKeyProbe(app, this, teslaKeyState) }
+    private var teslaKeyToken: Long? = null
+    private var nextTeslaKeyToken = 0L
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val preference = booleanPreferencesKey("user_enabled_preference")
     private val observationPolicy = ObservationPolicy()
     private var observationService: ObservationService? = null
+    private var observationMode = ObservationService.Mode.OBSERVATION
+    private val fieldMarker = app.getSharedPreferences("ble_field_run", Context.MODE_PRIVATE)
+    private var markerAvailable = true
+    private var clearFieldMarkerWhenLogged = false
+    private var associationIds: List<Int> = emptyList()
     var assistant: AssistantService? = null
     var microphone: MicrophoneService? = null
     var activityVisible = false
@@ -88,6 +115,84 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     private var speechDiagnosticId: Long? = null
     private var bleDiagnosticId: Long? = null
     private var bleDiagnosticCancel: (() -> Unit)? = null
+    internal var uwbSupportActive = false
+        private set
+    internal var uwbSupportCleanupFailed = false
+        private set
+
+    internal fun teslaKeyReserved(): Boolean = teslaKeyToken != null
+
+    internal fun teslaKeyBlockedReason(): String? {
+        if (teslaKeyReserved()) return if (state.value.teslaKeyCleanupFailed) "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED" else "LEASE_UNAVAILABLE"
+        if (!activityVisible) return "VISIBLE_UI_REQUIRED"
+        if (app.getSystemService(KeyguardManager::class.java)?.isDeviceLocked != false) return "UNLOCKED_UI_REQUIRED"
+        val s = state.value
+        if (uwbSupportBlocked() || policy.current != null || microphone != null || fieldTrialReserved() ||
+            s.speechDiagnosticActive || s.bleDiagnosticActive || s.enabled || s.observing ||
+            s.observationStartPending || s.observationServiceRunning
+        ) return "LEASE_UNAVAILABLE"
+        if (!s.bluetoothPermission) return "BLUETOOTH_PERMISSION_REQUIRED"
+        if (!s.bluetooth) return "BLUETOOTH_OFF"
+        if (associationIds.size != 1) return "SINGLE_ASSOCIATION_REQUIRED"
+        return null
+    }
+
+    internal fun acquireTeslaKey(): Long? {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (teslaKeyBlockedReason() != null) return null
+        val token = ++nextTeslaKeyToken
+        teslaKeyToken = token
+        update { it.copy(teslaKeyDiagnosticActive = true) }
+        return token
+    }
+
+    internal fun teslaKeyReadinessReason(token: Long): String? {
+        if (teslaKeyToken != token) return "LEASE_LOST"
+        if (!activityVisible) return "VISIBLE_UI_REQUIRED"
+        val s = state.value
+        if (uwbSupportBlocked() || policy.current != null || microphone != null || fieldTrialReserved() ||
+            s.speechDiagnosticActive || s.bleDiagnosticActive || s.enabled || s.observing ||
+            s.observationStartPending || s.observationServiceRunning
+        ) return "DIAGNOSTIC_EXCLUSIVITY_LOST"
+        return null
+    }
+
+    internal fun releaseTeslaKey(token: Long) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (teslaKeyToken != token || state.value.teslaKeyCleanupFailed) return
+        teslaKeyToken = null
+        update { it.copy(teslaKeyDiagnosticActive = false) }
+    }
+
+    internal fun retainTeslaKey(token: Long) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (teslaKeyToken == token) update { it.copy(teslaKeyCleanupFailed = true) }
+    }
+
+    internal fun startTeslaKey(input: String, register: Boolean) = teslaKeyProbe.start(input, register)
+    internal fun cancelTeslaKey(reason: String = "USER_STOP") {
+        if (teslaKeyReserved()) teslaKeyProbe.cancel(reason)
+    }
+
+    internal fun acquireUwbSupport(): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        val s = state.value
+        if (teslaKeyReserved() || uwbSupportActive || uwbSupportCleanupFailed || !activityVisible ||
+            policy.current != null || microphone != null || fieldTrialReserved() ||
+            s.speechDiagnosticActive || s.bleDiagnosticActive || s.enabled || s.observing ||
+            s.observationStartPending || s.observationServiceRunning
+        ) return false
+        uwbSupportActive = true
+        return true
+    }
+
+    internal fun releaseUwbSupport(cleanupFailed: Boolean) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (cleanupFailed) uwbSupportCleanupFailed = true
+        if (!uwbSupportCleanupFailed) uwbSupportActive = false
+    }
+
+    private fun uwbSupportBlocked(): Boolean = uwbSupportActive || uwbSupportCleanupFailed
     private val fieldLog = FieldEventSink(File(app.noBackupFilesDir, FIELD_LOG_RELATIVE_PATH))
     private val processId = UUID.randomUUID().toString()
     private val appVersion = try {
@@ -116,9 +221,9 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
             addAction(NotificationManager.ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED)
         }, Context.RECEIVER_EXPORTED)
         fieldLog.onStatusChanged = {
-            // 콜백은 최신 sink 상태를 Main에서 읽는다. writer 스레드의 스냅샷을 넘기면 이전 값이 나중에 덮어쓸 수 있다.
-            if (Looper.myLooper() == Looper.getMainLooper()) update { it.copy(fieldLog = fieldLog.status()) }
-            else handler.post { update { it.copy(fieldLog = fieldLog.status()) } }
+            // writer의 낡은 스냅샷 대신 Main에서 최신 건강 상태를 읽는다.
+            if (Looper.myLooper() == Looper.getMainLooper()) fieldLogChanged()
+            else handler.post { fieldLogChanged() }
         }
         fieldLog.start()
         update { it.copy(fieldLog = fieldLog.status()) }
@@ -130,10 +235,34 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
         // 권한·Bluetooth 스냅샷이 실제값이 되도록 refresh 뒤에 기록한다.
         refresh()
         event("PROCESS_START_OFF")
+        try {
+            if (fieldMarker.getBoolean("unclosed", false)) event("BLE_FIELD_PREVIOUS_RUN_UNCLOSED")
+        } catch (_: Exception) {
+            markerAvailable = false
+            event("BLE_FIELD_MARKER_READ_FAILED")
+        }
     }
+    private fun fieldLogChanged() {
+        update { it.copy(fieldLog = fieldLog.status()) }
+        if (state.value.fieldLog.failed && fieldTrialReserved()) stopBleFieldTrial("FIELD_LOG_UNHEALTHY")
+        clearLoggedFieldMarker()
+    }
+
+    private fun clearLoggedFieldMarker() {
+        val log = fieldLog.status()
+        if (!clearFieldMarkerWhenLogged || fieldTrialReserved() || log.failed || log.pending != 0) return
+        clearFieldMarkerWhenLogged = false
+        val cleared = try { fieldMarker.edit().putBoolean("unclosed", false).commit() } catch (_: Exception) { false }
+        if (!cleared) {
+            markerAvailable = false
+            event("BLE_FIELD_MARKER_WRITE_FAILED")
+        }
+    }
+
 
     fun now() = SystemClock.elapsedRealtime()
     fun granted(permission: String) = app.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+    internal fun singleAssociationId(): Int? = associationIds.singleOrNull()
     fun assistantActive() = VoiceInteractionService.isActiveService(app, ComponentName(app, AssistantService::class.java))
     fun update(block: (DiagnosticState) -> DiagnosticState) { mutable.value = block(mutable.value) }
     fun event(code: String) = event(code, null)
@@ -147,15 +276,47 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
         record(code, speechTrial)
     }
 
+    internal fun recordBleTrial(code: String, summary: BleTrialSummary) {
+        if (Looper.myLooper() != Looper.getMainLooper()) { handler.post { recordBleTrial(code, summary) }; return }
+        record(code, bleTrial = summary)
+    }
+
+    internal fun recordBleEvidence(evidence: BleEventEvidence) {
+        if (Looper.myLooper() != Looper.getMainLooper()) { handler.post { recordBleEvidence(evidence) }; return }
+        record("BLE_EVIDENCE", bleEvidence = evidence)
+    }
+
+    internal fun bleTrialSummary(attempt: Long, probe: BleProbeState, leaseRetained: Boolean): BleTrialSummary {
+        val battery = try { app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) } catch (_: Exception) { null }
+        val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        return BleTrialSummary(
+            attempt = attempt, status = probe.status.name, reason = probe.reason, gattStatus = probe.gattStatus,
+            elapsedMs = probe.elapsedMs, connected = probe.connected, serviceFound = probe.serviceFound,
+            txFound = probe.txFound, rxFound = probe.rxFound, subscriptionConfirmed = probe.subscriptionConfirmed,
+            remoteUnsubscribeConfirmed = probe.remoteUnsubscribeConfirmed, disconnectConfirmed = probe.disconnectConfirmed,
+            localClosed = probe.localClosed, notificationCount = probe.notificationCount, leaseRetained = leaseRetained,
+            interactive = app.getSystemService(PowerManager::class.java)?.isInteractive == true,
+            deviceLocked = app.getSystemService(KeyguardManager::class.java)?.isDeviceLocked == true,
+            batteryPercent = if (level >= 0 && scale > 0) (level.toLong() * 100 / scale).toInt().coerceIn(0, 100) else null,
+            phaseElapsedMs = probe.phaseElapsedMs.takeUnless { probe.status == BleProbeStatus.IDLE || probe.status == BleProbeStatus.BLOCKED },
+            primaryGattStatus = probe.primaryGattStatus,
+            cleanupGattStatus = probe.cleanupGattStatus,
+            firstRxElapsedMs = probe.firstRxElapsedMs,
+            backgroundConnect = probe.backgroundConnect,
+        )
+    }
+
     /** RAM 최근 32 목록과 영속 로그에 같은 사건을 남긴다. */
-    private fun record(code: String, speechTrial: SpeechTrialSummary? = null): String {
+    private fun record(code: String, speechTrial: SpeechTrialSummary? = null, bleTrial: BleTrialSummary? = null,
+        bleEvidence: BleEventEvidence? = null): String {
         val line = stamp(code)
         recordEvent(line)
-        persist(code, speechTrial)
+        persist(code, speechTrial, bleTrial, bleEvidence)
         return line
     }
 
-    private fun persist(code: String, speechTrial: SpeechTrialSummary?) {
+    private fun persist(code: String, speechTrial: SpeechTrialSummary?, bleTrial: BleTrialSummary?, bleEvidence: BleEventEvidence?) {
         try {
             // allowlist 판정과 allowlist 밖 집계는 sink가 단독으로 담당한다.
             fieldLog.enqueue(
@@ -168,6 +329,8 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
                     event = code,
                     state = fieldSnapshot(),
                     speechTrial = speechTrial,
+                    bleTrial = bleTrial,
+                    bleEvidence = bleEvidence,
                 ),
             )
         } catch (_: Exception) {
@@ -190,9 +353,25 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
             FieldStateKeys.MIC_PERMISSION to s.microphonePermission,
             FieldStateKeys.BLUETOOTH_PERMISSION to s.bluetoothPermission,
             FieldStateKeys.NOTIFICATION_PERMISSION to s.notificationPermission,
-            FieldStateKeys.ASSOCIATIONS to s.associations.size,
+            FieldStateKeys.ASSOCIATIONS to s.associationCount,
             FieldStateKeys.SESSION_ACTIVE to (s.sessionId != null),
             FieldStateKeys.STOP_REASON to s.stopReason,
+            FieldStateKeys.BLE_FIELD_TRIAL_ACTIVE to s.bleFieldTrialActive,
+            FieldStateKeys.BLE_FIELD_TRIAL_STARTING to s.bleFieldTrialStarting,
+            FieldStateKeys.BLE_FIELD_TRIAL_STOPPING to s.bleFieldTrialStopping,
+            FieldStateKeys.BLE_FIELD_TRIAL_WAITING_FOR_DEPARTURE to s.bleFieldTrialWaitingForDeparture,
+            FieldStateKeys.BLE_FIELD_TRIAL_ATTEMPT_COUNT to s.bleFieldTrialAttemptCount,
+            FieldStateKeys.BLE_FIELD_TRIAL_COMPLETED_COUNT to s.bleFieldTrialCompletedCount,
+            FieldStateKeys.BLE_FIELD_TRIAL_STOP_REASON to s.bleFieldTrialStopReason,
+            FieldStateKeys.BLE_SCAN_PERMISSION to s.bluetoothScanPermission,
+            FieldStateKeys.BLE_FIELD_OBSERVATION_ONLY to s.bleFieldConfig.observationOnly,
+            FieldStateKeys.BLE_FIELD_SUPPLEMENTAL_SCAN to s.bleFieldConfig.supplementalScan,
+            FieldStateKeys.BLE_FIELD_BT_ASSIST to s.bleFieldConfig.btAssist,
+            FieldStateKeys.BLE_FIELD_BACKGROUND_CONNECT to s.bleFieldConfig.backgroundConnect,
+            FieldStateKeys.BLE_FIELD_RETRY_ENABLED to s.bleFieldConfig.retryEnabled,
+            FieldStateKeys.BLE_FIELD_CANDIDATE_COUNT to s.bleFieldCandidateCount,
+            FieldStateKeys.BLE_FIELD_SCAN_RUNNING to s.bleFieldScanRunning,
+            FieldStateKeys.BLE_FIELD_SCAN_FAILURE to s.bleFieldScanFailure,
         )
     }
 
@@ -204,6 +383,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
 
     internal fun acquireSpeechDiagnostic(cancel: () -> Unit): SessionPolicy.Session? {
         check(Looper.myLooper() == Looper.getMainLooper())
+        if (uwbSupportBlocked() || teslaKeyReserved()) return null
         if (!activityVisible || policy.current != null || microphone != null ||
             state.value.enabled || state.value.observing || state.value.observationStartPending ||
             state.value.observationServiceRunning || state.value.speechDiagnosticActive || state.value.bleDiagnosticActive ||
@@ -226,11 +406,11 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
         update { it.copy(speechDiagnosticActive = false) }
     }
 
-    /** BLE도 기존 current를 사용한다. 오디오·알림·스캔 권한은 BLE 연결 진단의 조건이 아니다. */
-    internal fun acquireBleDiagnostic(cancel: () -> Unit): SessionPolicy.Session? {
+    /** 화면 배제 예외는 정확히 같은 BLE_FIELD FGS 소유자의 회차에만 허용한다. */
+    internal fun acquireBleDiagnostic(owner: ObservationService, token: String, cancel: () -> Unit): SessionPolicy.Session? {
         check(Looper.myLooper() == Looper.getMainLooper())
         refresh()
-        if (bleDiagnosticBlockedReason() != null) return null
+        if (bleFieldAttemptBlockedReason(owner, token) != null) return null
         val session = policy.startDiagnostic(now()) ?: return null
         ++generation
         bleDiagnosticId = session.id
@@ -249,29 +429,115 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
         update { it.copy(bleDiagnosticActive = false) }
     }
 
-    internal fun bleDiagnosticBlockedReason(): String? {
-        val s = state.value
+    internal fun ownsBleField(owner: ObservationService, token: String): Boolean =
+        observationMode == ObservationService.Mode.BLE_FIELD && ownsObservation(owner, token) && state.value.bleFieldTrialActive
+
+    internal fun bleFieldAttemptBlockedReason(owner: ObservationService, token: String): String? {
+        if (!ownsBleField(owner, token) || state.value.bleFieldTrialStopping || !state.value.observing) return "FIELD_OWNER_NOT_ARMED"
+        if (uwbSupportBlocked() || teslaKeyReserved()) return "LEASE_UNAVAILABLE"
+        if (policy.current != null || microphone != null || state.value.speechDiagnosticActive || state.value.bleDiagnosticActive) return "LEASE_UNAVAILABLE"
+        return fieldReadinessReason()
+    }
+
+    fun bleFieldTrialBlockedReason(config: BleFieldConfig = state.value.bleFieldConfig): String? {
         if (!activityVisible) return "VISIBLE_UI_REQUIRED"
-        if (policy.current != null || microphone != null || s.speechDiagnosticActive || s.bleDiagnosticActive) return "LEASE_UNAVAILABLE"
+        if (uwbSupportBlocked() || teslaKeyReserved()) return "LEASE_UNAVAILABLE"
+        val s = state.value
+        if (s.bleFieldTrialActive || s.bleFieldTrialStarting || s.bleFieldTrialStopping ||
+            policy.current != null || microphone != null || s.speechDiagnosticActive || s.bleDiagnosticActive
+        ) return "LEASE_UNAVAILABLE"
         if (s.enabled || s.observing || s.observationStartPending || s.observationServiceRunning) return "OBSERVATION_ACTIVE"
-        if (!app.packageManager.hasSystemFeature(PackageManager.FEATURE_COMPANION_DEVICE_SETUP)) return "CDM_UNSUPPORTED"
-        if (cdm == null) return "CDM_UNAVAILABLE"
-        if (s.associations.size != 1) return "SINGLE_ASSOCIATION_REQUIRED"
-        if (!granted(Manifest.permission.BLUETOOTH_CONNECT)) return "BLUETOOTH_PERMISSION_REQUIRED"
-        if (!s.bluetooth) return "BLUETOOTH_OFF"
-        return null
+        if (!markerAvailable) return "FIELD_MARKER_UNAVAILABLE"
+        return fieldReadinessReason(config)
+    }
+
+    private fun fieldReadinessReason(config: BleFieldConfig = state.value.bleFieldConfig): String? {
+        if (state.value.fieldLog.failed) return "FIELD_LOG_UNHEALTHY"
+        if (config.supplementalScan && !granted(Manifest.permission.BLUETOOTH_SCAN)) return "BLUETOOTH_SCAN_PERMISSION_REQUIRED"
+        return observationReadinessReason()
+    }
+
+    fun startBleFieldTrial(config: BleFieldConfig = BleFieldConfig.BASELINE) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        refresh()
+        bleFieldTrialBlockedReason(config)?.let { rejectBleField(it); return }
+        val token = UUID.randomUUID().toString()
+        if (!observationPolicy.request(token)) { rejectBleField("LEASE_UNAVAILABLE"); return }
+        observationMode = ObservationService.Mode.BLE_FIELD
+        // 구 실행의 비동기 로그 완료가 새 실행 marker를 지우지 못하게 봉인한다.
+        clearFieldMarkerWhenLogged = false
+        trialId = UUID.randomUUID().toString()
+        resetPresenceBaseline()
+        bleProbeState.value = BleProbeState()
+        update { it.copy(bleFieldTrialStarting = true, bleFieldTrialStopReason = null,
+            bleFieldConfig = config, bleFieldCandidateCount = 0, bleFieldScanRunning = false, bleFieldScanFailure = null,
+            bleFieldTrialWaitingForDeparture = false, bleFieldTrialAttemptCount = 0, bleFieldTrialCompletedCount = 0,
+            observationStartPending = true, automaticMicrophoneEnabled = false) }
+        recordBleTrial("BLE_FIELD_START_REQUESTED", bleTrialSummary(0, BleProbeState(), false))
+        if (!observationPolicy.accepts(token) || !state.value.bleFieldTrialStarting) return
+        val marked = try { fieldMarker.edit().putBoolean("unclosed", true).commit() } catch (_: Exception) { false }
+        if (!marked) { markerAvailable = false; stopBleFieldTrial("FIELD_MARKER_WRITE_FAILED"); return }
+        try {
+            app.startForegroundService(Intent(app, ObservationService::class.java).setAction(ObservationService.ACTION_START)
+                .putExtra(ObservationService.REQUEST_ID, token).putExtra(ObservationService.MODE, ObservationService.Mode.BLE_FIELD.name))
+            handler.postDelayed({
+                if (observationPolicy.pendingRequest == token) stopBleFieldTrial("OBSERVATION_FGS_START_TIMEOUT")
+            }, 5_000)
+        } catch (_: SecurityException) { stopBleFieldTrial("OBSERVATION_FGS_SECURITY_DENIED") }
+        catch (_: android.app.ForegroundServiceStartNotAllowedException) { stopBleFieldTrial("OBSERVATION_FGS_BACKGROUND_START_DENIED") }
+        catch (_: Exception) { stopBleFieldTrial("OBSERVATION_FGS_START_FAILED") }
+    }
+
+    private fun rejectBleField(reason: String) {
+        if (!state.value.bleFieldTrialActive && !state.value.bleFieldTrialStarting && !state.value.bleFieldTrialStopping) {
+            update { it.copy(bleFieldTrialStopReason = reason) }
+        }
+        recordBleTrial("BLE_FIELD_START_REJECTED", bleTrialSummary(0, BleProbeState(status = BleProbeStatus.BLOCKED, reason = reason), false))
+    }
+
+    fun stopBleFieldTrial(reason: String = "USER_STOP") {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (observationMode != ObservationService.Mode.BLE_FIELD || state.value.bleFieldTrialStopping ||
+            (!state.value.bleFieldTrialStarting && !state.value.bleFieldTrialActive)
+        ) return
+        update { it.copy(bleFieldTrialStopping = true, bleFieldTrialStarting = false, observing = false,
+            bleFieldTrialWaitingForDeparture = false, bleFieldTrialStopReason = reason, stopReason = reason) }
+        event("BLE_FIELD_STOP_REQUESTED")
+        val owner = observationService
+        if (owner != null) owner.stopBleField(reason)
+        else finishBleField(null, observationPolicy.pendingRequest ?: return)
+    }
+
+    internal fun finishBleField(owner: ObservationService?, token: String, cleanupFailed: Boolean = false) {
+        if (observationMode != ObservationService.Mode.BLE_FIELD ||
+            (owner != null && !ownsObservation(owner, token)) || !observationPolicy.finish(token)
+        ) return
+        observationService = null
+        update { it.copy(enabled = false, observing = false, present = false, observationStartPending = false,
+            observationServiceRunning = false, bleFieldTrialActive = false, bleFieldTrialStarting = false,
+            bleFieldTrialStopping = false, bleFieldTrialWaitingForDeparture = false, automaticMicrophoneEnabled = false,
+            bleFieldScanRunning = false,
+            bleFieldTrialStopReason = if (cleanupFailed) "LOCAL_CLOSE_FAILED_RESTART_REQUIRED" else it.bleFieldTrialStopReason) }
+        resetPresenceBaseline()
+        event("BLE_FIELD_STOPPED")
+        // 최종 회차/중지 행의 fd.sync까지 끝나야 정상 종료 marker를 남긴다. FGS 정리를 지연시키지는 않는다.
+        clearFieldMarkerWhenLogged = !cleanupFailed
+        clearLoggedFieldMarker()
+        trialId = null
     }
 
     fun refresh() {
         val ids = try {
             if (app.packageManager.hasSystemFeature(PackageManager.FEATURE_COMPANION_DEVICE_SETUP)) cdm?.myAssociations?.filterNot { it.isSelfManaged }?.map { it.id }.orEmpty() else emptyList()
         } catch (_: Exception) { event("ASSOCIATION_READ_FAILED"); emptyList() }
+        associationIds = ids
         val bt = try { granted(Manifest.permission.BLUETOOTH_CONNECT) && app.getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true } catch (_: SecurityException) { false }
-        update { it.copy(associations = ids, bluetooth = bt, assistant = assistantActive(), microphonePermission = granted(Manifest.permission.RECORD_AUDIO), bluetoothPermission = granted(Manifest.permission.BLUETOOTH_CONNECT), notificationPermission = granted(Manifest.permission.POST_NOTIFICATIONS)) }
+        update { it.copy(associationCount = ids.size, bluetooth = bt, assistant = assistantActive(), microphonePermission = granted(Manifest.permission.RECORD_AUDIO), bluetoothPermission = granted(Manifest.permission.BLUETOOTH_CONNECT), bluetoothScanPermission = granted(Manifest.permission.BLUETOOTH_SCAN), notificationPermission = granted(Manifest.permission.POST_NOTIFICATIONS)) }
+        if (teslaKeyReserved()) teslaKeyProbe.checkReadiness()
         if (observationPolicy.pendingRequest != null || observationPolicy.runningRequest != null) {
-            val reason = observationBlockedReason()
+            val reason = if (observationMode == ObservationService.Mode.BLE_FIELD) fieldReadinessReason() else observationBlockedReason()
             if (reason != null) stopObservation(reason)
-            else if (observationService?.observedAssociationId?.let { it !in ids } == true) {
+            else if (observationService?.observedAssociationId?.let { it != ids.singleOrNull() } == true) {
                 stopObservation("ASSOCIATION_REMOVED")
             }
         }
@@ -279,11 +545,14 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
 
     fun setEnabled(enabled: Boolean) {
         check(Looper.myLooper() == Looper.getMainLooper())
+        if (enabled && teslaKeyReserved()) { event("TESLA_KEY_OTHER_DIAGNOSTIC_BLOCKED"); return }
+        if (enabled && uwbSupportBlocked()) { event("UWB_SUPPORT_OTHER_DIAGNOSTIC_BLOCKED"); return }
         if (!enabled) {
             stopObservation("DISABLED")
             return
         }
         val current = state.value
+        if (fieldTrialReserved()) { event("BLE_FIELD_OTHER_DIAGNOSTIC_BLOCKED"); return }
         if (current.enabled || current.observationStartPending) {
             refresh()
             return
@@ -296,6 +565,7 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
 
         val token = UUID.randomUUID().toString()
         if (!observationPolicy.request(token)) return
+        observationMode = ObservationService.Mode.OBSERVATION
         trialId = UUID.randomUUID().toString()
         resetPresenceBaseline()
         update { it.copy(observationStartPending = true) }
@@ -305,7 +575,8 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
             app.startForegroundService(
                 Intent(app, ObservationService::class.java)
                     .setAction(ObservationService.ACTION_START)
-                    .putExtra(ObservationService.REQUEST_ID, token),
+                    .putExtra(ObservationService.REQUEST_ID, token)
+                    .putExtra(ObservationService.MODE, ObservationService.Mode.OBSERVATION.name),
             )
             handler.postDelayed({
                 if (observationPolicy.pendingRequest == token) {
@@ -326,10 +597,16 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     /** 스냅샷은 refresh가 갱신한다. 관찰 전용에는 기본 비서·마이크 권한을 요구하지 않는다. */
     internal fun observationBlockedReason(): String? {
         val s = state.value
+        if (uwbSupportBlocked() || teslaKeyReserved()) return "DIAGNOSTIC_OBSERVATION_BLOCKED"
         if (s.speechDiagnosticActive || s.bleDiagnosticActive || policy.current?.diagnostic == true) return "DIAGNOSTIC_OBSERVATION_BLOCKED"
+        return observationReadinessReason()
+    }
+
+    private fun observationReadinessReason(): String? {
+        val s = state.value
         if (!app.packageManager.hasSystemFeature(PackageManager.FEATURE_COMPANION_DEVICE_SETUP)) return "CDM_UNSUPPORTED"
         if (cdm == null) return "CDM_UNAVAILABLE"
-        if (s.associations.size != 1) return if (s.associations.isEmpty()) "ASSOCIATION_REQUIRED" else "MULTIPLE_ASSOCIATIONS_UNSUPPORTED"
+        if (s.associationCount != 1) return if (s.associationCount == 0) "ASSOCIATION_REQUIRED" else "MULTIPLE_ASSOCIATIONS_UNSUPPORTED"
         if (!s.bluetoothPermission) return "OBSERVATION_BLUETOOTH_PERMISSION_REQUIRED"
         if (!s.bluetooth) return "BLUETOOTH_OFF"
         if (!s.notificationPermission) return "OBSERVATION_NOTIFICATION_PERMISSION_REQUIRED"
@@ -340,16 +617,27 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
         return null
     }
 
-    internal fun acceptsObservationRequest(token: String) = observationPolicy.pendingRequest == token
+    internal fun acceptsObservationRequest(token: String, mode: ObservationService.Mode) =
+        observationPolicy.pendingRequest == token && observationMode == mode
+
+    internal fun observationRequestBlockedReason(): String? =
+        if (observationMode == ObservationService.Mode.BLE_FIELD) fieldReadinessReason() else observationBlockedReason()
 
     internal fun observationStarted(service: ObservationService, token: String): Boolean {
+        if (uwbSupportBlocked() || teslaKeyReserved()) return false
         if (state.value.speechDiagnosticActive || state.value.bleDiagnosticActive || policy.current?.diagnostic == true) return false
         if (!observationPolicy.promote(token)) return false
         observationService = service
-        update { it.copy(enabled = true, observationServiceRunning = true, observationStartPending = false) }
-        event("OBSERVATION_FGS_RUNNING")
-        event(if (state.value.automaticMicrophoneEnabled) "AUTOMATIC_MIC_OPTED_IN" else "OBSERVATION_ONLY")
-        event("FEATURE_ENABLED_THIS_PROCESS")
+        if (observationMode == ObservationService.Mode.BLE_FIELD) {
+            update { it.copy(enabled = true, observationServiceRunning = true, observationStartPending = false,
+                bleFieldTrialActive = true, bleFieldTrialStarting = false, automaticMicrophoneEnabled = false) }
+            event("BLE_FIELD_RUNNING")
+        } else {
+            update { it.copy(enabled = true, observationServiceRunning = true, observationStartPending = false) }
+            event("OBSERVATION_FGS_RUNNING")
+            event(if (state.value.automaticMicrophoneEnabled) "AUTOMATIC_MIC_OPTED_IN" else "OBSERVATION_ONLY")
+            event("FEATURE_ENABLED_THIS_PROCESS")
+        }
         return true
     }
 
@@ -360,10 +648,15 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
         if (!ownsObservation(service, token)) return
         update { it.copy(observing = true) }
         event("OBSERVE_REQUEST_ACCEPTED_NOT_PRESENCE_PROOF")
+        if (observationMode == ObservationService.Mode.BLE_FIELD) event("BLE_FIELD_WAITING")
     }
 
     /** 사용자 OFF, 알림 OFF, 시작 실패와 서비스 파괴가 모두 이 경계를 통과한다. */
     internal fun stopObservation(reason: String, token: String? = null) {
+        if (observationMode == ObservationService.Mode.BLE_FIELD && fieldTrialReserved()) {
+            if (token == null || observationPolicy.accepts(token)) stopBleFieldTrial(reason)
+            return
+        }
         if (!observationPolicy.finish(token)) return
         val owner = observationService
         observationService = null
@@ -398,7 +691,10 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
      * 진단 비활성화는 동의와 지연 작업을 함께 해제한다.
      */
     fun setAutomaticMicrophone(enabled: Boolean) {
+        if (teslaKeyReserved()) { event("TESLA_KEY_OTHER_DIAGNOSTIC_BLOCKED"); return }
+        if (uwbSupportBlocked()) { event("UWB_SUPPORT_OTHER_DIAGNOSTIC_BLOCKED"); return }
         val s = state.value
+        if (fieldTrialReserved()) { event("BLE_FIELD_OTHER_DIAGNOSTIC_BLOCKED"); return }
         if (s.enabled || s.observing || s.observationStartPending || s.observationServiceRunning) {
             event("AUTOMATIC_MIC_REQUIRES_OBSERVATION_OFF")
             return
@@ -425,18 +721,62 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     }
 
     fun startObserving() {
+        if (teslaKeyReserved()) { event("TESLA_KEY_OTHER_DIAGNOSTIC_BLOCKED"); return }
+        if (uwbSupportBlocked()) { event("UWB_SUPPORT_OTHER_DIAGNOSTIC_BLOCKED"); return }
+        if (fieldTrialReserved()) { event("BLE_FIELD_OTHER_DIAGNOSTIC_BLOCKED"); return }
         if (state.value.speechDiagnosticActive || state.value.bleDiagnosticActive) { event("DIAGNOSTIC_OBSERVE_BLOCKED"); return }
         refresh()
         if (!state.value.observationServiceRunning) { event("OBSERVE_REQUIRES_ENABLE"); return }
         observationService?.startObserving()
     }
 
-    fun presence(id: Int, event: Int) {
-        if (Looper.myLooper() != Looper.getMainLooper()) { handler.post { presence(id, event) }; return }
+    fun presence(id: Int, event: Int, receivedElapsedMs: Long = now()) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post { receivePresence(id, event, receivedElapsedMs) }
+        } else receivePresence(id, event, receivedElapsedMs)
+    }
+
+    private fun receivePresence(id: Int, event: Int, receivedElapsedMs: Long) {
+        recordBleEvidence(BleEventEvidence(BleEvidenceKind.PRESENCE_RECEIVED,
+            signal = presenceSignal(event), receivedElapsedMs = receivedElapsedMs))
+        dispatchPresence(id, event, receivedElapsedMs)
+    }
+
+    private fun presenceSignal(event: Int): BleEvidenceSignal? = when (event) {
+        DevicePresenceEvent.EVENT_BLE_APPEARED -> BleEvidenceSignal.CDM_BLE_APPEARED
+        DevicePresenceEvent.EVENT_BLE_DISAPPEARED -> BleEvidenceSignal.CDM_BLE_DISAPPEARED
+        DevicePresenceEvent.EVENT_BT_CONNECTED -> BleEvidenceSignal.BT_CONNECTED
+        DevicePresenceEvent.EVENT_BT_DISCONNECTED -> BleEvidenceSignal.BT_DISCONNECTED
+        else -> null
+    }
+
+    private fun dispatchPresence(id: Int, event: Int, receivedElapsedMs: Long) {
+        if (teslaKeyReserved()) { this.event("TESLA_KEY_OTHER_DIAGNOSTIC_BLOCKED"); return }
+        if (observationMode == ObservationService.Mode.BLE_FIELD && fieldTrialReserved()) {
+            refresh()
+            val owner = observationService
+            val token = observationPolicy.runningRequest
+            val gate = when {
+                state.value.bleFieldTrialStopping -> BleEvidenceGate.STOPPING
+                owner == null || token == null -> BleEvidenceGate.OWNER_MISSING
+                !ownsBleField(owner, token) -> BleEvidenceGate.UNARMED
+                !state.value.observing -> BleEvidenceGate.NOT_OBSERVING
+                owner.observedAssociationId != id || id !in associationIds -> BleEvidenceGate.WRONG_ASSOCIATION
+                presenceSignal(event) == null -> BleEvidenceGate.UNSUPPORTED
+                else -> null
+            }
+            recordBleEvidence(BleEventEvidence(
+                if (gate == null) BleEvidenceKind.PRESENCE_DISPATCHED else BleEvidenceKind.PRESENCE_REJECTED,
+                signal = presenceSignal(event), gate = gate, receivedElapsedMs = receivedElapsedMs,
+                queueDelayMs = now() - receivedElapsedMs, localGattActive = state.value.bleDiagnosticActive))
+            if (gate == null) checkNotNull(owner).fieldPresence(event, receivedElapsedMs)
+            else this.event("PRESENCE_IGNORED_NOT_ARMED")
+            return
+        }
         if (state.value.speechDiagnosticActive) { this.event("SPEECH_TRIAL_APPROACH_BLOCKED"); return }
         if (state.value.bleDiagnosticActive) { this.event("BLE_PROBE_APPROACH_BLOCKED"); return }
         refresh()
-        if (id !in state.value.associations || observationService?.observedAssociationId != id ||
+        if (id !in associationIds || observationService?.observedAssociationId != id ||
             !state.value.enabled || !state.value.observationServiceRunning || !state.value.observing
         ) {
             this.event("PRESENCE_IGNORED_NOT_ARMED")
@@ -481,15 +821,19 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     }
 
     fun automaticAllowed(): Boolean {
+        if (uwbSupportBlocked() || teslaKeyReserved()) return false
         refresh()
         val s = state.value
-        return !s.speechDiagnosticActive && !s.bleDiagnosticActive && policy.current?.diagnostic != true &&
+        return !fieldTrialReserved() && !s.speechDiagnosticActive && !s.bleDiagnosticActive && policy.current?.diagnostic != true &&
             s.enabled && s.observationServiceRunning &&
             s.automaticMicrophoneEnabled && s.observing &&
             s.bluetooth && s.assistant && s.microphonePermission
     }
 
     fun manualStart(context: Context) {
+        if (teslaKeyReserved()) { event("TESLA_KEY_OTHER_DIAGNOSTIC_BLOCKED"); return }
+        if (uwbSupportBlocked()) { event("UWB_SUPPORT_OTHER_DIAGNOSTIC_BLOCKED"); return }
+        if (fieldTrialReserved()) { event("BLE_FIELD_OTHER_DIAGNOSTIC_BLOCKED"); return }
         if (state.value.speechDiagnosticActive) { event("SPEECH_TRIAL_MANUAL_BLOCKED"); return }
         if (state.value.bleDiagnosticActive) { event("BLE_PROBE_MANUAL_BLOCKED"); return }
         if (!activityVisible || !granted(Manifest.permission.RECORD_AUDIO)) { event("MANUAL_REQUIRES_VISIBLE_UI_AND_MIC_PERMISSION"); return }
@@ -508,6 +852,9 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     }
 
     fun launchMicrophone(context: Context, session: SessionPolicy.Session) {
+        if (teslaKeyReserved()) { event("TESLA_KEY_OTHER_DIAGNOSTIC_BLOCKED"); return }
+        if (uwbSupportBlocked()) { event("UWB_SUPPORT_OTHER_DIAGNOSTIC_BLOCKED"); return }
+        if (fieldTrialReserved()) { event("BLE_FIELD_OTHER_DIAGNOSTIC_BLOCKED"); return }
         if (state.value.speechDiagnosticActive) { event("SPEECH_TRIAL_MICROPHONE_BLOCKED"); return }
         if (state.value.bleDiagnosticActive) { event("BLE_PROBE_MICROPHONE_BLOCKED"); return }
         if (session.diagnostic || !policy.accepts(session.id)) { event("MICROPHONE_SESSION_REJECTED"); return }
@@ -519,6 +866,9 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
     }
 
     fun stop(reason: String) {
+        if (teslaKeyReserved()) { cancelTeslaKey("USER_STOP"); return }
+        // Activity·지원조회·마이크의 일반 stop은 서비스 소유 시험을 취소하지 못한다.
+        if (fieldTrialReserved()) { event("BLE_FIELD_OTHER_DIAGNOSTIC_BLOCKED"); return }
         // 진단 current는 STT·TTS/GATT 실제 해제 뒤 소유자만 종료한다. 외부 stop은 취소만 전달한다.
         val diagnostic = policy.current?.takeIf { it.diagnostic }
         if (diagnostic != null) {
@@ -536,6 +886,10 @@ class DiagnosticRuntime(private val app: DiagnosticApp) {
         }
         update { it.copy(session = "대기", sessionId = null, deadline = null, stopReason = reason) }
         event(reason)
+    }
+
+    private fun fieldTrialReserved(): Boolean = state.value.let {
+        it.bleFieldTrialActive || it.bleFieldTrialStarting || it.bleFieldTrialStopping
     }
 
     fun samples(id: Long, count: Long, rms: Double) {

@@ -9,6 +9,9 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
+internal val AppSuccessColor = Color(0xFF74D9A0)
+internal val AppWarningColor = Color(0xFFEDC477)
+
 private val HeyTeslaColors = darkColorScheme(
     primary = Color(0xFFF4F4F5),
     onPrimary = Color(0xFF17181A),
