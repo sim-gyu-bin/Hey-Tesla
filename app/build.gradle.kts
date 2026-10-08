@@ -14,8 +14,8 @@ android {
         applicationId = "com.heytesla.app"
         minSdk = 36
         targetSdk = 36
-        versionCode = 19
-        versionName = "0.19.0-probe"
+        versionCode = 25
+        versionName = "0.25.0-probe"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

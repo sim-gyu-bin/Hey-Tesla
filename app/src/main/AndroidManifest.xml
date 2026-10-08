@@ -17,7 +17,7 @@
         <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
     </queries>
     <application android:name=".DiagnosticApp" android:label="Hey Tesla"
-        android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules"
+        android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@android:drawable/ic_btn_speak_now"
         android:theme="@android:style/Theme.Material.NoActionBar" android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true">
@@ -39,5 +39,6 @@
         </service>
         <service android:name=".MicrophoneService" android:exported="false" android:foregroundServiceType="microphone" android:stopWithTask="false" />
         <service android:name=".ObservationService" android:exported="false" android:foregroundServiceType="connectedDevice" android:stopWithTask="false" />
+        <receiver android:name=".BleScanReceiver" android:exported="false" />
     </application>
 </manifest>

@@ -4,6 +4,33 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class BleFieldTrialPolicyTest {
+    @Test fun advertisedNameDetectionMergesCdmAndScanButNeverSchedulesGattOrBtAssist() {
+        val h = Consumer(BleFieldConfig.VEHICLE_NAME_DETECTION)
+        h.signal(BleEvidenceSignal.BT_CONNECTED)
+        assertEquals(0L, h.policy.candidateCount)
+        h.signal(BleEvidenceSignal.FILTERED_SCAN)
+        h.signal(BleEvidenceSignal.CDM_BLE_APPEARED)
+        repeat(100) { h.signal(BleEvidenceSignal.FILTERED_SCAN) }
+        assertEquals(1L, h.policy.candidateCount)
+        h.signal(BleEvidenceSignal.CDM_BLE_DISAPPEARED)
+        h.advanceBy(BleFieldTrialPolicy.SIGNAL_FRESH_MS)
+        assertFalse(h.policy.present)
+        h.signal(BleEvidenceSignal.BT_CONNECTED)
+        assertFalse(h.policy.present)
+        h.signal(BleEvidenceSignal.FILTERED_SCAN)
+        assertEquals(2L, h.policy.candidateCount)
+        assertEquals(0L, h.policy.attemptCount)
+        assertNull(h.policy.currentAttempt)
+        assertFalse(h.policy.localGattActive)
+        assertTrue(h.ports.isEmpty())
+        h.policy.stop()
+        h.signal(BleEvidenceSignal.FILTERED_SCAN)
+        h.advanceBy(BleFieldTrialPolicy.SIGNAL_FRESH_MS)
+        assertEquals(2L, h.policy.candidateCount)
+        assertEquals(0L, h.policy.attemptCount)
+        assertNull(h.policy.nextWakeAt)
+    }
+
     @Test fun baselineKeepsRealCdmEdgesAndDoesNotUseBtOrScanAsTriggers() {
         val h = Consumer(BleFieldConfig.BASELINE)
         h.signal(BleEvidenceSignal.BT_CONNECTED)

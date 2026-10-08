@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import unittest
+from unittest.mock import patch
 
 from analyze_field_log import analyze, compare_visits, main
 
@@ -42,6 +43,118 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(final['notificationCount'], 0)
         self.assertEqual(typed['speechSummaryRows'], 0)
 
+    def test_scan_registration_failure_is_not_a_detection_or_completed_attempt(self):
+        report = parse(
+            record(version=7, event='BLE_FIELD_START_REQUESTED',
+                   state={'bleFieldObservationOnly': True, 'bleFieldSupplementalScan': True}),
+            record(version=7, bleEvidence={'kind': 'SCAN_FAILED', 'scanFailureCode': 4, 'accepted': False}),
+            record(version=7, event='BLE_FIELD_STOPPED',
+                   state={'bleFieldTrialStopReason': 'BLE_SCAN_PENDING_INTENT_FAILED'}),
+        )
+        trial = json.loads(json.dumps(report))['trials'][0]
+        self.assertEqual(trial['stopReason'], 'BLE_SCAN_PENDING_INTENT_FAILED')
+        self.assertEqual(trial['evidenceDimensions']['scanFailureCode'], {'4': 1})
+        self.assertEqual(trial['candidateTypedCount'], 0)
+        self.assertEqual(trial['completeAttemptCount'], 0)
+        self.assertEqual(trial['candidates'], [])
+
+    def test_advertised_name_filter_preserves_legacy_unknown_and_explicit_booleans(self):
+        key = 'bleFieldAdvertisedNameFilter'
+        for version in range(1, 7):
+            with self.subTest(version=version):
+                report = parse(record(version=version, event='BLE_FIELD_START_REQUESTED', state={'bleFieldSupplementalScan': True, key: True}))
+                self.assertEqual(report['counts']['analyzedRows'], 1)
+                self.assertEqual(report['issues'], [])
+                trial = report['trials'][0]
+                self.assertIsNone(trial['options'][0]['values'][key])
+                self.assertEqual(trial['candidateSupported'], version >= 6)
+                self.assertEqual(trial['bleTypedSupported'], version >= 5)
+        report = parse(
+            record(version=7, event='BLE_FIELD_START_REQUESTED', state={'bleFieldSupplementalScan': True}),
+            record(version=7, trialId=U, event='BLE_FIELD_START_REQUESTED', state={'bleFieldSupplementalScan': True, key: False}),
+            record(version=7, trialId=Q, event='BLE_FIELD_START_REQUESTED', state={'bleFieldSupplementalScan': True, key: True}),
+        )
+        self.assertEqual(report['versions'], {'7': 3})
+        self.assertEqual([t['options'][0]['values'][key] for t in report['trials']], [None, False, True])
+
+    def test_advertised_name_options_stay_with_run_and_missing_values_are_not_filled(self):
+        key = 'bleFieldAdvertisedNameFilter'
+        name_options = {'bleFieldObservationOnly': True, 'bleFieldSupplementalScan': True, 'bleFieldBtAssist': False, 'bleFieldBackgroundConnect': False, 'bleFieldRetryEnabled': False, key: True}
+        address_options = dict(name_options, bleFieldObservationOnly=False, bleFieldAdvertisedNameFilter=False)
+        report = parse(
+            record(version=7, event='BLE_FIELD_START_REQUESTED', state=name_options),
+            record(version=7, event='BLE_FIELD_RUNNING', state=name_options),
+            record(version=7, event='BLE_FIELD_STOPPED'),
+            record(version=7, processId=Q, trialId=U, event='BLE_FIELD_START_REQUESTED', state=address_options),
+            record(version=7, processId=Q, trialId=U, state={'bleFieldSupplementalScan': True}),
+            record(version=7, processId=Q, trialId=U, event='BLE_FIELD_STOPPED'),
+            record(version=7, processId=Q, trialId=P, event='BLE_FIELD_START_REQUESTED'),
+        )
+        name, address, unknown = report['trials']
+        self.assertEqual(name['options'], [{'line': 1, 'values': name_options}])
+        self.assertEqual(address['options'][0], {'line': 4, 'values': address_options})
+        self.assertEqual(len(address['options']), 2)
+        self.assertIsNone(address['options'][1]['values'][key])
+        self.assertIsNone(address['options'][1]['values']['bleFieldObservationOnly'])
+        self.assertEqual(unknown['options'], [])
+        self.assertEqual(name['termination'], 'normal_stop')
+        self.assertEqual(address['termination'], 'normal_stop')
+
+    def test_schema_seven_scan_candidate_survives_json_and_visit_consumers(self):
+        report = parse(
+            record(version=7, event='BLE_FIELD_START_REQUESTED', state={'bleFieldAdvertisedNameFilter': True}),
+            record(version=7, wallMs=BASE+1000, elapsedMs=2000, state={'bleFieldAdvertisedNameFilter': True, 'bleFieldCandidateCount': 1}, bleEvidence={'kind': 'CANDIDATE_SIGNAL', 'signal': 'FILTERED_SCAN', 'candidate': 1, 'receivedElapsedMs': 2000, 'queueDelayMs': 0}),
+            record(version=7, wallMs=BASE+1000, elapsedMs=2000, bleEvidence={'kind': 'CANDIDATE_MERGED', 'candidate': 1}),
+        )
+        restored = json.loads(json.dumps(report, allow_nan=False))
+        trial = restored['trials'][0]
+        self.assertTrue(trial['candidateSupported'])
+        self.assertEqual(trial['candidateTypedCount'], 1)
+        self.assertEqual(trial['candidateStateMax'], 1)
+        self.assertEqual(trial['evidence'], {'CANDIDATE_SIGNAL': 1, 'CANDIDATE_MERGED': 1})
+        self.assertEqual(trial['evidenceDimensions']['signal'], {'FILTERED_SCAN': 1})
+        self.assertEqual(trial['finalAttemptCount'], 0)
+        result = compare_visits(visits((1, T, '2026-01-01T00:00:00Z', '2026-01-01T00:00:02Z', '2026-01-01T00:00:03Z')), restored, 0)
+        self.assertEqual(result['detectedVisitRate'], 1)
+        self.assertEqual(result['beforeHandleRate'], 1)
+        self.assertEqual(result['observations'][0]['delayMs'], 1000)
+
+    def test_name_detection_rejection_reasons_remain_typed_without_identifier_echo(self):
+        for reason in ('BLE_NAME_DETECTION_OPTIONS_INVALID', 'VIN_FORMAT_INVALID', 'BLE_SCAN_NAME_UNAVAILABLE'):
+            with self.subTest(reason=reason):
+                report = parse(record(version=7, event='BLE_FIELD_STOPPED', state={'bleFieldTrialStopReason': reason, 'bleFieldAdvertisedNameFilter': True}, bleTrial={'attempt': 1, 'status': 'BLOCKED', 'reason': reason}))
+                trial = report['trials'][0]
+                self.assertEqual(trial['stopReason'], reason)
+                self.assertEqual(trial['attempts'][0]['lastSummary']['reason'], reason)
+                self.assertEqual(trial['completeAttemptCount'], 0)
+
+    def test_advertised_name_material_never_reaches_report_or_cli_consumers(self):
+        key = 'bleFieldAdvertisedNameFilter'
+        secrets = ['S0123456789abcdefC', '0123456789abcdef0123456789abcdef01234567', 'SYNTHETIC-VIN-MATERIAL', '02:00:00:00:00:01', 'SYNTHETIC-NEW-STRING']
+        rows = [
+            record(version=7, state={'bleFieldSupplementalScan': True, key: value, 'advertisedName': secrets[0], 'hash': secrets[1], 'vin': secrets[2], 'address': secrets[3], 'peerKey': secrets[4]}, appVersion=secrets[4], bleEvidence={'kind': 'SCAN_FAILED', 'signal': secrets[0], 'gate': secrets[1]}, bleTrial={'attempt': 0, 'status': 'BLOCKED', 'reason': secrets[2]})
+            for value in secrets + ['BLE_FIELD_RUNNING', 1, 0, None, [], {}]
+        ]
+        report = parse(*rows)
+        self.assertEqual(report['counts']['analyzedRows'], len(rows))
+        self.assertEqual(report['issues'], [])
+        self.assertEqual(len(report['trials'][0]['options']), 1)
+        self.assertIsNone(report['trials'][0]['options'][0]['values'][key])
+        encoded = json.dumps(report, allow_nan=False)
+        for secret in secrets:
+            self.assertNotIn(secret, encoded)
+        payload = ''.join(json.dumps(row)+'\n' for row in rows).encode('utf-8')
+        for flags in ([], ['--json']):
+            with self.subTest(flags=flags):
+                out, err = io.StringIO(), io.StringIO()
+                with patch('builtins.open', return_value=io.BytesIO(payload)), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = main(['synthetic-input.jsonl'] + flags)
+                self.assertEqual(code, 0)
+                for secret in secrets:
+                    self.assertNotIn(secret, out.getvalue() + err.getvalue())
+                if flags:
+                    self.assertEqual(json.loads(out.getvalue()), report)
+
     def test_stage_is_not_final_and_duplicate_conflict_is_not_success(self):
         stage = record(bleTrial={'attempt': 1, 'status': 'COMPLETE'})
         self.assertEqual(parse(stage)['trials'][0]['finalAttemptCount'], 0)
@@ -79,6 +192,26 @@ class AnalysisTests(unittest.TestCase):
         result = compare_visits(visits((1, T, '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', '2026-01-01T00:00:02Z'), (2, U, '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', '2026-01-01T00:00:02Z')), report, 0, (T,))
         self.assertEqual(result['validVisitCount'], 1)
         self.assertEqual(result['excludedVisitCount'], 1)
+
+    def test_excluding_trial_does_not_hide_clock_changes_or_split_valid_attempts(self):
+        final = {'attempt': 1, 'status': 'COMPLETE'}
+        stable = parse(record(bleTrial={'attempt': 1, 'status': 'CONNECTING'}),
+            record(trialId=U, wallMs=BASE+100, elapsedMs=1100),
+            record(wallMs=BASE+200, elapsedMs=1200, event='BLE_FIELD_TRIAL_FINISHED', bleTrial=final),
+            exclude=(U,))
+        self.assertEqual(stable['issues'], [])
+        self.assertEqual(stable['trials'][0]['completeAttemptCount'], 1)
+        for wall, elapsed, code in ((BASE+10000, 1100, 'CLOCK_MISMATCH'), (BASE+100, 10, 'ELAPSED_REGRESSION')):
+            with self.subTest(code=code):
+                report = parse(record(), record(trialId=U, wallMs=wall, elapsedMs=elapsed),
+                    record(wallMs=wall+100, elapsedMs=elapsed+100,
+                        bleEvidence={'kind': 'CANDIDATE_SIGNAL', 'candidate': 1}), exclude=(U,))
+                self.assertIn(code, [i['code'] for i in report['issues']])
+                self.assertEqual(report['counts']['excludedRows'], 1)
+                self.assertEqual([t['trialId'] for t in report['trials']], [T])
+                result = compare_visits(visits((1, T, '2026-01-01T00:00:00Z', '2026-01-01T00:00:11Z', '2026-01-01T00:00:12Z')), report, 0)
+                self.assertIsNone(result['detectedVisitRate'])
+                self.assertFalse(result['clockAligned'])
 
     def test_privacy_unknown_state_enums_and_identifiers(self):
         secret = 'VIN-secret-address-speech-exception'
@@ -141,6 +274,28 @@ class AnalysisTests(unittest.TestCase):
         result = compare_visits(visits(row), report, 0)
         self.assertIsNone(result['detectedVisitRate'])
         self.assertEqual(result['observations'][0]['detection'], 'clock_mismatch_unverified')
+
+    def test_invalid_received_time_cannot_become_a_successful_visit(self):
+        row = (1, T, '2026-01-01T00:00:00Z', '2026-01-01T00:00:02Z', '2026-01-01T00:00:03Z')
+        for received in (-1, 2001, True, '2000', 1.5, 2**63):
+            with self.subTest(received=received):
+                report = parse(record(wallMs=BASE+1000, elapsedMs=2000,
+                    bleEvidence={'kind': 'CANDIDATE_SIGNAL', 'candidate': 1, 'receivedElapsedMs': received}))
+                result = compare_visits(visits(row), json.loads(json.dumps(report)), 0)
+                self.assertIn('INVALID_RECEIVED_TIME', [i['code'] for i in report['issues']])
+                self.assertIsNone(result['detectedVisitRate'])
+                self.assertIsNone(result['beforeHandleRate'])
+                self.assertIsNone(result['observations'][0]['delayMs'])
+                self.assertFalse(result['clockAligned'])
+
+    def test_missing_received_time_keeps_explicit_record_wall_fallback(self):
+        report = parse(record(wallMs=BASE+1000, elapsedMs=2000,
+            bleEvidence={'kind': 'CANDIDATE_SIGNAL', 'candidate': 1, 'receivedElapsedMs': None}))
+        result = compare_visits(visits((1, T, '2026-01-01T00:00:00Z', '2026-01-01T00:00:02Z', '2026-01-01T00:00:03Z')), report, 0)
+        self.assertEqual(report['issues'], [])
+        self.assertEqual(result['detectedVisitRate'], 1)
+        self.assertEqual(result['observations'][0]['candidateTimeSource'], 'record_wall')
+        self.assertEqual(result['observations'][0]['delayMs'], 1000)
 
     def test_zero_idle_blocked_snapshot_then_first_final(self):
         idle = record(bleTrial={'attempt': 0, 'status': 'IDLE', 'phaseElapsedMs': None})

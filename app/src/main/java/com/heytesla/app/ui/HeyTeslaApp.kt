@@ -31,7 +31,7 @@ import com.heytesla.app.SpeechTrialState
 import com.heytesla.app.UwbProbeState
 import com.heytesla.app.TeslaKeyProbeState
 
-private enum class Destination { HOME, SETTINGS, DIAGNOSTICS }
+private enum class Destination { HOME, SETTINGS, DIAGNOSTICS, KEY_REGISTRATION }
 
 @Composable
 internal fun HeyTeslaApp(
@@ -47,12 +47,18 @@ internal fun HeyTeslaApp(
 
     fun navigate(next: Destination) {
         if (destination == next) return
-        if (destination == Destination.DIAGNOSTICS) actions.leaveDiagnostics()
+        if (destination == Destination.DIAGNOSTICS || destination == Destination.KEY_REGISTRATION) {
+            actions.leaveDiagnostics()
+        }
         destination = next
     }
 
     fun back() = navigate(
-        if (destination == Destination.DIAGNOSTICS) Destination.SETTINGS else Destination.HOME,
+        when (destination) {
+            Destination.DIAGNOSTICS -> Destination.SETTINGS
+            Destination.KEY_REGISTRATION -> Destination.SETTINGS
+            else -> Destination.HOME
+        },
     )
 
     BackHandler(enabled = destination != Destination.HOME) { back() }
@@ -75,6 +81,7 @@ internal fun HeyTeslaApp(
                             Destination.HOME -> "Hey Tesla"
                             Destination.SETTINGS -> "설정"
                             Destination.DIAGNOSTICS -> "개발자 진단"
+                            Destination.KEY_REGISTRATION -> "차량 키 등록"
                         },
                         style = MaterialTheme.typography.titleLarge,
                         modifier = Modifier.weight(1f).semantics { heading() },
@@ -84,14 +91,17 @@ internal fun HeyTeslaApp(
                             onClick = { navigate(Destination.SETTINGS) },
                             modifier = Modifier.heightIn(min = 48.dp),
                         ) { Text("설정") }
-                    } else if (destination == Destination.DIAGNOSTICS) {
+                    } else if (destination == Destination.DIAGNOSTICS || destination == Destination.KEY_REGISTRATION) {
                         TextButton(
                             onClick = { navigate(Destination.HOME) },
                             modifier = Modifier.heightIn(min = 48.dp),
                         ) { Text("홈") }
                     }
                 }
-                if (state.teslaKeyCleanupFailed && destination != Destination.DIAGNOSTICS) {
+                if (state.teslaKeyCleanupFailed &&
+                    destination != Destination.DIAGNOSTICS &&
+                    destination != Destination.KEY_REGISTRATION
+                ) {
                     Text(
                         "차량 키 진단 정리 불명 · 새 진단 차단 · 앱 프로세스 재시작 필요",
                         color = MaterialTheme.colorScheme.error,
@@ -110,10 +120,15 @@ internal fun HeyTeslaApp(
                             onStopSession = actions.stopSession,
                             onStopBle = actions.cancelBle,
                         )
-                        Destination.SETTINGS -> SettingsScreen(state, ble, actions) {
-                            navigate(Destination.DIAGNOSTICS)
-                        }
+                        Destination.SETTINGS -> SettingsScreen(
+                            state = state,
+                            ble = ble,
+                            actions = actions,
+                            onOpenDiagnostics = { navigate(Destination.DIAGNOSTICS) },
+                            onOpenKeyRegistration = { navigate(Destination.KEY_REGISTRATION) },
+                        )
                         Destination.DIAGNOSTICS -> DiagnosticsScreen(state, support, trial, ble, uwb, teslaKey, actions)
+                        Destination.KEY_REGISTRATION -> TeslaKeyRegistrationScreen(state, support, teslaKey, actions)
                     }
                 }
             }

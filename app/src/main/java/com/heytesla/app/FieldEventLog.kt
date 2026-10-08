@@ -14,6 +14,7 @@ const val FIELD_LOG_RELATIVE_PATH = "field-diagnostics/events.jsonl"
 /**
  * JSONL 레코드 스키마 버전.
  *
+ * 7 = BLE 광고명 필터 사용 여부의 비민감 Boolean. VIN·광고명·해시는 기록하지 않는다.
  * 6 = BLE 후보·스캔·GATT 요청/콜백의 enum 기반 `bleEvidence`, 비교 조건 및 오류 분리.
  * 5 = 서비스 소유 주말 BLE 회차의 typed `bleTrial` 증거 요약.
  * 4 = 로컬 dry-run·오프라인 TTS 결과와 입력·출력·포커스 해제 요약.
@@ -21,7 +22,7 @@ const val FIELD_LOG_RELATIVE_PATH = "field-diagnostics/events.jsonl"
  * 앱은 항상 현재 버전으로만 덧붙이고 기존 행을 고치지 않으므로 이전 버전과 공존한다.
  * 파서는 행마다 `version`을 보고, 없어진 필드를 가정하지 않는다.
  */
-const val FIELD_LOG_RECORD_VERSION = 6
+const val FIELD_LOG_RECORD_VERSION = 7
 
 /** 이 시험의 로그 상한. 도달하면 회전·삭제·덮어쓰기 없이 기록만 멈춘다. */
 const val FIELD_LOG_LIMIT_BYTES = 2L * 1024L * 1024L
@@ -117,6 +118,7 @@ object FieldStateKeys {
     const val BLE_FIELD_BT_ASSIST = "bleFieldBtAssist"
     const val BLE_FIELD_BACKGROUND_CONNECT = "bleFieldBackgroundConnect"
     const val BLE_FIELD_RETRY_ENABLED = "bleFieldRetryEnabled"
+    const val BLE_FIELD_ADVERTISED_NAME_FILTER = "bleFieldAdvertisedNameFilter"
     const val BLE_FIELD_CANDIDATE_COUNT = "bleFieldCandidateCount"
     const val BLE_FIELD_SCAN_RUNNING = "bleFieldScanRunning"
     const val BLE_FIELD_SCAN_FAILURE = "bleFieldScanFailure"
@@ -150,6 +152,7 @@ object FieldStateKeys {
         BLE_FIELD_BT_ASSIST,
         BLE_FIELD_BACKGROUND_CONNECT,
         BLE_FIELD_RETRY_ENABLED,
+        BLE_FIELD_ADVERTISED_NAME_FILTER,
         BLE_FIELD_CANDIDATE_COUNT,
         BLE_FIELD_SCAN_RUNNING,
         BLE_FIELD_SCAN_FAILURE,
@@ -170,6 +173,7 @@ object FieldEvents {
         "TESLA_KEY_TX_ATTEMPTED",
         "TESLA_KEY_REGISTRATION_REPORTED",
         "TESLA_KEY_STATUS_VERIFIED",
+        "TESLA_KEY_DRIVE_STATE_VERIFIED",
         "TESLA_KEY_RESULT_UNKNOWN",
         "TESLA_KEY_CANCELED",
         "TESLA_KEY_TIMEOUT",
@@ -485,17 +489,20 @@ internal object FieldJson {
         append("}}")
     }
 
-    /** 허용 타입 밖의 값과 allowlist 밖 문자열은 `null`로 낮춘다. */
-    private fun primitive(key: String, value: Any?): String = when (value) {
-        null -> "null"
-        is Boolean -> if (value) "true" else "false"
-        is Int -> value.toString()
-        is Long -> value.toString()
-        is String -> if (
-            if (key == FieldStateKeys.BLE_FIELD_TRIAL_STOP_REASON) BleTrialSummaryJson.isAllowedReason(value)
-            else FieldEvents.isAllowed(value)
-        ) quote(value) else "null"
-        else -> "null"
+    /** 광고명 필터는 Boolean만 허용한다. 나머지는 허용 타입·문자열 allowlist를 따른다. */
+    private fun primitive(key: String, value: Any?): String {
+        if (key == FieldStateKeys.BLE_FIELD_ADVERTISED_NAME_FILTER && value !is Boolean) return "null"
+        return when (value) {
+            null -> "null"
+            is Boolean -> if (value) "true" else "false"
+            is Int -> value.toString()
+            is Long -> value.toString()
+            is String -> if (
+                if (key == FieldStateKeys.BLE_FIELD_TRIAL_STOP_REASON) BleTrialSummaryJson.isAllowedReason(value)
+                else FieldEvents.isAllowed(value)
+            ) quote(value) else "null"
+            else -> "null"
+        }
     }
 
     fun quote(value: String): String = buildString(value.length + 2) {

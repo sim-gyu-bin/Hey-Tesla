@@ -59,8 +59,9 @@ class ObservationService : Service() {
         mode = requestedMode
         if (mode == Mode.BLE_FIELD) {
             val config = runtime.state.value.bleFieldConfig
+            config.safetyBlockedReason()?.let { fail(it, token); return START_NOT_STICKY }
             fieldPolicy = BleFieldTrialPolicy(config, runtime::now, runtime::recordBleEvidence)
-            if (!config.observationOnly) {
+            if (!config.observationOnly && config.scanFilterMode == BleScanFilterMode.ASSOCIATION_ADDRESS) {
                 probe = BleConnectionProbe(this, runtime.bleProbeState, runtime, this, token, ::stage, ::attemptFinished)
             }
         }
@@ -180,7 +181,9 @@ class ObservationService : Service() {
     private fun startAttempt(attempt: Long) {
         val policy = fieldPolicy ?: return
         val token = requestId ?: return
-        if (policy.config.observationOnly || policy.currentAttempt != attempt) return
+        if (policy.config.observationOnly || policy.config.scanFilterMode == BleScanFilterMode.VEHICLE_NAME ||
+            policy.config.safetyBlockedReason() != null || policy.currentAttempt != attempt
+        ) return
         if (!policy.accepting || !runtime.ownsBleField(this, token) || runtime.state.value.bleFieldTrialStopping) {
             attemptFinished(attempt, BleProbeState(status = BleProbeStatus.CANCELED, reason = "FIELD_OWNER_NOT_ARMED"), false)
             return
@@ -208,6 +211,12 @@ class ObservationService : Service() {
         val policy = fieldPolicy ?: return
         if (!policy.config.supplementalScan || !policy.accepting) return
         val id = observedAssociationId ?: return
+        val token = requestId ?: return
+        if (!runtime.ownsBleField(this, token) || runtime.state.value.bleFieldTrialStopping) return
+        policy.config.safetyBlockedReason()?.let { fail(it, token); return }
+        val advertisedName = if (policy.config.scanFilterMode == BleScanFilterMode.VEHICLE_NAME) {
+            runtime.consumeBleFieldAdvertisedName(this, token) ?: run { fail("BLE_SCAN_NAME_UNAVAILABLE", token); return }
+        } else null
         scanner = BleSupplementalScanner(this, runtime,
             onMatch = { received, rssi, firstMatch ->
                 val token = requestId
@@ -232,7 +241,7 @@ class ObservationService : Service() {
                 runtime.update { it.copy(bleFieldScanFailure = code, bleFieldScanRunning = false) }
                 runtime.stopBleFieldTrial(reason)
             })
-        scanner?.start(id)
+        scanner?.start(id, policy.config, advertisedName)
         if (probe?.hasActiveGatt == true || policy.currentAttempt != null) scanner?.pause()
     }
 
@@ -379,6 +388,7 @@ class ObservationService : Service() {
             runtime.stopBleFieldTrial("OBSERVATION_SERVICE_DESTROYED")
             return
         }
+        requestId?.let(runtime::discardBleFieldAdvertisedName)
         sealPresence()
         requestId = null
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -387,6 +397,7 @@ class ObservationService : Service() {
 
     override fun onDestroy() {
         val token = requestId
+        token?.let(runtime::discardBleFieldAdvertisedName)
         fieldPolicy?.stop()
         clearPolicyTimer()
         scanner?.stop()

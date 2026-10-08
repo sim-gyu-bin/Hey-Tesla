@@ -42,13 +42,38 @@ Kotlin domain 계층이 정책 전이를 정의하고, Android 서비스가 단�
 - 매 회차는 `CONNECTING → DISCOVERING → SUBSCRIBING → OBSERVING → CLEANING_UP`의 단계별·전체 제한을 따른다. 서비스 대기 전체에는 회차의 40초 제한을 적용하지 않는다. RX 알림은 횟수만 세고 payload는 읽거나 저장하지 않는다.
 - 기준은 완료·실패 뒤 실제 이탈을 요구하며 중복 출현/BT로 재시도하지 않는다. 개선은 자체 GATT·최근 close BT 신호를 억제하고 CDM 이탈 30초·스캔 증거 180초의 유예/만료를 적용한다. BT 해제는 기존 증거를 철회할 뿐 자기 연결 직후 새 후보를 만들지 않는다.
 - 선택된 재시도는 실패 경계에서 후보당 최대 2회·정리 포함 40초다. 이전 close 후 2초와 잔여 12초 이상을 요구하고 COMPLETE·BLOCKED·프로필 없음·중지·close 실패는 제외한다. 정리 중 다음 후보는 이전 close·lease 반환·watchdog/association/current 비움 뒤에만 진행한다.
-- 감지만 모드는 후보만 집계하고 probe/회차 wake lock을 발급하지 않는다. 기준/개선·개별 옵션은 RAM에서 선택하며 실행 중 고정한다. `autoConnect=true`는 별도 비교 옵션이고 기본 false다. 필터 스캔은 40초/120초로 제한하며 GATT 중 정지·실제 close 후 재개한다.
+- 감지만 모드는 후보만 집계하고 probe/회차 wake lock을 발급하지 않는다. 기준/개선·개별 옵션은 RAM에서 선택하며 실행 중 고정한다. `autoConnect=true`는 별도 비교 옵션이고 기본 false다. 필터 스캔은 LOW_POWER·40초 창 예약/최소 120초 시작 간격이며 GATT 중 정지·실제 close 후 재개한다. Handler의 절전 지연은 실제 무선 등록 시간을 늘릴 수 있으므로 엄격한 40초 상한으로 해석하지 않는다.
 - 기준의 실제 이탈 또는 개선 후보의 최종 철회/만료는 당회차를 정리하고 시험을 유지한다. 앱·알림 중지·Bluetooth OFF·권한/등록/로그 조건 상실은 새 트리거를 봉인한 뒤 정리·서비스 종료로 전환한다. 진행 중 enable 쓰기 뒤 disable을 직렬화한다.
 - write callback은 요청 ID가 없어 중복 enable과 disable을 구별할 수 없다. 원격 구독 해제는 별도 CCCD 읽기가 성공하고 값이 정확한 두 바이트 `[0, 0]`일 때만 확인한다.
 - 구독 확인·원격 해제·disconnect callback·로컬 close 성공은 별도 증거다. close 성공 때만 예약을 해제하며 close 실패는 `CLEANUP_FAILED`와 예약 유지로 재시작을 요구한다. 늦은 다른 token/GATT callback은 현재 소유자를 변경하지 못한다.
 - 최초 수신/처리 지연·거절과 GATT 요청 반환/콜백·첫 RX는 별도 증거다. 원 SDK status 미수신은 null이며 본시험/정리 status를 분리한다. 구독 COMPLETE는 0 RX에서도 가능하며 실차 인증 성공으로 승격하지 않는다.
 - 종료 상태는 인증·명령 승인·실차 제어 성공이 아니다. **주말 BLE 반복 시험**에는 키 등록·TX characteristic 쓰기·Fleet API가 없다. 별도 수동 차량 키 경로는 아래에 정의한다.
 - 강제 종료 후 자동 복원하지 않는다. 미정상 marker는 최종 회차와 `BLE_FIELD_STOPPED`까지 파일 동기화·pending 0이 확인된 경우에만 정상 종료로 지운다. close/로그 실패는 유지하며 새 실행은 이전 비동기 완료가 새 marker를 지우지 못하게 봉인한다.
+
+### v23 광고명 감지 전이
+
+- 기존 BLE_FIELD 감지 전용 정책을 재사용한다. `명시 시작 → token-bound RAM 이름 한 회 handoff → 정확한 ScanFilter/ScanRecord 이름 일치 → FILTERED_SCAN 후보 병합 → 철회/만료 → 새 후보 대기`이며 GATT 회차·오디오 예약은 만들지 않는다.
+- 이름 모드의 감지 전용/스캔 옵션을 runtime·service·scanner에서 검사하며 잘못된 조합은 보정 없이 거부한다. 주소 모드는 기존 동작을 유지하고 필터 두 조건을 AND하지 않는다.
+- HOME·잠금은 감지 서비스의 중지 사건이 아니다. v24는 공통 저장 VIN을 유지하고 편집 중 화면 입력만 지운다. 사용자/알림 중지·권한/대상/BT 상실·스캐너 실패·서비스 파괴는 새 소비를 봉인하고 pending/타깃 참조를 제거한다. 이전 token의 정리가 새 요청을 지우지 않으며 폐기된 callback은 새 후보를 만들 수 없다.
+- 후보는 광고 관측 증거이며 현재 근접·인증·P·마이크/제어 허가로 승격하지 않는다. 기존 CDM 일반 접근·자동 음성의 재무장/기한 정책은 유지하고 UWB 세션은 추가하지 않는다.
+
+### v25 OS 전달 기반 필터 스캔
+
+- 창마다 새 무작위 token의 명시적 mutable PendingIntent를 등록하고 비공개 receiver로 5초 배치 결과를 받는다. 현재 RAM session·generation·창 기한을 확인한 뒤 실제 광고명/주소가 일치하는 최신 표본만 기존 정책에 전달한다. 오래된 세대·다른 대상·누락된 이름으로 후보를 만들지 않는다.
+- pause/stop은 먼저 소비를 봉인하고 동일 PendingIntent로 stopScan을 요청한다. 정상 반환 후에만 handle 취소·token 비움이 가능하다. 실패는 sticky 정리 불명이며 새 진단을 허용하지 않는다. SDK 등록 반환 코드와 비동기 전달 실패는 성공으로 바꾸지 않는다.
+- 프로세스 시작 시 영속 token은 고아 등록 정리에만 쓴다. receiver가 프로세스를 깨워도 시험·FGS·GATT·마이크를 시작하지 않는다. 이전 창 전달이 새 창을 정리하거나 복원하지 못한다.
+- 창별 SCAN_STARTED/SCAN_STOPPED를 기록한다. 등록 성공은 실제 광고 수신과 별개이며, UWB·거리·배터리 절감 증거로 사용하지 않는다.
+
+
+### v24 공통 VIN 상태와 작업 대상
+
+- 프로세스 시작은 `LOADING → NOT_REGISTERED / READY / FAILED`, 명시 저장은 `SAVING → READY / FAILED`다. 저장 IO와 복원은 작업을 시작하지 않으며 READY 외에는 키/인증/P/BLE 시작 스냅샷을 발급하지 않는다.
+- VIN 변경 입장은 Main에서 직렬화한다. 화면 표시·잠금 해제·진단/관찰/서비스/오디오/UWB/키 예약 없음·chooser 요청 없음·정리 불명 없음이 필요하다. SAVING 중 새 예약과 Activity 지원 조회도 차단한다.
+- 작업은 READY VIN을 시작 시 확정하며 실행/정리 동안 변경을 거부한다. 편집 입력 이탈은 저장 VIN을 삭제하지 않으며 실제 작업 취소·GATT 정리·서비스 감지 유지의 기존 수명은 바꾸지 않는다.
+- 암호문·키·형식·IO 검증 실패는 정적 코드와 FAILED로 봉인한다. 평문/이전 파일 자동 fallback·자동 키 교체·차량 작업 재개로 성공을 만들지 않는다. 저장 commit 실패에는 암호문 원자복구를 시도하지만 실패 상태를 숨기지 않는다.
+- 스캔 stop·지원 조회 destroy·presence 중지·wake lock 해제 실패는 Application runtime에 정리 불명으로 유지한다. VIN 변경뿐 아니라 새 BLE·차량 키·음성·마이크·UWB·접근 진단의 입장을 막으며 Activity 이탈·재생성으로 해제하지 않는다. 스캔 stop 예외 뒤에는 기존 scanner/callback 참조와 실패 상태를 보존하고 새 스캔으로 덮지 않는다. BLE 정상 종료 marker도 정리 불명에서는 남기지 않는다.
+
+
 
 
 
@@ -57,9 +82,9 @@ Kotlin domain 계층이 정책 전이를 정의하고, Android 서비스가 단�
 `0.16.0-probe`에서 도입한 경로를 `0.18.0-probe`에서도 유지한다. Application 소유의 단일 예약·token으로 `PREPARING_KEY → CONNECTING → DISCOVERING → NEGOTIATING_MTU → SUBSCRIBING`을 실행한다. 등록 요청은 `CARD → HANDSHAKING → READING_STATUS`, 이미 등록한 키의 조회는 `HANDSHAKING → READING_STATUS`로 진행한다. 키카드 대기는 120초, 전체는 180초 이내이며 기존 음성 세션의 40초 정책을 늘리지 않는다.
 
 - 모든 기존 관찰·BLE 반복·오디오 진단과 배타적이다. 화면 이탈·배경 전환·잠금·Bluetooth/권한/대상 조건 상실은 새 전송을 봉인하고 `CLEANING`으로 이동한다. Activity 재생성이나 재연결로 재등록·재조회하지 않는다.
-- 시작 전 입장 차단과 진행 중 자기 예약을 UI에서 구분한다. 자기 예약/활성 실행은 외부 진단 충돌 문구를 표시하지 않으며 VIN·동의·두 시작 버튼은 비활성화한다. 활성 실행에는 단계·취소를 제공한다. 정리 실패가 표시 우선순위이며 실제 외부 예약과 runtime 입장·전송 검사는 그대로 유지한다.
-- 등록 응답 `registrationReported`는 인증 전 보고다. 새 세션의 HMAC·요청 대응·AES-GCM 검증과 상태 필드 수신이 성공했을 때만 `VERIFIED_STATUS`다. 이 결과에도 주차 P·차량 신원 인증서·제어 완료 증거는 없다.
-- 요청 대응·명시적 무오류 `OK` ACK에는 `HANDSHAKING`을 유지한다. ACK 반복은 기존 단계/전체 기한을 늘리거나 상태 요청을 만들지 않는다. 서명·태그·HMAC을 검증한 session info만 `READING_STATUS`로 진행시킨다. 인증 실패의 고정 event를 `UNKNOWN`보다 먼저 기록하며, 인증 전 키 미등록 보고는 실제 키 부재·등록 철회의 증거가 아니다.
+- 시작 전 입장 검사와 진행 중 자기 예약을 UI에서 구분한다. 자기 예약/활성 실행은 외부 진단 충돌 문구를 표시하지 않으며 VIN·동의·모든 시작 버튼은 비활성화한다. 활성 실행에는 단계·취소를 제공한다. 정리 실패가 표시 우선순위이며 실제 외부 예약과 runtime 입장·전송 검사는 그대로 유지한다.
+- 새 세션의 HMAC·요청 대응·AES-GCM 검증과 인증된 `VehicleStatus` 응답 수신이 성공했을 때만 `VERIFIED_STATUS`다. 개별 잠금·프렁크 필드 누락/미지원은 UNKNOWN이며 응답 인증 성공과 구분한다. 기존 BODY 조회의 등록 보고는 인증 전 관측이다. v22의 별도 DRIVE 조회는 domain3 fresh handshake와 정확한 UUID·route·request hash·AEAD를 검증한 `GetDriveState`만 수용하고 `TESLA_KEY_DRIVE_STATE_VERIFIED`를 기록한다. P·R·N·D/UNKNOWN 및 원본/실제 수신 시각은 지난 관측이며 현재 P·감지·제어 허가로 승격하지 않는다. 등록과 DRIVE 조회를 결합하지 않으며 실패 때 BODY fallback·wake·재전송은 없다.
+- 요청 대응·명시적 무오류 `OK` ACK에는 `HANDSHAKING`을 유지한다. ACK 반복은 기존 단계/전체 기한을 늘리거나 상태 요청을 만들지 않는다. `0.21.0-probe`는 서명 누락·태그 길이 오류·HMAC 불일치·해석 불가능한 세션 정보를 가진 응답만 제외하며 같은 요청의 정상 응답을 기존 기한까지 기다린다. 제외 근거를 화면·고정 event에 남기며 키·epoch·counter·기한을 변경하거나 재전송하지 않는다. 검증된 session info만 `READING_STATUS`로 진행한다. 명시적인 fault·지원 불가 status·키 미등록 보고는 기존 종료 판정을 유지하며 인증 전 미등록 보고는 실제 키 부재·등록 철회의 증거가 아니다.
 - 등록 전송 뒤 취소·시간 초과는 `UNKNOWN`과 등록 불명을 보존한다. GATT close 성공은 로컬 해제이며 원격 등록 철회·구독 해제 증거가 아니다. close 실패는 `CLEANUP_FAILED`와 예약을 유지하고 다른 진단을 차단한다.
 - 늦은 이전 token/GATT 응답·재전송·재사용 counter·기한 경계 `now >= deadline`은 새 상태나 전송을 만들지 않는다. 완료/실패는 `CLEANING` 뒤 봉인하며 키·VIN·응답 버퍼를 로그에 복사하지 않는다.
 

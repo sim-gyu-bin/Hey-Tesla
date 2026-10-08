@@ -6,12 +6,15 @@ import com.heytesla.app.BleProbeState
 import com.heytesla.app.BleProbeStatus
 import com.heytesla.app.DiagnosticState
 import com.heytesla.app.FieldLogHealth
+import com.heytesla.app.TeslaBleQuery
 
 /** UI events only; the Activity and existing runtime retain ownership of side effects. */
 internal class AppActions(
     val requestPermission: (String) -> Unit,
     val openSystemSettings: (String) -> Unit,
-    val associateVehicle: (String) -> Unit,
+    val saveVehicleVin: (String) -> Unit,
+    val vehicleVinChangeBlockedReason: () -> String?,
+    val associateVehicle: () -> Unit,
     val setApproachEnabled: (Boolean) -> Unit,
     val setAutomaticMicrophone: (Boolean) -> Unit,
     val observeVehicle: () -> Unit,
@@ -30,7 +33,7 @@ internal class AppActions(
     val startBle: (BleFieldConfig) -> Unit,
     val cancelBle: () -> Unit,
     val bleFieldBlockedReason: (BleFieldConfig) -> String?,
-    val startTeslaKey: (String, Boolean) -> Unit,
+    val startTeslaKey: (Boolean, TeslaBleQuery) -> Unit,
     val cancelTeslaKey: () -> Unit,
     val teslaKeyBlockedReason: () -> String?,
     val leaveDiagnostics: () -> Unit,

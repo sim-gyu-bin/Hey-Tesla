@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""읽기 전용 v1–v6 현장 로그 분석. 원문 문자열은 출력 계약에 포함하지 않는다."""
+"""읽기 전용 v1–v7 현장 로그 분석. 원문 문자열은 출력 계약에 포함하지 않는다."""
 import argparse
 import csv
 import json
@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 
 MAX_LINE = 65536
 STATUSES = set('IDLE BLOCKED CONNECTING DISCOVERING SUBSCRIBING OBSERVING CLEANING_UP COMPLETE CANCELED TIMED_OUT FAILED CLEANUP_FAILED'.split())
-REASONS = set('INTERNAL_FAILURE SESSION_EXPIRED CONNECT_REQUEST_FAILED USER_CANCELED SUBSCRIPTION_OBSERVED CONNECTION_LOST CONNECTION_FAILED DISCOVERY_REQUEST_FAILED DISCOVERY_FAILED PROFILE_READ_FAILED TESLA_SERVICE_MISSING TESLA_TX_MISSING TESLA_RX_MISSING RX_SUBSCRIPTION_UNSUPPORTED RX_CCCD_MISSING LOCAL_SUBSCRIPTION_FAILED SUBSCRIPTION_REQUEST_FAILED SUBSCRIPTION_FAILED LOCAL_CLOSE_FAILED_RESTART_REQUIRED CONNECTING_TIMEOUT DISCOVERING_TIMEOUT SUBSCRIBING_TIMEOUT OBSERVING_TIMEOUT LEASE_UNAVAILABLE LEASE_LOST VISIBLE_UI_REQUIRED BLUETOOTH_PERMISSION_REQUIRED BLUETOOTH_PERMISSION_REVOKED BLUETOOTH_UNAVAILABLE BLUETOOTH_OFF SINGLE_ASSOCIATION_REQUIRED ASSOCIATION_ADDRESS_UNAVAILABLE ASSOCIATION_RESOLVE_FAILED ASSOCIATION_REMOVED DIAGNOSTIC_EXCLUSIVITY_LOST PREREQUISITE_READ_FAILED USER_STOP DISABLED DEPARTED BLE_FIELD_NOTIFICATION_STOP FIELD_OWNER_NOT_ARMED OBSERVATION_ACTIVE FIELD_MARKER_UNAVAILABLE FIELD_LOG_UNHEALTHY FIELD_MARKER_WRITE_FAILED CDM_UNSUPPORTED CDM_UNAVAILABLE ASSOCIATION_REQUIRED MULTIPLE_ASSOCIATIONS_UNSUPPORTED OBSERVATION_BLUETOOTH_PERMISSION_REQUIRED OBSERVATION_NOTIFICATION_PERMISSION_REQUIRED OBSERVATION_NOTIFICATIONS_BLOCKED OBSERVATION_FGS_START_TIMEOUT OBSERVATION_FGS_SECURITY_DENIED OBSERVATION_FGS_BACKGROUND_START_DENIED OBSERVATION_FGS_START_FAILED OBSERVE_SECURITY_DENIED OBSERVE_UNAVAILABLE OBSERVATION_SERVICE_DESTROYED BLUETOOTH_SCAN_PERMISSION_REQUIRED BLE_SCAN_ADDRESS_UNAVAILABLE BLE_SCAN_PERMISSION_REQUIRED BLE_SCAN_PERMISSION_REVOKED BLE_SCAN_NO_OFFLOADED_FILTER BLE_SCAN_UNAVAILABLE BLE_SCAN_START_FAILED BLE_SCAN_STOP_FAILED BLE_SCAN_CALLBACK_FAILED'.split())
+REASONS = set('INTERNAL_FAILURE SESSION_EXPIRED CONNECT_REQUEST_FAILED USER_CANCELED SUBSCRIPTION_OBSERVED CONNECTION_LOST CONNECTION_FAILED DISCOVERY_REQUEST_FAILED DISCOVERY_FAILED PROFILE_READ_FAILED TESLA_SERVICE_MISSING TESLA_TX_MISSING TESLA_RX_MISSING RX_SUBSCRIPTION_UNSUPPORTED RX_CCCD_MISSING LOCAL_SUBSCRIPTION_FAILED SUBSCRIPTION_REQUEST_FAILED SUBSCRIPTION_FAILED LOCAL_CLOSE_FAILED_RESTART_REQUIRED CONNECTING_TIMEOUT DISCOVERING_TIMEOUT SUBSCRIBING_TIMEOUT OBSERVING_TIMEOUT LEASE_UNAVAILABLE LEASE_LOST VISIBLE_UI_REQUIRED BLUETOOTH_PERMISSION_REQUIRED BLUETOOTH_PERMISSION_REVOKED BLUETOOTH_UNAVAILABLE BLUETOOTH_OFF SINGLE_ASSOCIATION_REQUIRED ASSOCIATION_ADDRESS_UNAVAILABLE ASSOCIATION_RESOLVE_FAILED ASSOCIATION_REMOVED DIAGNOSTIC_EXCLUSIVITY_LOST PREREQUISITE_READ_FAILED USER_STOP DISABLED DEPARTED BLE_FIELD_NOTIFICATION_STOP FIELD_OWNER_NOT_ARMED OBSERVATION_ACTIVE FIELD_MARKER_UNAVAILABLE FIELD_LOG_UNHEALTHY FIELD_MARKER_WRITE_FAILED CDM_UNSUPPORTED CDM_UNAVAILABLE ASSOCIATION_REQUIRED MULTIPLE_ASSOCIATIONS_UNSUPPORTED OBSERVATION_BLUETOOTH_PERMISSION_REQUIRED OBSERVATION_NOTIFICATION_PERMISSION_REQUIRED OBSERVATION_NOTIFICATIONS_BLOCKED OBSERVATION_FGS_START_TIMEOUT OBSERVATION_FGS_SECURITY_DENIED OBSERVATION_FGS_BACKGROUND_START_DENIED OBSERVATION_FGS_START_FAILED OBSERVE_SECURITY_DENIED OBSERVE_UNAVAILABLE OBSERVATION_SERVICE_DESTROYED BLUETOOTH_SCAN_PERMISSION_REQUIRED BLE_SCAN_ADDRESS_UNAVAILABLE BLE_SCAN_PERMISSION_REQUIRED BLE_SCAN_PERMISSION_REVOKED BLE_SCAN_NO_OFFLOADED_FILTER BLE_SCAN_UNAVAILABLE BLE_SCAN_START_FAILED BLE_SCAN_STOP_FAILED BLE_SCAN_CALLBACK_FAILED BLE_NAME_DETECTION_OPTIONS_INVALID VIN_FORMAT_INVALID BLE_SCAN_NAME_UNAVAILABLE'.split())
+REASONS.update(('BLE_SCAN_NO_OFFLOADED_BATCH', 'BLE_SCAN_PENDING_INTENT_FAILED',
+                'BLE_SCAN_DELIVERY_FAILED', 'BLE_SCAN_ORPHAN_CLEANUP_FAILED'))
 KINDS = set('PRESENCE_RECEIVED PRESENCE_DISPATCHED PRESENCE_REJECTED CANDIDATE_SIGNAL CANDIDATE_MERGED CANDIDATE_EXPIRED SIGNAL_SHADOWED SIGNAL_SELF_SUPPRESSED SCAN_STARTED SCAN_STOPPED SCAN_FAILED SCAN_MATCH RETRY_SCHEDULED RETRY_SUPPRESSED GATT_REQUEST GATT_CALLBACK GATT_CALLBACK_IGNORED GATT_FIRST_RX'.split())
 ENUMS = {
     'signal': set('CDM_BLE_APPEARED CDM_BLE_DISAPPEARED BT_CONNECTED BT_DISCONNECTED FILTERED_SCAN'.split()),
@@ -19,7 +21,7 @@ ENUMS = {
     'result': set('ACCEPTED REJECTED COMPLETED EXCEPTION'.split()),
     'phase': set('CONNECTING DISCOVERING SUBSCRIBING OBSERVING CLEANING_UP'.split()),
 }
-OPTIONS = ('bleFieldObservationOnly', 'bleFieldSupplementalScan', 'bleFieldBtAssist', 'bleFieldBackgroundConnect', 'bleFieldRetryEnabled')
+OPTIONS = ('bleFieldObservationOnly', 'bleFieldSupplementalScan', 'bleFieldBtAssist', 'bleFieldBackgroundConnect', 'bleFieldRetryEnabled', 'bleFieldAdvertisedNameFilter')
 SUMMARY_NUMBERS = ('gattStatus', 'primaryGattStatus', 'cleanupGattStatus', 'elapsedMs', 'phaseElapsedMs', 'firstRxElapsedMs', 'notificationCount', 'batteryPercent')
 SUMMARY_BOOLS = ('connected', 'serviceFound', 'txFound', 'rxFound', 'subscriptionConfirmed', 'remoteUnsubscribeConfirmed', 'disconnectConfirmed', 'localClosed', 'leaseRetained', 'interactive', 'deviceLocked', 'backgroundConnect')
 EVENTS = set('BLE_FIELD_START_REQUESTED BLE_FIELD_RUNNING BLE_FIELD_STOPPED BLE_FIELD_PREVIOUS_RUN_UNCLOSED BLE_FIELD_MARKER_READ_FAILED BLE_FIELD_MARKER_WRITE_FAILED BLE_FIELD_TRIAL_FINISHED BLE_FIELD_CLEANUP_FAILED BLE_FIELD_START_REJECTED BLE_EVIDENCE PROCESS_START_OFF'.split())
@@ -119,7 +121,7 @@ def analyze(stream, exclude=()):
             totals['malformedRows'] += 1
             continue
         version = integer(row.get('version'))
-        if version not in range(1, 7):
+        if version not in range(1, 8):
             issue(line_no, 'UNSUPPORTED_VERSION')
             totals['unsupportedRows'] += 1
             continue
@@ -127,12 +129,6 @@ def analyze(stream, exclude=()):
         trial = identifier(row.get('trialId')) if row.get('trialId') is not None else None
         if process == 'invalid' or trial == 'invalid':
             issue(line_no, 'INVALID_IDENTIFIER')
-        if trial in excluded:
-            found.add(trial)
-            totals['excludedRows'] += 1
-            previous = None
-            continue
-        versions[str(version)] += 1
         wall, elapsed = integer(row.get('wallMs')), integer(row.get('elapsedMs'))
         if wall is None or elapsed is None or elapsed < 0:
             issue(line_no, 'INVALID_TIME')
@@ -151,6 +147,12 @@ def analyze(stream, exclude=()):
         if boundary:
             segment += 1
         previous = (process, wall, elapsed)
+        # 시험 제외는 집계만 제외한다. 같은 프로세스의 시계 변경 근거는 보존한다.
+        if trial in excluded:
+            found.add(trial)
+            totals['excludedRows'] += 1
+            continue
+        versions[str(version)] += 1
         totals['analyzedRows'] += 1
         processes[process] += 1
         if trial is None or trial == 'invalid' or process == 'invalid':
@@ -177,7 +179,8 @@ def analyze(stream, exclude=()):
             t['unclosedMarkers'] += 1
         if event in ('BLE_FIELD_MARKER_READ_FAILED', 'BLE_FIELD_MARKER_WRITE_FAILED'):
             t['markerErrors'] += 1
-        opts = {key: state.get(key) if type(state.get(key)) is bool else None for key in OPTIONS}
+        # v1–v6의 미지원은 False가 아니다. 옵션은 행마다 읽고 이전 실행 값을 채우지 않는다.
+        opts = {key: state.get(key) if type(state.get(key)) is bool and (key != 'bleFieldAdvertisedNameFilter' or version >= 7) else None for key in OPTIONS}
         if any(v is not None for v in opts.values()) and (not t['options'] or t['options'][-1]['values'] != opts):
             t['options'].append({'line': line_no, 'values': opts})
         if version >= 6:
@@ -242,8 +245,9 @@ def analyze(stream, exclude=()):
                     key = (process, segment, candidate)
                     received = integer(evidence.get('receivedElapsedMs'))
                     projected = wall + received - elapsed if received is not None and 0 <= received <= elapsed else None
-                    if received is not None and projected is None:
+                    if evidence.get('receivedElapsedMs') is not None and projected is None:
                         issue(line_no, 'INVALID_RECEIVED_TIME')
+                        clock_bad = True
                     point = {'processId': process, 'candidate': candidate, 'segment': segment, 'firstCandidateRecordedAt': wall, 'receivedProjectedWallMs': projected, 'timeSource': 'received_elapsed_projection' if projected is not None else 'record_wall', 'clockAlignmentWarning': clock_bad}
                     t['candidates'].setdefault(key, point)
     output_trials = []
@@ -251,7 +255,7 @@ def analyze(stream, exclude=()):
         t['processIds'] = sorted(t['processIds'])
         t['versions'] = sorted(t['versions'])
         t['bleTypedSupported'] = any(v >= 5 for v in t['versions'])
-        t['candidateSupported'] = 6 in t['versions']
+        t['candidateSupported'] = any(v >= 6 for v in t['versions'])
         candidate_count = len(t.pop('candidateIds'))
         t['candidateTypedCount'] = candidate_count if t['candidateSupported'] else None
         t['candidates'] = list(t['candidates'].values())

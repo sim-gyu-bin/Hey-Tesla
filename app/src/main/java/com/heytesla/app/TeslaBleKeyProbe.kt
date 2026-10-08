@@ -47,6 +47,7 @@ internal data class TeslaKeyProbeState(
     val localClosed: Boolean = false,
     val status: TeslaReadOnlyStatus? = null,
     val reason: String? = null,
+    val query: TeslaBleQuery = TeslaBleQuery.BODY_STATUS,
 ) {
     val active: Boolean get() = stage.ordinal in TeslaKeyStage.PREPARING_KEY.ordinal..TeslaKeyStage.CLEANING_UP.ordinal
 }
@@ -57,14 +58,22 @@ internal class TeslaBleKeyProbe(
     context: Context,
     private val runtime: DiagnosticRuntime,
     private val state: MutableStateFlow<TeslaKeyProbeState>,
+    private val keyStore: TeslaBleKeyStore = TeslaBleKeyStore(context.applicationContext),
 ) {
     private val app = context.applicationContext
     private val bluetooth = app.getSystemService(BluetoothManager::class.java)
-    private val keyStore = TeslaBleKeyStore(app)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var current: Operation? = null
 
-    private class Operation(val token: Long, val vin: ByteArray, val register: Boolean, val deadline: Long) {
+    private data class ReceivedFrame(val payload: ByteArray, val receivedAtElapsedRealtime: Long)
+
+    private class Operation(
+        val token: Long,
+        val vin: ByteArray,
+        val register: Boolean,
+        val query: TeslaBleQuery,
+        val deadline: Long,
+    ) {
         var associationId: Int? = null
         var associationAddress: MacAddress? = null
         var stageDeadline = deadline
@@ -87,32 +96,39 @@ internal class TeslaBleKeyProbe(
         var registrationAttempted = false
         var connectUncertain = false
         val decoder = TeslaBleFrameDecoder()
-        val incoming = ArrayDeque<ByteArray>()
+        val incoming = ArrayDeque<ReceivedFrame>()
         var queuedBytes = 0
         var watchdog: Runnable? = null
     }
 
-    fun start(input: String, register: Boolean) {
+    fun start(input: String, register: Boolean, query: TeslaBleQuery = TeslaBleQuery.BODY_STATUS) {
         mainThread()
         if (current != null || runtime.teslaKeyReserved()) {
             runtime.event("TESLA_KEY_START_BLOCKED")
             return
         }
+        if (register && query != TeslaBleQuery.BODY_STATUS) {
+            state.value = TeslaKeyProbeState(stage = TeslaKeyStage.BLOCKED, query = query,
+                registrationRequested = true, reason = "DRIVE_STATE_REGISTRATION_NOT_ALLOWED")
+            runtime.event("TESLA_KEY_START_BLOCKED")
+            return
+        }
         val normalized = input.trim().uppercase(Locale.ROOT)
         if (!normalized.matches(Regex("[A-HJ-NPR-Z0-9]{17}"))) {
-            state.value = TeslaKeyProbeState(stage = TeslaKeyStage.BLOCKED, reason = "VIN_FORMAT_INVALID")
+            state.value = TeslaKeyProbeState(stage = TeslaKeyStage.BLOCKED, query = query, reason = "VIN_FORMAT_INVALID")
             runtime.event("TESLA_KEY_START_BLOCKED")
             return
         }
         runtime.refresh()
         val token = runtime.acquireTeslaKey() ?: run {
-            state.value = TeslaKeyProbeState(stage = TeslaKeyStage.BLOCKED, reason = runtime.teslaKeyBlockedReason() ?: "LEASE_UNAVAILABLE")
+            state.value = TeslaKeyProbeState(stage = TeslaKeyStage.BLOCKED, query = query,
+                reason = runtime.teslaKeyBlockedReason() ?: "LEASE_UNAVAILABLE")
             runtime.event("TESLA_KEY_START_BLOCKED")
             return
         }
-        val op = Operation(token, normalized.toByteArray(Charsets.US_ASCII), register, runtime.now() + TOTAL_MS)
+        val op = Operation(token, normalized.toByteArray(Charsets.US_ASCII), register, query, runtime.now() + TOTAL_MS)
         current = op
-        state.value = TeslaKeyProbeState(stage = TeslaKeyStage.PREPARING_KEY, registrationRequested = register)
+        state.value = TeslaKeyProbeState(stage = TeslaKeyStage.PREPARING_KEY, registrationRequested = register, query = query)
         op.stageDeadline = minOf(op.deadline, runtime.now() + PREPARE_MS)
         runtime.event("TESLA_KEY_STARTED")
         try {
@@ -139,7 +155,7 @@ internal class TeslaBleKeyProbe(
             if (!allowed(op)) return@launch
             if (credential == null) { stop(op, TeslaKeyStage.FAILED, "KEY_PREPARATION_FAILED"); return@launch }
             try {
-                op.conversation = TeslaBleConversation(credential, op.vin, runtime::now)
+                op.conversation = TeslaBleConversation(credential, op.vin, query = op.query, now = runtime::now)
                 state.value = state.value.copy(credentialReady = true)
                 runtime.event("TESLA_KEY_CREDENTIAL_READY")
                 connect(op)
@@ -311,6 +327,8 @@ internal class TeslaBleKeyProbe(
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+            // 마지막 fragment의 실제 notification 수신 시각. Main 큐/쓰기 완료 대기 시간과 구분한다.
+            val receivedAtElapsedRealtime = runtime.now()
             if (value.size > MAX_QUEUED_BYTES) {
                 dispatch(op, gatt) { stop(op, TeslaKeyStage.FAILED, "RX_FRAME_INVALID") }
                 return
@@ -327,7 +345,7 @@ internal class TeslaBleKeyProbe(
                             stop(op, TeslaKeyStage.FAILED, "RX_BUFFER_LIMIT")
                             return@dispatch
                         }
-                        op.incoming.addLast(frame)
+                        op.incoming.addLast(ReceivedFrame(frame, receivedAtElapsedRealtime))
                         op.queuedBytes += frame.size
                     }
                     if (op.frame == null && !op.writePending) drain(op)
@@ -374,6 +392,7 @@ internal class TeslaBleKeyProbe(
         state.value = state.value.copy(registrationReported = reported)
         when (next) {
             is TeslaBleStep.Send -> {
+                state.value = state.value.copy(reason = null)
                 protocolPhase(op, next.phase)
                 if (op.frame != null || op.writePending || next.payload.isEmpty() || next.payload.size > MAX_TX_PAYLOAD) {
                     next.payload.fill(0)
@@ -391,10 +410,15 @@ internal class TeslaBleKeyProbe(
             is TeslaBleStep.Waiting -> {
                 next.authEvidence?.let { runtime.event(it.eventCode) }
                 protocolPhase(op, next.phase)
+                if (next.authEvidence != null && next.authEvidence != TeslaBleAuthEvidence.ACKNOWLEDGED) {
+                    state.value = state.value.copy(
+                        reason = "검증되지 않은 인증 응답 제외 · 정상 응답 대기 · ${next.authEvidence.eventCode}",
+                    )
+                }
             }
             is TeslaBleStep.Complete -> {
                 state.value = state.value.copy(outcome = TeslaKeyOutcome.VERIFIED_STATUS, status = next.status)
-                runtime.event("TESLA_KEY_STATUS_VERIFIED")
+                runtime.event(op.query.verifiedEventCode)
                 stop(op, TeslaKeyStage.COMPLETE, null)
             }
             is TeslaBleStep.Failed -> {
@@ -426,11 +450,11 @@ internal class TeslaBleKeyProbe(
 
     private fun drain(op: Operation) {
         while (allowed(op) && op.frame == null && !op.writePending && op.incoming.isNotEmpty()) {
-            val payload = op.incoming.removeFirst()
-            op.queuedBytes -= payload.size
-            try { step(op, checkNotNull(op.conversation).receive(payload)) }
+            val received = op.incoming.removeFirst()
+            op.queuedBytes -= received.payload.size
+            try { step(op, checkNotNull(op.conversation).receive(received.payload, received.receivedAtElapsedRealtime)) }
             catch (_: Exception) { stop(op, TeslaKeyStage.FAILED, "PROTOCOL_RESPONSE_INVALID") }
-            finally { payload.fill(0) }
+            finally { received.payload.fill(0) }
         }
     }
 
@@ -470,7 +494,7 @@ internal class TeslaBleKeyProbe(
         op.frame = null
         op.chunk?.fill(0)
         op.chunk = null
-        while (op.incoming.isNotEmpty()) op.incoming.removeFirst().fill(0)
+        while (op.incoming.isNotEmpty()) op.incoming.removeFirst().payload.fill(0)
         op.queuedBytes = 0
         op.associationAddress = null
         try { op.decoder.clear() } catch (_: Exception) { failed = true }

@@ -249,6 +249,82 @@ class FieldEventLogTest {
         assertFalse(text.contains("\"vin\""))
     }
 
+    @Test fun advertisedNameFilterOnlyPersistsBooleansAndDropsIdentifierMaterial() {
+        val file = newFile()
+        val sink = startSink(file)
+        val identifiers = listOf(
+            "S0123456789abcdefC",
+            "0123456789abcdef0123456789abcdef01234567",
+            "SYNTHETIC-VIN-MATERIAL",
+            "02:00:00:00:00:01",
+            "SYNTHETIC-NEW-STRING",
+        )
+        val invalid: List<Any?> = identifiers + listOf("BLE_FIELD_RUNNING", 1, 1L, null)
+        for (value in listOf<Any?>(false, true) + invalid) {
+            assertTrue(
+                sink.enqueue(
+                    record(
+                        "BLE_FIELD_RUNNING",
+                        mapOf(
+                            FieldStateKeys.BLE_FIELD_ADVERTISED_NAME_FILTER to value,
+                            "advertisedName" to identifiers[0],
+                            "hash" to identifiers[1],
+                            "vin" to identifiers[2],
+                            "address" to identifiers[3],
+                            "peerKey" to identifiers[4],
+                        ),
+                    ),
+                ),
+            )
+        }
+        assertTrue(sink.sync())
+        val text = file.readText()
+        val lines = text.lineSequence().filter { it.isNotEmpty() }.toList()
+        assertEquals(2 + invalid.size, lines.size)
+        val key = "\"${FieldStateKeys.BLE_FIELD_ADVERTISED_NAME_FILTER}\":"
+        assertTrue(lines[0].contains("${key}false"))
+        assertTrue(lines[1].contains("${key}true"))
+        for (line in lines.drop(2)) assertTrue(line.contains("${key}null"))
+        for (identifier in identifiers) assertFalse(text.contains(identifier))
+        for (unknownKey in listOf("advertisedName", "hash", "vin", "address", "peerKey")) {
+            assertFalse(text.contains("\"$unknownKey\":"))
+        }
+    }
+
+    @Test fun advertisedNameOptionDoesNotPersistAcrossRowsOrReopenAndLegacyRowsStayIntact() {
+        val file = newFile()
+        val legacy = (1..6).joinToString("") { version ->
+            FieldJson.encode(record("BLE_FIELD_START_REQUESTED").copy(version = version)) + "\n"
+        }
+        writeExisting(file, legacy)
+        val first = startSink(file)
+        assertTrue(
+            first.enqueue(
+                record("BLE_FIELD_START_REQUESTED", mapOf(FieldStateKeys.BLE_FIELD_ADVERTISED_NAME_FILTER to true)),
+            ),
+        )
+        assertTrue(first.enqueue(record("BLE_FIELD_STOPPED")))
+        assertTrue(first.sync())
+        val second = startSink(file)
+        assertTrue(
+            second.enqueue(
+                record("BLE_FIELD_START_REQUESTED", mapOf(FieldStateKeys.BLE_FIELD_ADVERTISED_NAME_FILTER to false)),
+            ),
+        )
+        assertTrue(second.enqueue(record("BLE_FIELD_STOPPED")))
+        assertTrue(second.sync())
+        val text = file.readText()
+        assertEquals(legacy, text.substring(0, legacy.length))
+        val current = text.substring(legacy.length).lineSequence().filter { it.isNotEmpty() }.toList()
+        assertEquals(4, current.size)
+        for (line in current) assertTrue(line.startsWith("{\"version\":7,"))
+        val key = "\"${FieldStateKeys.BLE_FIELD_ADVERTISED_NAME_FILTER}\":"
+        assertTrue(current[0].contains("${key}true"))
+        assertFalse(current[1].contains(key))
+        assertTrue(current[2].contains("${key}false"))
+        assertFalse(current[3].contains(key))
+    }
+
     @Test fun encodedRecordStaysOnOneLine() {
         val file = newFile()
         val sink = startSink(file)

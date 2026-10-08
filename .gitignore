@@ -7,3 +7,6 @@ local.properties
 .DS_Store
 *.jks
 *.keystore
+
+# 기기 진단 로그 로컬 백업 — 저장소에 업로드하지 않음
+/.local-backups/

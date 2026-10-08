@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
     <cloud-backup>
+        <!-- noBackupFilesDir 자체 제외에 더해 VIN 암호문 경로도 명시한다. -->
+        <exclude domain="root" path="no_backup/vehicle-vin/" />
+        <exclude domain="root" path="no_backup/vehicle-vin-tests/" />
         <exclude domain="root" path="." />
         <exclude domain="file" path="." />
         <exclude domain="database" path="." />
@@ -12,6 +15,9 @@
         <exclude domain="device_sharedpref" path="." />
     </cloud-backup>
     <device-transfer>
+        <!-- OEM 기기 간 전송에도 VIN 저장소와 계측 fixture를 포함하지 않는다. -->
+        <exclude domain="root" path="no_backup/vehicle-vin/" />
+        <exclude domain="root" path="no_backup/vehicle-vin-tests/" />
         <exclude domain="root" path="." />
         <exclude domain="file" path="." />
         <exclude domain="database" path="." />

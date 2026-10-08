@@ -9,9 +9,9 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
@@ -20,7 +20,6 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -41,12 +40,11 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.unit.dp
 import com.heytesla.app.BleFieldConfig
+import com.heytesla.app.BleScanFilterMode
 import com.heytesla.app.BleProbeState
 import com.heytesla.app.BleProbeStatus
 import com.heytesla.app.DiagnosticState
@@ -64,9 +62,13 @@ import com.heytesla.app.SpeechTrialStatus
 import com.heytesla.app.UwbProbeState
 import com.heytesla.app.UwbProbeStatus
 import com.heytesla.app.TeslaBlePhase
+import com.heytesla.app.TeslaBleQuery
+import com.heytesla.app.TeslaDriveState
+import com.heytesla.app.TeslaGear
 import com.heytesla.app.TeslaKeyOutcome
 import com.heytesla.app.TeslaKeyProbeState
 import com.heytesla.app.TeslaKeyStage
+import com.heytesla.app.VehicleVinStatus
 import java.util.Locale
 
 private enum class DiagnosticDestination(val title: String) {
@@ -98,9 +100,16 @@ internal fun DiagnosticsScreen(
     actions: AppActions,
 ) {
     var destination by remember { mutableStateOf(DiagnosticDestination.SPEECH) }
-    var selectedBleConfig by remember { mutableStateOf(BleFieldConfig.BASELINE) }
+    var selectedBleConfig by remember { mutableStateOf(BleFieldConfig.VEHICLE_NAME_DETECTION) }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()),
+    ) {
+        key(destination) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp)) {
+                VehicleVinSection(state.vehicleVin, actions)
+            }
+        }
         FlowRow(
             modifier = Modifier
                 .fillMaxWidth()
@@ -197,9 +206,7 @@ internal fun DiagnosticsScreen(
         key(destination) {
             Column(
                 modifier = Modifier
-                    .weight(1f)
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 24.dp, vertical = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(24.dp),
             ) {
@@ -221,6 +228,30 @@ internal fun DiagnosticsScreen(
     }
 }
 
+/**
+ * 차량 키 흐름의 진입 목적. 상태·전송·취소·정리 로직은 공유하고 화면 문구와 노출 행동만 달라진다.
+ * REGISTRATION은 설정의 차량에 앱 키 등록, DIAGNOSTIC은 개발자 진단의 차량 키 탭이다.
+ */
+private enum class TeslaKeyFlow { REGISTRATION, DIAGNOSTIC }
+
+/** 설정 → 차량에 앱 키 등록. 개발자 진단과 같은 상태·취소·정리 경로를 쓴다. */
+@Composable
+internal fun TeslaKeyRegistrationScreen(
+    state: DiagnosticState,
+    support: SpeechProbeState,
+    teslaKey: TeslaKeyProbeState,
+    actions: AppActions,
+) {
+    Column(
+        modifier = Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
+        VehicleVinSection(state.vehicleVin, actions)
+        TeslaKeyWorkflow(state, support, teslaKey, actions, TeslaKeyFlow.REGISTRATION)
+    }
+}
+
 @Composable
 private fun TeslaKeyDiagnostics(
     state: DiagnosticState,
@@ -228,85 +259,78 @@ private fun TeslaKeyDiagnostics(
     probe: TeslaKeyProbeState,
     actions: AppActions,
 ) {
-    var vin by remember { mutableStateOf("") }
-    var registrationConsent by remember { mutableStateOf(false) }
+    TeslaKeyWorkflow(state, support, probe, actions, TeslaKeyFlow.DIAGNOSTIC)
+}
+
+/** 두 진입이 공유하는 구현. 순서는 대상·상태 → 행동 → 상세이며 시작 버튼 위에는 큰 상태와 승인 안내만 둔다. */
+@Composable
+private fun TeslaKeyWorkflow(
+    state: DiagnosticState,
+    support: SpeechProbeState,
+    probe: TeslaKeyProbeState,
+    actions: AppActions,
+    flow: TeslaKeyFlow,
+) {
+    val registration = flow == TeslaKeyFlow.REGISTRATION
+    var registrationConsent by remember(state.vehicleVin) { mutableStateOf(false) }
     var expanded by remember { mutableStateOf(false) }
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_DESTROY) {
-                vin = ""
                 registrationConsent = false
             }
         }
         owner.lifecycle.addObserver(observer)
         onDispose {
             owner.lifecycle.removeObserver(observer)
-            vin = ""
             registrationConsent = false
         }
     }
     val blocked = when {
-        state.teslaKeyCleanupFailed -> teslaKeyBlockedLabel("LOCAL_CLEANUP_FAILED_RESTART_REQUIRED")
-        support.reason == "DESTROY_FAILED" -> "지원 조회 정리 실패 · 앱 프로세스 재시작 필요"
+        state.teslaKeyCleanupFailed || probe.stage == TeslaKeyStage.CLEANUP_FAILED -> teslaKeyBlockedLabel("LOCAL_CLEANUP_FAILED_RESTART_REQUIRED")
+        support.reason == "DESTROY_FAILED" || support.reason == "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED" -> "진단 자원 정리 실패 · 앱 프로세스 재시작 필요"
         // 신규 실행의 admission 검사다. 진행 중인 자기 예약은 시작 오류가 아니다.
         probe.active || state.teslaKeyDiagnosticActive -> null
         else -> actions.teslaKeyBlockedReason()?.let(::teslaKeyBlockedLabel)
     }
-    val canStart = blocked == null && !probe.active && !state.teslaKeyDiagnosticActive
-    fun submit(register: Boolean) {
-        if (!canStart || (register && !registrationConsent) || vin.length != 17) return
-        val input = vin
-        vin = ""
+    val canStart = blocked == null && !probe.active && !state.teslaKeyDiagnosticActive &&
+        state.vehicleVin.status == VehicleVinStatus.READY
+    fun submit(register: Boolean, query: TeslaBleQuery = TeslaBleQuery.BODY_STATUS) {
+        if (!canStart || (register && !registrationConsent)) return
         registrationConsent = false
-        actions.startTeslaKey(input, register)
+        actions.startTeslaKey(register, query)
     }
 
-    AppSection("수동 차량 키 진단") {
-        TeslaKeyResult(probe, state.teslaKeyCleanupFailed)
-        DetailRow("선택한 작업", when {
-            probe.stage == TeslaKeyStage.IDLE -> "시험 전"
-            probe.registrationRequested -> "키 추가 · 카드 승인 후 인증·상태 한 회"
-            else -> "별도 인증·읽기 전용 상태 한 회"
-        })
-        DetailRow("등록 보고", if (probe.registrationReported) "차량의 등록 완료 응답 수신 · 영구 등록 상태와 별개" else "등록 완료 응답 미수신")
-        DetailRow("인증·상태 조회", when (probe.outcome) {
-            TeslaKeyOutcome.VERIFIED_STATUS -> "인증 검증 후 암호화된 읽기 전용 상태 수신"
-            TeslaKeyOutcome.UNKNOWN -> "전송 후 결과 불명 · 자동 재전송 안 함"
-            TeslaKeyOutcome.PENDING -> "응답 대기 · 아직 검증 완료 아님"
-            TeslaKeyOutcome.CANCELED -> "전송 전에 취소"
-            TeslaKeyOutcome.FAILED -> "검증 완료 안 됨"
-            TeslaKeyOutcome.NOT_SENT -> "전송 전"
-        })
+    AppSection(if (registration) "차량에 앱 키 등록" else "수동 차량 키 진단") {
+        if (registration && probe.stage == TeslaKeyStage.IDLE) {
+            Text("차량에 Hey Tesla 앱 키를 추가합니다. 시작한 뒤 차량 화면의 키 추가 안내에서 키카드로 직접 승인하세요.")
+        }
+        TeslaKeyResult(probe, state.teslaKeyCleanupFailed, flow)
+        if (probe.registrationReported && probe.outcome != TeslaKeyOutcome.VERIFIED_STATUS) {
+            Text(
+                "등록 보고는 받았지만 앱 키 확인(세션 인증·암호화 상태 조회)은 완료되지 않았습니다. 영구 등록을 뜻하지 않습니다.",
+                color = AppWarningColor,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
         if (probe.registrationUncertain) {
             Text("키 추가 요청이 차량에 도착했을 수 있습니다. 취소·오류가 등록 철회를 보장하지 않으므로 차량 키 목록을 직접 확인하세요.", color = MaterialTheme.colorScheme.error)
         }
-        if (probe.registrationReported && probe.outcome != TeslaKeyOutcome.VERIFIED_STATUS) {
-            Text("등록 완료 보고는 받았지만 인증·상태 조회는 완료되지 않았습니다.")
-        }
-        if (probe.stage == TeslaKeyStage.WAITING_FOR_CARD) {
-            Text("차량 화면의 키 추가 안내를 확인하고 NFC 키카드로 직접 승인하세요. 앱이 승인을 대신하지 않습니다.")
-        }
         if (probe.outcome == TeslaKeyOutcome.VERIFIED_STATUS) {
-            DetailRow("잠금 상태", teslaLockStateLabel(probe.status?.lockState))
-            DetailRow("프렁크 상태", teslaFrontTrunkStateLabel(probe.status?.frontTrunkState))
-            Text("검증된 응답 시점의 차량 보고입니다. 이후 상태 변화나 물리 완료를 보장하지 않습니다.")
+            if (probe.query == TeslaBleQuery.DRIVE_STATE) {
+                TeslaDriveObservation(probe.status?.driveState)
+            } else {
+                DetailRow("잠금 상태", teslaLockStateLabel(probe.status?.lockState))
+                DetailRow("프렁크 상태", teslaFrontTrunkStateLabel(probe.status?.frontTrunkState))
+                Text("검증된 응답 시점의 차량 보고입니다. 이후 상태 변화나 물리 완료를 보장하지 않습니다.")
+            }
         }
-        Text("주차 P·차량 제어 준비 여부는 조회하지 않습니다. 프렁크 열기·잠금·주행·UWB 명령은 전송하지 않습니다.")
     }
 
-    AppSection("일회성 입력 · 명시적 실행") {
-        OutlinedTextField(
-            value = vin,
-            onValueChange = { vin = it.take(17) },
-            label = { Text("차량 VIN · 메모리 전용") },
-            visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            singleLine = true,
-            enabled = canStart,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Text("시작 직전에 입력을 비웁니다. 탭 이탈·HOME·잠금·권한 또는 등록 변경은 이 진단을 종료하며 자동 재개하지 않습니다.")
+    AppSection("등록된 차량 · 명시적 실행") {
+        Text(vehicleVinConsumerLabel(state.vehicleVin))
+        Text("화면 이탈·HOME·잠금·차량 키 진단 이동은 진행을 취소하며 자동 재개하지 않습니다.")
         if (!state.bluetoothPermission) {
             OutlinedButton(
                 onClick = { actions.requestPermission(Manifest.permission.BLUETOOTH_CONNECT) },
@@ -321,19 +345,35 @@ private fun TeslaKeyDiagnostics(
                 enabled = canStart,
                 modifier = Modifier.semantics { contentDescription = "우리 앱 키 추가와 차량 키카드 직접 승인에 동의" },
             )
-            Text("우리 앱의 키를 새로 추가하는 시험에 동의합니다. 차량에서 키카드로 직접 승인하며 기존 키를 제거하거나 변경하지 않습니다.")
+            Text(
+                if (registration) {
+                    "우리 앱 키를 내 차량에 추가하는 데 동의합니다. 차량 화면에서 키카드로 직접 승인하며 기존 키를 제거하거나 변경하지 않습니다."
+                } else {
+                    "우리 앱의 키를 새로 추가하는 시험에 동의합니다. 차량에서 키카드로 직접 승인하며 기존 키를 제거하거나 변경하지 않습니다."
+                },
+            )
         }
         Button(
             onClick = { submit(true) },
-            enabled = canStart && registrationConsent && vin.length == 17,
+            enabled = canStart && registrationConsent,
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-        ) { Text("키 추가 요청 · 카드 승인 후 상태 1회 조회") }
-        OutlinedButton(
-            onClick = { submit(false) },
-            enabled = canStart && vin.length == 17,
-            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-        ) { Text("우리 앱 키로 인증·상태 1회 조회") }
-        TeslaKeyResult(probe, state.teslaKeyCleanupFailed)
+        ) {
+            Text(if (registration) "차량에 앱 키 등록 시작" else "키 추가 요청 · 카드 승인 후 상태 1회 조회")
+        }
+        if (!registration) {
+            OutlinedButton(
+                onClick = { submit(false) },
+                enabled = canStart,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+            ) { Text("우리 앱 키로 인증·상태 1회 조회") }
+            OutlinedButton(
+                onClick = { submit(false, TeslaBleQuery.DRIVE_STATE) },
+                enabled = canStart,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+            ) { Text("주차 기어 상태 1회 조회") }
+            Text("기존 앱 키로 기어만 한 번 읽습니다. 지난 관측은 차량 감지나 프렁크 실행 허가가 아닙니다.", color = AppWarningColor)
+        }
+        TeslaKeyResult(probe, state.teslaKeyCleanupFailed, flow)
         if (probe.active) {
             OutlinedButton(onClick = actions.cancelTeslaKey, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                 Text("차량 키 진단 취소")
@@ -342,7 +382,13 @@ private fun TeslaKeyDiagnostics(
         blocked?.let { message ->
             Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { error(message) })
         }
-        Text("같은 앱 키를 재사용합니다. 등록 완료 보고 뒤에만 새 인증과 GET_STATUS 한 회를 진행하며 재시도·차량 조작은 하지 않습니다.")
+        Text(
+            if (registration) {
+                "등록 보고 뒤에만 인증과 읽기 전용 상태를 한 번 확인합니다. 재시도·자동 재등록·차량 조작은 하지 않습니다."
+            } else {
+                "같은 앱 키를 재사용합니다. 키 추가는 등록 완료 보고 뒤에만 인증·잠금/프렁크 상태를 조회하고, 별도 조회는 선택한 상태만 한 번 읽습니다. 재시도·차량 조작은 하지 않습니다."
+            },
+        )
     }
     AppDisclosure(
         expanded = expanded,
@@ -350,18 +396,61 @@ private fun TeslaKeyDiagnostics(
         collapseLabel = "진단 상세 접기",
         onToggle = { expanded = !expanded },
     ) {
+        DetailRow("선택한 작업", when {
+            probe.stage == TeslaKeyStage.IDLE -> "시작 전"
+            probe.registrationRequested -> "키 추가 · 카드 승인 후 인증·상태 한 회"
+            probe.query == TeslaBleQuery.DRIVE_STATE -> "별도 인증·주차 기어 상태 한 회"
+            else -> "별도 인증·잠금/프렁크 상태 한 회"
+        })
+        DetailRow("등록 보고", if (probe.registrationReported) "차량의 등록 완료 응답 수신 · 영구 등록 상태와 별개" else "등록 완료 응답 미수신")
+        DetailRow("인증·상태 조회", when (probe.outcome) {
+            TeslaKeyOutcome.VERIFIED_STATUS -> "인증 검증 후 암호화된 읽기 전용 상태 수신"
+            TeslaKeyOutcome.UNKNOWN -> "전송 후 결과 불명 · 자동 재전송 안 함"
+            TeslaKeyOutcome.PENDING -> "응답 대기 · 아직 검증 완료 아님"
+            TeslaKeyOutcome.CANCELED -> "전송 전에 취소"
+            TeslaKeyOutcome.FAILED -> "검증 완료 안 됨"
+            TeslaKeyOutcome.NOT_SENT -> "전송 전"
+        })
         DetailRow("프로토콜 단계", when (probe.phase) {
             TeslaBlePhase.WAITING_FOR_CARD -> "차량 카드 승인 대기"
             TeslaBlePhase.HANDSHAKING -> "신선한 세션 인증 검증 중"
-            TeslaBlePhase.READING_STATUS -> "암호화된 GET_STATUS 응답 검증 중"
+            TeslaBlePhase.READING_STATUS -> if (probe.query == TeslaBleQuery.DRIVE_STATE) {
+                "암호화된 주차 기어 응답 검증 중"
+            } else {
+                "암호화된 잠금/프렁크 GET_STATUS 응답 검증 중"
+            }
             null -> "프로토콜 시작 전"
         })
         DetailRow("우리 앱 키 준비", if (probe.credentialReady) "이번 실행에서 키 준비됨 · 등록·인증 성공과 별개" else "이번 실행에서 미확인")
         DetailRow("RX 구독", if (probe.subscriptionConfirmed) "구독 확인 · 차량 인증과 별개" else "미확인")
         DetailRow("전송 시도", if (probe.transmissionAttempted) "있음 · 요청 승인/물리 완료와 별개" else "없음")
         DetailRow("로컬 close", if (probe.localClosed) "로컬 정리 확인 · 원격 해제와 별개" else "미확인")
+        val drive = probe.status?.driveState
+        if (probe.query == TeslaBleQuery.DRIVE_STATE && drive != null) {
+            DetailRow("기어 원본 시각 · epoch ms", drive.sourceTimestampEpochMillis?.toString() ?: "응답에 없음")
+            DetailRow("기어 수신 시각 · elapsed ms", drive.receivedAtElapsedRealtime.toString())
+        }
+        Text("기어 조회는 지난 관측만 표시하며 현재 P·차량 감지·제어 준비 여부를 판정하지 않습니다. 프렁크 열기·잠금·주행·UWB 명령은 전송하지 않습니다.")
         Text("전송·응답 대기는 전체 최대 180초입니다. 키 준비·정리의 해제 불명은 예약을 유지합니다. VIN·주소·키·응답 원문은 상세나 로그에 표시하지 않습니다.")
     }
+}
+
+/** 수신한 기어를 표시할 뿐, 이 일회성 조회로 현재 주차나 제어 권한을 판정하지 않는다. */
+@Composable
+private fun TeslaDriveObservation(drive: TeslaDriveState?) {
+    val gear = drive?.gear ?: TeslaGear.UNKNOWN
+    DetailRow("관측 기어", when (gear) {
+        TeslaGear.P -> "P · 지난 조회에서 관측"
+        TeslaGear.R, TeslaGear.N, TeslaGear.D -> "${gear.name} · P 아님"
+        TeslaGear.UNKNOWN -> "UNKNOWN · 확인 안 됨"
+    })
+    val hasSourceTime = drive?.sourceTimestampEpochMillis != null
+    Text(
+        if (hasSourceTime) "차량 원본 시각 있음 · 현재 상태의 신선도를 보장하지 않습니다."
+        else "차량 원본 시각 없음 · 현재 P 여부와 신선도 확인 안 됨",
+        color = if (hasSourceTime && gear == TeslaGear.P) MaterialTheme.colorScheme.onSurfaceVariant else AppWarningColor,
+    )
+    Text("지난 조회의 기어 관측입니다. 차량 감지나 프렁크 실행 허가가 아니며 제어 허가에 재사용하지 않습니다.", color = AppWarningColor)
 }
 
 /** 공식 VCSEC 상태 enum을 표현한다. null은 enum 0(잠금 해제/닫힘)과 구분한다. */
@@ -396,27 +485,79 @@ private fun teslaKeyBlockedLabel(reason: String): String = when (reason) {
     else -> "다른 관찰·오디오·BLE·UWB 진단을 먼저 종료하세요."
 }
 
+/**
+ * 차량이 보고한 사유 코드를 화면 문구로만 옮긴다. 상태·전송·판정은 바뀌지 않는다.
+ * 매핑되지 않은 코드는 감추지 않고 그대로 보여 준다.
+ */
+private fun teslaKeyReasonText(reason: String): String = when (reason) {
+    "USER_STOP" -> "사용자가 중단했습니다."
+    "DIAGNOSTICS_HIDDEN" -> "화면을 벗어나 중단했습니다."
+    "DEADLINE_EXPIRED" -> "제한 시간이 지나 중단했습니다."
+    "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED",
+    "VISIBLE_UI_REQUIRED",
+    "UNLOCKED_UI_REQUIRED",
+    "BLUETOOTH_PERMISSION_REQUIRED",
+    "BLUETOOTH_OFF",
+    "SINGLE_ASSOCIATION_REQUIRED" -> teslaKeyBlockedLabel(reason)
+    else -> reason
+}
+
 @Composable
-private fun TeslaKeyResult(probe: TeslaKeyProbeState, cleanupFailed: Boolean) {
+private fun TeslaKeyResult(probe: TeslaKeyProbeState, cleanupFailed: Boolean, flow: TeslaKeyFlow) {
+    val registration = flow == TeslaKeyFlow.REGISTRATION
+    val driveQuery = probe.query == TeslaBleQuery.DRIVE_STATE
+    val drive = probe.status?.driveState
     val cleanupError = cleanupFailed || probe.stage == TeslaKeyStage.CLEANUP_FAILED
     val verified = probe.stage == TeslaKeyStage.COMPLETE && probe.outcome == TeslaKeyOutcome.VERIFIED_STATUS
     val canceled = probe.stage == TeslaKeyStage.CANCELED || probe.outcome == TeslaKeyOutcome.CANCELED
+    val waitingForCard = probe.active && probe.stage == TeslaKeyStage.WAITING_FOR_CARD
+    val checkingKey = probe.active &&
+        (probe.stage == TeslaKeyStage.HANDSHAKING || probe.stage == TeslaKeyStage.READING_STATUS)
     val title = when {
         cleanupError -> "정리 실패"
-        probe.stage == TeslaKeyStage.FAILED -> "조회 실패"
-        probe.stage == TeslaKeyStage.TIMED_OUT -> "조회 시간 초과"
-        probe.stage == TeslaKeyStage.BLOCKED -> "조회 시작 불가"
+        waitingForCard -> "키카드 승인 대기"
+        checkingKey -> if (driveQuery) "주차 기어 조회 중" else "앱 키 확인 중"
+        probe.stage == TeslaKeyStage.FAILED -> when {
+            registration && probe.registrationReported -> "등록 보고 수신 · 앱 키 확인 실패"
+            registration -> "등록 확인 실패"
+            else -> "조회 실패"
+        }
+        probe.stage == TeslaKeyStage.TIMED_OUT -> when {
+            registration && probe.registrationReported -> "등록 보고 수신 · 앱 키 확인 시간 초과"
+            registration -> "등록 시간 초과"
+            else -> "조회 시간 초과"
+        }
+        probe.stage == TeslaKeyStage.BLOCKED -> if (registration) "등록 시작 불가" else "조회 시작 불가"
         probe.stage == TeslaKeyStage.CLEANING_UP -> "자원 정리 중"
-        probe.active -> "조회 진행 중"
-        canceled -> "조회 취소"
-        verified -> "조회 성공"
-        probe.stage == TeslaKeyStage.IDLE -> "조회 전"
-        else -> "조회 종료 · 결과 확인 안 됨"
+        probe.active -> when {
+            registration -> "등록 준비 중"
+            driveQuery -> "주차 기어 조회 진행 중"
+            else -> "잠금·프렁크 조회 진행 중"
+        }
+        canceled -> if (registration) "등록 취소" else "조회 취소"
+        verified -> when {
+            driveQuery -> when (drive?.gear ?: TeslaGear.UNKNOWN) {
+                TeslaGear.P -> if (drive?.sourceTimestampEpochMillis != null) "P 관측 · 지난 조회" else "P 관측 · 현재 P 확인 안 됨"
+                TeslaGear.R, TeslaGear.N, TeslaGear.D -> "${drive?.gear?.name} 관측 · P 아님"
+                TeslaGear.UNKNOWN -> "주차 기어 확인 안 됨"
+            }
+            registration && probe.registrationReported -> "등록 보고 수신 · 상태 확인됨"
+            registration -> "앱 키 확인됨"
+            else -> "조회 성공"
+        }
+        probe.stage == TeslaKeyStage.IDLE -> if (registration) "등록 전" else "조회 전"
+        else -> if (registration) "등록 종료 · 결과 확인 안 됨" else "조회 종료 · 결과 확인 안 됨"
     }
     val color = when {
         cleanupError -> MaterialTheme.colorScheme.error
+        waitingForCard -> MaterialTheme.colorScheme.primary
         probe.active -> MaterialTheme.colorScheme.secondary
         canceled -> AppWarningColor
+        verified && driveQuery -> if (drive?.gear == TeslaGear.P && drive.sourceTimestampEpochMillis != null) {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        } else {
+            AppWarningColor
+        }
         verified -> AppSuccessColor
         probe.stage == TeslaKeyStage.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant
         else -> MaterialTheme.colorScheme.error
@@ -429,16 +570,37 @@ private fun TeslaKeyResult(probe: TeslaKeyProbeState, cleanupFailed: Boolean) {
     )
     Text(
         when {
-            cleanupError -> "조회 전송은 끝났지만 자원 정리를 확인하지 못했습니다. 앱 프로세스 재시작이 필요합니다."
+            cleanupError -> "전송은 끝났지만 자원 정리를 확인하지 못했습니다. 앱 프로세스 재시작이 필요합니다."
+            waitingForCard -> "차량 화면의 키 추가 안내를 확인하고 NFC 키카드로 직접 승인하세요. 앱은 승인을 대신하지 않습니다."
+            checkingKey -> when {
+                driveQuery -> "앱 키로 인증한 뒤 주차 기어만 한 번 조회하고 있습니다. 차량 감지·프렁크 제어는 하지 않습니다."
+                probe.registrationRequested -> "카드 승인 뒤 앱 키로 잠금·프렁크 상태를 확인하고 있습니다."
+                else -> "앱 키로 잠금·프렁크 상태를 확인하고 있습니다."
+            }
             probe.active -> teslaKeyStageLabel(probe.stage)
-            verified -> "인증을 검증하고 암호화된 차량 상태를 받았습니다. 조회가 끝났습니다."
-            probe.stage == TeslaKeyStage.IDLE -> "아직 조회를 시작하지 않았습니다."
-            probe.outcome == TeslaKeyOutcome.UNKNOWN -> "조회가 끝났습니다. 전송 후 결과는 확인되지 않았으며 더 기다려도 자동 재시도하지 않습니다."
+            verified -> when {
+                driveQuery -> "인증을 검증하고 암호화된 기어 응답을 받았습니다. 지난 관측이며 현재 P 확인·차량 감지·프렁크 실행 허가가 아닙니다."
+                registration && probe.registrationReported ->
+                    "차량이 등록 완료 응답을 보냈고, 인증을 검증해 암호화된 차량 상태를 받았습니다. 영구 등록 유지나 이후 차량 동작을 보장하지 않습니다."
+                registration -> "인증을 검증하고 암호화된 차량 상태를 받았습니다. 차량의 등록 완료 응답은 확인되지 않았습니다."
+                else -> "인증을 검증하고 암호화된 차량 상태를 받았습니다. 조회가 끝났습니다."
+            }
+            probe.stage == TeslaKeyStage.IDLE ->
+                if (registration) "아직 등록을 시작하지 않았습니다." else "아직 조회를 시작하지 않았습니다."
+            registration && probe.registrationReported ->
+                "차량의 등록 완료 응답은 받았지만 앱 키 확인은 끝나지 않았습니다. 이번 실행은 종료되어 더 기다릴 필요 없습니다."
+            probe.outcome == TeslaKeyOutcome.UNKNOWN ->
+                if (registration) {
+                    "등록이 끝났습니다. 전송 후 결과는 확인되지 않았으며 더 기다려도 자동 재시도하지 않습니다."
+                } else {
+                    "조회가 끝났습니다. 전송 후 결과는 확인되지 않았으며 더 기다려도 자동 재시도하지 않습니다."
+                }
+            registration -> "등록이 끝났습니다. 더 기다릴 필요 없습니다. 차량의 등록 승인과 앱 키 확인은 확인되지 않았습니다."
             else -> "조회가 끝났습니다. 더 기다릴 필요 없습니다. 인증·상태 조회 성공은 확인되지 않았습니다."
         },
         color = color,
     )
-    probe.reason?.let { Text(it, color = color) }
+    probe.reason?.let { Text(teslaKeyReasonText(it), color = color) }
 }
 
 private fun teslaKeyStageLabel(stage: TeslaKeyStage): String = when (stage) {
@@ -547,21 +709,31 @@ private fun BleDiagnostics(
     var detailsExpanded by remember { mutableStateOf(false) }
     val optionsLocked = state.bleFieldBusy() || ble.active || state.bleDiagnosticActive
     val config = if (optionsLocked) state.bleFieldConfig else selectedConfig
+    val nameDetection = config.scanFilterMode == BleScanFilterMode.VEHICLE_NAME
+    val canChangeOptions = !optionsLocked && !nameDetection
     val needsScanPermission = config.supplementalScan && !state.bluetoothScanPermission
     val blocked = when {
-        support.reason == "DESTROY_FAILED" -> "지원 조회 정리 실패 · 앱 재시작 필요"
+        support.reason == "DESTROY_FAILED" || support.reason == "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED" -> "진단 자원 정리 실패 · 앱 프로세스 재시작 필요"
         else -> actions.bleFieldBlockedReason(config)
     }
-    AppSection("주말 BLE 반복 시험") {
+    fun selectConfig(next: BleFieldConfig) {
+        if (optionsLocked) return
+        onSelectConfig(next)
+    }
+    fun submit() {
+        if (optionsLocked || blocked != null || needsScanPermission || state.vehicleVin.status != VehicleVinStatus.READY) return
+        actions.startBle(config)
+    }
+    AppSection("차량 BLE 감지 · 비교 진단") {
         DetailRow("서비스 상태", bleFieldStatus(state, ble))
         DetailRow(
             "당회차 단계",
             if (state.bleFieldConfig.observationOnly) "감지만 모드 · GATT 수행 안 함" else bleStatusLabel(ble.status),
         )
-        DetailRow("근접 신호 후보 수", state.bleFieldCandidateCount.toString())
+        DetailRow("광고·근접 신호 후보 수", state.bleFieldCandidateCount.toString())
         DetailRow("보조 스캔 상태", when {
             state.bleFieldScanFailure != null -> "실패 · 코드 ${state.bleFieldScanFailure}"
-            state.bleFieldScanRunning -> "실행 중"
+            state.bleFieldScanRunning -> "OS 필터 스캔 등록됨 · 광고 수신과 별개"
             !state.bleFieldConfig.supplementalScan -> "최근 실행 조건에서 사용 안 함"
             state.bleFieldTrialStopping -> "중지·정리 중"
             state.bleFieldTrialActive -> "대기·일시정지"
@@ -570,7 +742,7 @@ private fun BleDiagnostics(
         DetailRow("시도 / 종료 회차", "${state.bleFieldTrialAttemptCount} / ${state.bleFieldTrialCompletedCount}")
         DetailRow("로그 건강 · 상한", bleFieldLogStatus(state))
         state.bleFieldTrialStopReason?.let { DetailRow("시험 중지 코드", it) }
-        Text("후보 수는 근접 신호를 합친 수이며 실제 방문수나 인증 성공수가 아닙니다. 종료 회차는 로컬 close 뒤 끝난 실패·취소 회차도 포함합니다.", style = MaterialTheme.typography.bodySmall)
+        Text("후보는 광고·근접 신호이며 거리·차량 인증·주차 P·제어 성공을 뜻하지 않습니다. 후보 수는 실제 방문수가 아니며 종료 회차에는 실패·취소도 포함됩니다.", style = MaterialTheme.typography.bodySmall)
         if (ble.status == BleProbeStatus.CLEANUP_FAILED) {
             Text(
                 "로컬 GATT 정리 실패 · 예약 유지 · 앱 재시작 필요",
@@ -589,18 +761,25 @@ private fun BleDiagnostics(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             FilterChip(
-                selected = config == BleFieldConfig.BASELINE,
-                onClick = { onSelectConfig(BleFieldConfig.BASELINE) },
+                selected = config == BleFieldConfig.VEHICLE_NAME_DETECTION,
+                onClick = { selectConfig(BleFieldConfig.VEHICLE_NAME_DETECTION) },
                 enabled = !optionsLocked,
                 modifier = Modifier.heightIn(min = 48.dp).semantics { role = Role.RadioButton },
-                label = { Text("기준 방식") },
+                label = { Text("차량 광고명 감지 · GATT 없음") },
+            )
+            FilterChip(
+                selected = config == BleFieldConfig.BASELINE,
+                onClick = { selectConfig(BleFieldConfig.BASELINE) },
+                enabled = !optionsLocked,
+                modifier = Modifier.heightIn(min = 48.dp).semantics { role = Role.RadioButton },
+                label = { Text("기준 방식 · 등록 주소") },
             )
             FilterChip(
                 selected = config == BleFieldConfig.IMPROVED,
-                onClick = { onSelectConfig(BleFieldConfig.IMPROVED) },
+                onClick = { selectConfig(BleFieldConfig.IMPROVED) },
                 enabled = !optionsLocked,
                 modifier = Modifier.heightIn(min = 48.dp).semantics { role = Role.RadioButton },
-                label = { Text("개선 방식") },
+                label = { Text("개선 방식 · 등록 주소") },
             )
         }
         FlowRow(
@@ -610,36 +789,36 @@ private fun BleDiagnostics(
         ) {
             FilterChip(
                 selected = config.observationOnly,
-                onClick = { onSelectConfig(config.copy(observationOnly = !config.observationOnly)) },
-                enabled = !optionsLocked,
+                onClick = { selectConfig(config.copy(observationOnly = !config.observationOnly)) },
+                enabled = canChangeOptions,
                 modifier = Modifier.heightIn(min = 48.dp),
                 label = { Text("감지만 · GATT 없음") },
             )
             FilterChip(
                 selected = config.btAssist,
-                onClick = { onSelectConfig(config.copy(btAssist = !config.btAssist)) },
-                enabled = !optionsLocked,
+                onClick = { selectConfig(config.copy(btAssist = !config.btAssist)) },
+                enabled = canChangeOptions,
                 modifier = Modifier.heightIn(min = 48.dp),
                 label = { Text("BT 연결 신호 보조") },
             )
             FilterChip(
                 selected = config.supplementalScan,
-                onClick = { onSelectConfig(config.copy(supplementalScan = !config.supplementalScan)) },
-                enabled = !optionsLocked,
+                onClick = { selectConfig(config.copy(supplementalScan = !config.supplementalScan)) },
+                enabled = canChangeOptions,
                 modifier = Modifier.heightIn(min = 48.dp),
                 label = { Text("보조 스캔") },
             )
             FilterChip(
                 selected = config.retryEnabled,
-                onClick = { onSelectConfig(config.copy(retryEnabled = !config.retryEnabled)) },
-                enabled = !optionsLocked,
+                onClick = { selectConfig(config.copy(retryEnabled = !config.retryEnabled)) },
+                enabled = canChangeOptions,
                 modifier = Modifier.heightIn(min = 48.dp),
                 label = { Text("제한 재시도") },
             )
             FilterChip(
                 selected = config.backgroundConnect,
-                onClick = { onSelectConfig(config.copy(backgroundConnect = !config.backgroundConnect)) },
-                enabled = !optionsLocked,
+                onClick = { selectConfig(config.copy(backgroundConnect = !config.backgroundConnect)) },
+                enabled = canChangeOptions,
                 modifier = Modifier.heightIn(min = 48.dp),
                 label = { Text("백그라운드 연결 비교") },
             )
@@ -647,14 +826,23 @@ private fun BleDiagnostics(
         Text(
             when {
                 optionsLocked -> "표시는 런타임 실행 스냅샷입니다. 중지·정리가 끝난 뒤 다음 실행 조건을 바꿀 수 있습니다."
-                config == BleFieldConfig.BASELINE -> "기본은 기준 방식입니다. 개선 방식은 직접 선택해야 하며 선택만으로 시작하지 않습니다."
-                config == BleFieldConfig.IMPROVED -> "개선 방식: BT 보조·보조 스캔·제한 재시도. 감지만·백그라운드 연결은 별도 선택입니다."
-                else -> "사용자 지정 조건입니다. 백그라운드 연결 비교는 독립 옵션이며 두 프리셋의 기본값은 꺼짐입니다."
+                nameDetection -> "기본은 차량 광고명 감지입니다. VIN에서 계산한 공식 광고명을 필터로 사용하며 GATT·TX·마이크·UWB를 시작하지 않습니다. BT 보조·재시도·백그라운드 연결도 꺼짐으로 고정합니다."
+                config == BleFieldConfig.BASELINE -> "기준 비교: 등록 주소의 CDM 출현 신호를 사용합니다. 선택만으로 시작하지 않습니다."
+                config == BleFieldConfig.IMPROVED -> "개선 비교: 등록 주소의 BT 보조·보조 스캔·제한 재시도. 감지만·백그라운드 연결은 별도 선택입니다."
+                else -> "등록 주소의 사용자 지정 비교 조건입니다. 백그라운드 연결은 별도 옵션이며 기본은 꺼짐입니다."
             },
             style = MaterialTheme.typography.bodySmall,
         )
         if (config.observationOnly) {
             Text("감지만 모드는 근접 신호·후보만 관찰합니다. GATT 연결·구독 시험을 수행하지 않습니다.", style = MaterialTheme.typography.bodyMedium)
+        }
+        Text(vehicleVinConsumerLabel(state.vehicleVin))
+        if (nameDetection) {
+            Text(
+                if (optionsLocked) "실행 중 대상과 조건은 고정됩니다. HOME·잠금에도 명시적으로 시작한 서비스 감지는 계속됩니다."
+                else "등록된 VIN에서 공식 광고명을 계산합니다. 광고명과 VIN 원문은 화면·로그에 표시하지 않습니다.",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
         if (config.supplementalScan) {
             DetailRow("Bluetooth 스캔 권한", if (state.bluetoothScanPermission) "허용됨" else "허용 필요 · 사용자가 직접 승인")
@@ -668,11 +856,15 @@ private fun BleDiagnostics(
             Text("시스템 권한 창에서 직접 승인하세요. 허용 후에도 자동 시작하지 않으며 시험 시작을 다시 눌러야 합니다.", style = MaterialTheme.typography.bodySmall)
         } else {
             Button(
-                onClick = { actions.startBle(config) },
-                enabled = !optionsLocked && blocked == null,
+                onClick = ::submit,
+                enabled = !optionsLocked && blocked == null && state.vehicleVin.status == VehicleVinStatus.READY,
                 shape = MaterialTheme.shapes.medium,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-            ) { Text(if (config.observationOnly) "감지만 모드 시작" else "선택한 조건으로 BLE 시험 시작") }
+            ) { Text(when {
+                nameDetection -> "차량 광고명 감지 시작"
+                config.observationOnly -> "감지만 모드 시작"
+                else -> "선택한 조건으로 BLE 시험 시작"
+            }) }
         }
         if (state.bleFieldBusy()) {
             OutlinedButton(
@@ -691,7 +883,7 @@ private fun BleDiagnostics(
             Text("시작하면 진행 중 지원 조회를 취소합니다.", style = MaterialTheme.typography.bodySmall)
         }
         Text(
-            "등록 차량의 근접 신호를 관찰하며 감지만 모드가 아니면 읽기 전용 GATT 진단을 수행합니다. 화면 이탈·HOME·잠금에도 서비스 시험은 유지됩니다. 마이크는 사용하지 않으며 새 스캔은 보조 스캔을 선택한 경우에만 수행합니다.",
+            "화면 이탈·HOME·잠금에도 명시적으로 시작한 서비스 감지는 유지됩니다. 마이크는 사용하지 않습니다. 감지만 모드가 아닌 등록 주소 비교에서만 읽기 전용 GATT 진단을 수행합니다.",
             style = MaterialTheme.typography.bodySmall,
         )
         Text(
@@ -705,6 +897,8 @@ private fun BleDiagnostics(
             onToggle = { detailsExpanded = !detailsExpanded },
         ) {
             Text("최근 실행 스냅샷", style = MaterialTheme.typography.titleSmall)
+            Text("LOW_POWER 필터 스캔 결과를 OS가 PendingIntent로 전달합니다. 5초 배치 수신 · 40초 실행 / 최소 120초 시작 간격을 유지하며 절전 중 타이머 실행은 늦어질 수 있습니다. 광고 미관측은 차량 부재를 뜻하지 않으며 전력 절감·UWB 거리 측정은 확인하지 않았습니다.", style = MaterialTheme.typography.bodySmall)
+            DetailRow("스캔 필터", if (state.bleFieldConfig.scanFilterMode == BleScanFilterMode.VEHICLE_NAME) "차량 광고명 · 식별값 표시 안 함" else "등록 주소 · 식별값 표시 안 함")
             DetailRow("observationOnly", bleOptionLabel(state.bleFieldConfig.observationOnly))
             DetailRow("btAssist", bleOptionLabel(state.bleFieldConfig.btAssist))
             DetailRow("supplementalScan", bleOptionLabel(state.bleFieldConfig.supplementalScan))
@@ -761,7 +955,8 @@ private fun supportQueryBlockedReason(
     support: SpeechProbeState,
     trial: SpeechTrialState,
 ): String? = when {
-    support.reason == "DESTROY_FAILED" -> "지원 조회 정리 실패 · 앱 재시작 필요"
+    support.reason == "DESTROY_FAILED" || support.reason == "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED" -> "진단 자원 정리 실패 · 앱 프로세스 재시작 필요"
+    state.vehicleVin.status == VehicleVinStatus.SAVING -> "VIN 저장이 끝난 뒤 지원 조회를 시작하세요."
     state.teslaKeyDiagnosticActive -> "차량 키 진단·정리가 끝나야 다른 진단을 시작할 수 있습니다."
     state.bleFieldBusy() -> "주말 BLE 반복 시험을 먼저 중지하세요."
     state.bleDiagnosticActive -> "BLE 연결 진단·정리 중에는 지원 조회할 수 없습니다."
@@ -1204,7 +1399,7 @@ private fun trialStartBlockedReason(
     trial: SpeechTrialState,
 ) = when {
     trial.reason?.contains("RESTART_REQUIRED") == true -> "자원 정리 실패가 남아 앱 재시작이 필요합니다"
-    support.reason == "DESTROY_FAILED" -> "지원 조회 정리 실패 · 앱 재시작 필요"
+    support.reason == "DESTROY_FAILED" || support.reason == "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED" -> "진단 자원 정리 실패 · 앱 프로세스 재시작 필요"
     state.teslaKeyDiagnosticActive -> "차량 키 진단·정리가 끝나야 음성 시험을 시작할 수 있습니다"
     state.bleFieldBusy() -> "주말 BLE 반복 시험을 먼저 중지하세요"
     state.bleDiagnosticActive -> "BLE 연결 진단·정리가 끝나야 음성 시험을 시작할 수 있습니다"

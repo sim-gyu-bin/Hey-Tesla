@@ -16,7 +16,7 @@
 | 항목 | 판정 | 확인 내용과 남은 조건 |
 | --- | --- | --- |
 | Android 구현 기술 | 구현·로컬 검증 | 단일 `app` Kotlin 네이티브·Compose 진단 앱. React Native와 JS 수명 관리 경로는 채택하지 않는다. |
-| 개발 저장소 | 최신 빌드·S23 설치/실행 확인 | `0.14.0-probe` APK·110개 단위 회귀 통과, Lint 오류 0·경고 13개. 실제 UI·감지만·합성 후보·GATT 2회 제한/정리·필터 스캔 40초/120초·GATT 중 스캔 정지·알림 중지·계측 HOME/화면 OFF를 확인했다. 실차 광고 감지 개선·잠금 스캔·장기 전력은 미확인이다. |
+| 개발 저장소 | 로컬 구현과 공개 게시 상태 분리 | 로컬 소스와 S23 설치 버전은 `0.24.0-probe`다. 공통 VIN 암호화 저장·복원·진단 재사용의 기존 검증은 [기기 검증](Device-Validation.md#0240-probe--공통-vin-등록암호화-재사용)을 따른다. 공개 GitHub 기본 브랜치는 아직 문서 전용 상태이므로 로컬 구현·설치와 공개 배포를 동일시하지 않는다. 실제 차량 P·광고 감지·프렁크·UWB는 미확인이다. |
 | 연결 기기 | 실기기 관찰 | S23 API 36에서 BLE 대조 실행과 기존 파일 prefix 보존을 확인했다. 이전 `ko-KR` 설치·고정 TTS 파일·직접 발화·로컬 음성 판정/안내 실측과 별도다. 새 BLE 시험의 마이크 사용은 관측되지 않았다. [기기 검증](Device-Validation.md)에 버전별 근거·한계를 기록한다. |
 | Android·One UI·차량 펌웨어 | 일부 확인 | Android 16/API 36, One UI 속성 `80500`을 읽었다. 설정 화면의 One UI 표기와 차량 펌웨어는 미확인이다. |
 | 무터치 마이크 시작 | 구현 가설 | 기본 비서 경로의 문서상 근거는 있으나 잠금·주머니·실제 차량 이벤트 조합은 미시험이다. |
@@ -94,11 +94,13 @@ Companion Device 관련 시작 예외나 배터리 최적화 예외만으로 두
 
 ## D. Tesla 상태와 물리 동작
 
-- [공식 명령 SDK][T2]는 사용자 OAuth 토큰과 차량에 등록한 앱 공개키를 별도로 요구한다. Tesla 공식 앱 폰키는 이 권한을 제공하지 않는다.
-- [권한 범위][T1]에서 명령, 차량 데이터, refresh token 권한을 구분한다. `vehicle_cmds`만으로 상태 확인까지 해결된다고 가정하지 않는다.
-- [공식 Telemetry 정의][T3]에는 명시적 `ShiftStateP`와 `Unknown`, `Invalid`, `SNA`가 있다. 실제 차에서 적시에 유효한 P를 받는지, 값의 관측 시각·연결 상태를 어떻게 검증하는지는 별도 문제다. 기존 데이터 경로로 충분한지 먼저 확인하고 Telemetry를 무조건 추가하지 않는다.
+- [공식 명령 SDK][T2]는 차량 명령용 앱 키와 선택 Fleet API의 OAuth 토큰을 구분한다. [BLE 등록 구현](https://github.com/teslamotors/vehicle-command/blob/main/pkg/vehicle/security.go)은 앱에서 생성한 P-256 공개키를 사용자 NFC 키카드·차량 화면 승인으로 추가한다. [CLI 명령 정의](https://github.com/teslamotors/vehicle-command/blob/main/cmd/tesla-control/commands.go)의 `frunk-open`은 차량 인증이 필요하지만 Fleet API는 요구하지 않는다. API 개인키 발급이나 기존 공식 앱 폰키 복사를 로컬 BLE의 전제로 두지 않는다.
+- [권한 범위][T1]의 명령·차량 데이터·refresh token 조건은 선택 Fleet 경로에 적용한다. 로컬 BLE의 API 호출 없음과 월 무료 크레딧은 다른 조건이며, Fleet의 계정·도메인·결제를 BLE 등록의 필수 단계로 적용하지 않는다.
+- [공식 BLE GetState(StateCategoryDrive)](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/vehicle/state.go)는 Infotainment `GetVehicleData.GetDriveState`로 기어 상태를 읽는다. 공식 `ShiftState` oneof의 P·R·N·D와 Invalid·SNA는 별개이며 v22는 이 읽기 경로를 구현했다. 실제 차량 수신·수면 상태 호환성·관측 시각의 신선성은 미확인이다. Fleet Telemetry를 필수로 추가하지 않는다.
 - 요청 전송, 차량 명령 승인, 래치 해제, 후드의 완전 개방은 구분한다. 물리 완료가 미확인일 때 완료형 TTS를 사용하지 않는다.
 - 대상 차량의 [프렁크 매뉴얼][T6] 직접 조회는 영문·한국어 URL 및 브라우저 시도에서 접근 거부(HTTP 403)를 만났다. 이번 검토에서는 대상 트림의 순정 전동 완전 개방 여부를 확정하지 않았다. 차량 내 매뉴얼과 승인된 실차 시험으로 확인한다.
+- v21의 실차 앱 키 인증·암호 GET_STATUS·이전 연결 종료 후 같은 키의 새 BLE 연결 조회는 두 방문으로 통과했다. 같은 프로세스 범위이며 프로세스 종료·재부팅 후 키 재사용을 포함하지 않는다. 주차 P·접근 감지·프렁크 제어 성공으로 확대하지 않는다.
+- P 조회 뒤에는 프렁크 제어보다 차량 감지 개선을 선행한다. 이전 BLE 단독 감지가 잘 안 됐다는 사용자 관찰을 유지한다. UWB 지원 조회와 차량 거리 측정은 별개이며 [Android UWB 문서](https://developer.android.com/develop/connectivity/uwb)는 상대 주소·채널·세션 키의 안전한 OOB 교환을 요구한다. 현재 차량용 세션 구성은 미구현·미확인이며 BLE 키 등록으로 자동 확보되거나 제3자 앱에서 절대 불가능하다고 단정하지 않는다.
 
 ## 중단·재검토 조건
 
@@ -130,7 +132,7 @@ Companion Device 관련 시작 예외나 배터리 최적화 예외만으로 두
 | A10 | [FGS 서비스 유형][A10] | microphone 선언·권한·부팅 제한 |
 | S1 | [Samsung Application Management][S1] | 절전 및 예외 설정 |
 | T1 | [Tesla 인증][T1] | OAuth와 scopes |
-| T2 | [Tesla vehicle-command][T2] | 공식 Go SDK·서명 프록시 |
+| T2 | [Tesla vehicle-command][T2] | 로컬 BLE 키 등록·인증·명령, 선택 인터넷 서명 프록시 |
 | T3 | [Tesla vehicle_data.proto][T3] | 기어값 구분 |
 | T4 | [Tesla 가격][T4] | 사용량 과금과 월 할인 |
 | T5 | [Tesla 과금·한도][T5] | 결제·한도·실패 요청 과금 |

@@ -2,7 +2,7 @@
 
 **차량 근처에서만 작동하는 Android 네이티브 음성 리모컨.** 잠긴 휴대폰을 주머니에서 꺼내지 않고, 차량에 접근해 “헤이 테슬라, 프렁크 열어줘”라고 말하는 사용 경험을 목표로 한다.
 
-> 현재 소스·S23 설치는 **`0.19.0-probe` 조회 결과 표시 개선 버전**이다. 조회 버튼 근처와 화면 상단에 진행은 파랑, 성공은 초록, 실패·시간 초과는 빨강으로 크게 표시하고 종료 근거를 바로 보여준다. JVM 139개와 S23 기존 계측 5개·합성 RAM 상태 9종의 실제 화면 검증을 통과했다. **실차 인증·암호 상태 수신 성공은 미확인**이며 프로토콜·기한·재시도·등록 승인 경계는 바꾸지 않았다. 프렁크 열기·UWB 거리 측정·음성 자동 제어는 연결하지 않았다. [실측 기록](wiki/Device-Validation.md), [18단계 구현 계획](wiki/Implementation-Plan.md)을 구분해 관리한다.
+> 현재 소스·S23 설치는 **`0.25.0-probe` OS 전달 기반 BLE 감지 버전**이다. 기존 foreground service에서 LOW_POWER 필터 스캔을 PendingIntent·5초 배치로 수신하며 40초/120초 예약 주기는 늘리지 않았다. 공통 VIN 암호화 재사용·명시 시작·GATT 없는 광고명 감지를 유지한다. v24 실차 조회의 P 관측과 VIN 유지가 확인됐지만 실제 광고명 match·잠금/주머니 재접근·배터리 절감·UWB 거리는 미확인이다. [실측 기록](wiki/Device-Validation.md), [개발 계획](wiki/Implementation-Plan.md)을 따른다.
 >
 > 프로젝트 전용 [hey-tesla-ui 스킬](.omp/skills/hey-tesla-ui/SKILL.md)을 적용해 차콜 테마, 상태 중심 홈, 설정 행, 입력 선택·결과 상세를 분리한 진단 화면을 구현했다. 설계 근거와 검증 경계는 [UI 개편 기록](wiki/UI-Design.md)에 둔다.
 
@@ -40,7 +40,8 @@ Android 앱은 React Native가 아닌 **Kotlin 네이티브**로 개발한다. �
 | 시스템 연동 | VoiceInteractionService, 적절한 foreground service, Bluetooth/CDM API의 실기기 검증 |
 | 음성 | 접근 세션 내 호출어 감지와 온디바이스 한국어 STT 우선, Android TTS |
 | 테스트 | Kotlin/JVM 파서·상태 전이 테스트, Android 실기기 서비스·오디오 검증 |
-| 후속 서버 | 필요성이 확인되면 Node.js + TypeScript 가능. 서명은 공식 Go `vehicle-command` 구성요소 재사용 |
+| 차량 연동 | 앱 자체 AndroidKeyStore P-256 키·키카드 승인·로컬 BLE 우선. 공식 공개 wire contract와 JCA 사용 |
+| 선택 인터넷 경로 | 필요성과 승인 확인 후 Fleet API/OAuth 검토. 서버가 필요하면 Node.js + TypeScript 가능, 서명 프록시는 공식 Go `vehicle-command` 재사용 |
 
 개발 도구와 라이브러리는 아래 빌드 조합으로 고정했다. 호출어 엔진과 실제 STT·접근 경로의 최종 채택은 아직 확정하지 않았다. 기본 비서 변경, 외부 음성 SDK·모델 도입, 계정·비용 발생 또는 외부 오디오 전송은 사전 동의 없이 적용하지 않는다.
 
@@ -60,14 +61,16 @@ Android 앱은 React Native가 아닌 **Kotlin 네이티브**로 개발한다. �
 1. **기술 타당성 확인:** 공식 문서와 실제 기기 조건을 분리해 기록한다.
 2. **Android 검증 앱:** Tesla 실제 제어 없이 `잠금 + 실제 차량 접근 + 무터치 마이크 + 한 문장 인식 + 종료`를 확인한다.
 3. **Mock 연동:** `VehicleGateway` 경계에서 안전 검사·확인·취소·중복·만료·오류·TTS를 검증한다.
-4. **실제 Tesla 연동:** 사용자 승인 후 인증·가상 키·서명·안전 상태를 수동 진단하고, 그다음 음성 흐름과 연결한다.
+4. **로컬 BLE Tesla 연동:** 앱 자체 키·키카드 승인 후 실차 인증·암호 상태 조회와 재연결 키 재사용을 확인한다. 주차 기어 조회 다음은 BLE·UWB 차량 감지 개선을 먼저 진행한다. 신선한 P·감지·안전 게이트를 확보한 뒤 별도 승인으로 수동 프렁크를 시험하고, 통과한 경로만 음성과 결합한다.
 5. **배터리·안정성:** 장시간 대기, 접근·이탈, 재연결, 통화, 절전, 네트워크 장애, 프로세스 종료·재부팅을 실기기로 측정한다.
 
 **실차 무터치 검증 전 대규모 서버 개발은 보류한다.** 사용자 요청에 따른 홈·설정·진단 UI 개편은 별도 트랙이며 무터치 동작의 합격을 뜻하지 않는다. 네이티브로 작성해도 Android의 백그라운드 마이크 제한은 사라지지 않는다. 알림을 눌러야 하는 대안을 동일한 성공으로 보고하지 않는다.
 
+**차량 키를 API에서 발급받는 전제는 두지 않는다.** OAuth는 선택 Fleet API 호출용, 앱의 P-256 키는 BLE 인증용, UWB 세션 키·파라미터는 정밀 거리 측정용이다. 공식 앱 폰키를 복사하지 않으며 UWB는 BLE 키 등록과 별도 과제다. v21의 실차 인증·암호 상태 수신·새 BLE 연결에서 같은 키 조회는 두 방문으로 통과했다. 프렁크 제어와 UWB 거리 측정은 미확인이다. 개발 기준과 공식 근거는 [요구사항](wiki/Requirements.md#차량-연동-개발-기준), [Tesla 연동](wiki/Tesla-Integration.md)에 둔다.
+
 ## 빌드와 실행
 
-현재 소스와 S23 Ultra 설치는 `com.heytesla.app` / `0.19.0-probe`(`versionCode=19`)다. 수동 키 등록·암호 상태 조회, UWB 지원 조회·BLE 감지 대조 시험·이전 음성 통합 실측은 구분한다. Android 16(API 36) 이상을 대상으로 하며 단일 `app` 모듈의 AGP 9.3.1, Gradle 9.5.0, 내장 Kotlin, Compose compiler plugin 2.4.10, Compose BOM 2026.06.01을 사용한다. Tesla 공식 schema를 protobuf plugin 0.10.0 / protoc·javalite 4.36.2로 생성한다.
+현재 소스·S23 설치는 `com.heytesla.app` / `0.25.0-probe`(`versionCode=25`)다. 개발자 진단 상단의 **공통 VIN 등록**에서 형식을 검증하고 AndroidKeyStore AES-GCM으로 암호화 저장한다. 앱 재실행 뒤 복원한 VIN을 키·P 조회·광고명 감지에서 공통 사용하며 각 진단에 다시 입력하지 않는다. VIN 저장과 실행 상태 복원은 별개이며 저장·복원만으로 작업을 시작하지 않는다. 감지는 **차량 광고명 감지 · GATT 없음**을 기본 비교 조건으로 제안한다. 이미 시작한 감지는 HOME·잠금에도 유지하지만 새 프로세스는 남은 OS 스캔 정리만 수행하고 감지를 자동 복원하지 않는다. Android 16(API 36) 이상, 단일 `app` 모듈의 AGP 9.3.1, Gradle 9.5.0, 내장 Kotlin, Compose compiler plugin 2.4.10, Compose BOM 2026.06.01, protobuf plugin 0.10.0 / protoc·javalite 4.36.2를 사용한다.
 
 1. JDK 21과 Android SDK Platform 36 / Build Tools 36.0.0을 준비한다. 이 저장소의 실제 빌드는 Android Studio bundled JDK 21.0.10으로 수행했다.
 2. `JAVA_HOME`을 JDK에 맞추고, Git에서 제외된 `local.properties`에 자신의 `sdk.dir`을 지정한다. `ANDROID_HOME`과 `ANDROID_SDK_ROOT`를 함께 설정했다면 동일한 SDK를 가리키게 하거나 빌드 명령의 환경에서 일치시킨다. 전역 환경을 자동 변경하지 않는다.
@@ -77,6 +80,8 @@ Android 앱은 React Native가 아닌 **Kotlin 네이티브**로 개발한다. �
 ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon
 ```
 
+호스트 로그 분석기 회귀는 `python3 -B -m unittest discover -s tools -p 'test_*.py'`로 실행한다. 단말 계측 APK는 `./gradlew :app:assembleDebugAndroidTest --no-daemon`으로 빌드한다. 계측은 시험별 데이터 격리·권한·기기 조건을 확인한 뒤 실행하며, 프로세스 재시작 전용 시험은 일반 전체 실행과 별도로 수행한다. 컴파일·호스트 회귀는 실차·잠금·오디오 동작 검증을 대신하지 않는다.
+
 APK는 `app/build/outputs/apk/debug/app-debug.apk`에 생성된다. 승인된 USB Android 기기가 한 대인 환경에서는 다음과 같이 설치·실행할 수 있다. `-g` 또는 `pm grant`로 권한을 대신 승인하지 않는다.
 
 ```sh
@@ -85,20 +90,22 @@ adb -d shell am start -n com.heytesla.app/.MainActivity
 ```
 **설정 → 개발자 진단 → UWB 지원 → UWB 지원 확인**은 Android 16 `RangingManager`의 공개 capability만 조회한다. 하드웨어 feature·framework backend·원 가용 코드·거리 측정용 권한을 분리하고, 상세 지원 값은 RAM에만 둔다. 새 권한 선언/승인·실제 거리 세션·peer/address/STS 생성·BLE TX는 없다. 조회 중 다른 진단을 예약 차단하고 정리 불명은 Activity 재생성으로 풀지 않는다. S23에서는 두 거리 권한 미승인에서도 응답을 받았으며, `ENABLED`는 차량 인증·거리 준비의 증거가 아니다.
 
-**설정 → 개발자 진단 → 차량 키**는 별도의 초기 설정 시험이다. **현재 방문 결과는 등록 불명이므로 재방문·등록 반복을 권하지 않는다.** 아래 버튼 설명은 새 실행 지시가 아니다. 잠금 해제·다른 진단 중지 후 VIN을 일회성으로 입력하며, 등록에는 직접 동의한 **키 추가 요청 · 카드 승인 후 상태 1회 조회**와 실제 키 카드 승인이 필요하다. 앱은 Driver 역할의 새 Android 키만 추가하며 기존 폰키를 제거·교체하지 않는다. **우리 앱 키로 인증·상태 1회 조회**는 등록 요청과 별개다.
+**설정 → 개발자 진단 → 차량 키**는 제품 자동 제어와 별도의 수동 진단이다. v21의 실차 앱 키 인증·암호 상태 조회·같은 키의 새 BLE 연결 조회는 통과했으므로 키 등록을 반복하지 않는다. 새 대상의 초기 등록에만 직접 동의한 **키 추가 요청 · 카드 승인 후 상태 1회 조회**와 실제 키카드 승인이 필요하다. 앱은 Driver 역할의 Android 키만 추가하며 기존 폰키를 제거·교체하지 않는다. **우리 앱 키로 인증·상태 1회 조회**와 **주차 기어 상태 1회 조회**는 등록 요청과 별개이며 개발자 진단 상단의 저장 VIN을 사용한다.
 
-키 생성과 차량 등록, 인증 전 등록 보고와 검증된 암호 상태 수신은 별개다. 중간 인증 `OK` 응답은 기존 기한 안의 대기이며 서명·HMAC 검증을 생략하지 않는다. 키 미등록 응답도 실제 미등록의 인증된 증거가 아닌 보고로 표시한다. 진행 중에는 단계와 취소를 표시하고 VIN·동의·두 시작 버튼은 잠근다. 자기 예약을 다른 진단 충돌로 표시하지 않지만 실제 외부 예약과 정리 실패 차단은 유지한다. 표시되는 잠금·프렁크 값은 응답 시점의 보고이며 주차 P·실제 제어 준비를 추정하지 않는다. VIN·주소·키·원시 응답은 로그에 쓰지 않으며 VIN 입력은 시작·화면 이탈 때 비운다. 전송 뒤 취소/시간 초과와 로컬 연결 종료는 차량 등록 철회를 보장하지 않는다. [방문 결과와 수정 검증](wiki/Device-Validation.md#0180-probe--인증-ack-처리와-실패-근거-분리)
+키 생성과 차량 등록, 인증 전 등록 보고와 검증된 암호 상태 수신은 별개다. 중간 인증 `OK` 응답은 기존 기한 안의 대기이며 서명·HMAC 검증을 생략하지 않는다. 키 미등록 응답도 실제 미등록의 인증된 증거가 아닌 보고로 표시한다. 진행 중에는 단계·취소를 표시하고 공통 VIN 변경·동의·모든 시작 버튼을 잠근다. 자기 예약을 다른 진단 충돌로 표시하지 않지만 실제 외부 예약과 정리 실패 차단은 유지한다. 잠금·프렁크 값과 기어는 지난 응답이며 현재 P·제어 준비를 추정하지 않는다. VIN·주소·키·원시 응답은 로그에 쓰지 않는다. 저장 VIN은 유지하되 편집 입력은 제출·화면 이탈 때 비운다. 전송 뒤 취소/시간 초과와 로컬 연결 종료는 차량 등록 철회를 보장하지 않는다. [현재 실측과 한계](wiki/Device-Validation.md)
 
 
 
-BLE 감지 대조 시험은 **설정 → 개발자 진단 → BLE 연결**에서 기준/개선 방식과 개별 옵션을 선택한 뒤 명시적으로 시작한다. 기준은 CDM BLE 출현당 한 회차이며 기본값이다. 개선은 BT 보조·필터 스캔·제한 재시도를 켜고 `autoConnect`는 여전히 false다. **감지만 · GATT 없음**은 후보만 집계하며 GATT·회차 wake lock을 발급하지 않는다. 옵션은 RAM에서만 선택하고 실행 중 고정한다. SCAN 요청/승인은 시작과 별개이며 권한을 대신 승인하지 않는다.
+BLE 감지 대조 시험은 **설정 → 개발자 진단 → BLE 연결**에서 광고명/등록 주소 기준/등록 주소 개선 방식과 개별 옵션을 선택한 뒤 명시적으로 시작한다. 기본 광고명 모드는 저장 VIN을 사용하며 감지만·스캔 조건을 고정하고 GATT·마이크·UWB는 시작하지 않는다. 등록 주소 기준은 CDM BLE 출현당 한 회차이며, 등록 주소 개선은 BT 보조·필터 스캔·제한 재시도를 켜고 `autoConnect`는 여전히 false다. **감지만 · GATT 없음**은 후보만 집계하며 GATT·회차 wake lock을 발급하지 않는다. 옵션은 RAM에서만 선택하고 실행 중 고정한다. SCAN 요청/승인은 시작과 별개이며 권한을 대신 승인하지 않는다.
 
-개선 후보는 CDM·외부 BT·필터 스캔을 병합한다. 자체 GATT 중/close 후 15초의 BT 신호는 억제한다. CDM 이탈은 30초 유예하고 스캔 증거는 180초 뒤 만료한다. 재시도는 선택된 실패에만 후보당 최대 2회·정리 포함 총 40초이며 이전 close 후 2초와 남은 12초 이상을 요구한다. COMPLETE·BLOCKED·프로필 없음·중지·close 실패는 재시도하지 않는다. 필터 LOW_POWER 스캔은 최대 40초·시작 간격 최소 120초, GATT 중 정지하며 무필터 fallback은 없다.
+개선 후보는 CDM·외부 BT·필터 스캔을 병합한다. 자체 GATT 중/close 후 15초의 BT 신호는 억제한다. CDM 이탈은 30초 유예하고 스캔 증거는 180초 뒤 만료한다. 재시도는 선택된 실패에만 후보당 최대 2회·정리 포함 총 40초이며 이전 close 후 2초와 남은 12초 이상을 요구한다. COMPLETE·BLOCKED·프로필 없음·중지·close 실패는 재시도하지 않는다. v25 필터 스캔은 LOW_POWER·5초 배치·비공개 명시 PendingIntent 전달이며 40초 창 예약·시작 간격 최소 120초·GATT 중 정지를 유지한다. offloaded filtering/batching 미지원은 명시 실패하고 무필터·고빈도 fallback은 없다. 절전 중 Handler 지연으로 실제 등록이 40초보다 길어질 수 있으므로 엄격한 전력 상한이나 절감 효과로 주장하지 않는다.
 
-파일은 기존 `noBackupFilesDir/field-diagnostics/events.jsonl`에 추가하며 새 행은 스키마 v6다. 실행 `trialId`·후보·회차, 최초 수신/처리 지연·거절, GATT 요청 반환/콜백·첫 RX와 본시험/정리 SDK status를 분리한다. root `elapsedMs`는 boot monotonic이고 `wallMs`는 wall clock이며 회차/phase 상대 경과와 구분한다. RX payload·차량 주소·키는 기록하지 않는다. 기존 v1~v5 바이트를 보존하며 2 MiB 한도에서 자동 삭제·회전하지 않는다. 대기 중 wake lock은 없고 GATT 회차만 최대 45초다. 앱·알림 중지와 필수 조건 상실은 종료하며 프로세스 종료·재부팅 뒤 자동 복원하지 않는다.
+파일은 기존 `noBackupFilesDir/field-diagnostics/events.jsonl`에 추가하며 새 행은 스키마 v7다. v7은 광고명 필터 사용 여부를 Boolean으로 추가하며 VIN·광고명/hash를 기록하지 않는다. 실행 `trialId`·후보·회차, 최초 수신/처리 지연·거절, GATT 요청 반환/콜백·첫 RX와 본시험/정리 SDK status를 분리한다. root `elapsedMs`는 boot monotonic이고 `wallMs`는 wall clock이며 회차/phase 상대 경과와 구분한다. RX payload·차량 주소·키는 기록하지 않는다. 기존 v1~v6 바이트를 보존하며 2 MiB 한도에서 자동 삭제·회전하지 않는다. 대기 중 wake lock은 없고 GATT 회차만 최대 45초다. 앱·알림 중지와 필수 조건 상실은 종료하며 프로세스 종료·재부팅 뒤 자동 복원하지 않는다.
+
+v25는 창별 `SCAN_STARTED`/`SCAN_STOPPED`를 기록한다. 등록 성공은 광고 수신이 아니며 CDM 후보와 `SCAN_MATCH`를 구분한다. 무작위 창 token만 `noBackupFilesDir/ble_pending_scan_token`에 동기 저장해 고아 등록을 정리하고 차량 식별자는 넣지 않는다. 동일 PendingIntent의 stopScan 무예외 반환 후 취소하며, 정리 실패는 신규 진단을 차단한다. SDK 반환 자체는 라디오 해제 ACK가 아니므로 단말 OS 상태를 별도로 확인한다.
 
 `0.15` APK·110개 회귀 통과, Lint 오류 0·경고 13개다. 이전 `0.14` S23 실측에서는 실제 Compose 조작·감지만 후보 1/GATT 0·자기 BT 억제·실제 GATT 타임아웃 2회 제한·백그라운드 연결 요청 정리·알림 중지·계측 HOME/화면 OFF 15초 유지를 확인했다. 사용자 수동 SCAN 승인 뒤 실제 스캔 40초 종료/120초 재개·GATT 중 정지·최종 중지 뒤 재개 없음도 확인했다. 합성 입력은 실차 방문이 아니며 광고 match·차량 인증·UWB 거리를 증명하지 않는다. [0.14 실측과 한계](wiki/Device-Validation.md#0140-probe--ble-감지-대조-시험), [0.15 지원 조회 실측](wiki/Device-Validation.md#0150-probe--차량-방문-전-준비)
-현장 분석기는 Python 표준 라이브러리만 사용하는 `tools/analyze_field_log.py`다. `python3 tools/analyze_field_log.py LOG --json`으로 보존 JSONL을 읽기 전용 분석한다(`LOG`는 실제 파일 경로). 기본 출력은 한국어이며 v1~v6·null/SDK 0·최종 회차·본시험/정리를 구분한다. 전화기 단독/합성 실행은 `--exclude-trial UUID`를 반복해 제외한다. `--visits CSV --observer-offset-ms INTEGER`는 실제 관찰자 기록과 측정한 시계 차이만 전달한다. `tools/field_visits.csv`는 헤더만 있는 양식이며, 빈 기록·시계 미확인에서는 비율을 만들지 않는다. [대조 조건·시각·제외 목록](wiki/Device-Validation.md#실행-조건과-관찰자-csv)을 먼저 확인한다. 오류 0은 로그 완전성·물리 감지 성공의 증거가 아니다.
+현장 분석기는 Python 표준 라이브러리만 사용하는 `tools/analyze_field_log.py`다. `python3 tools/analyze_field_log.py LOG --json`으로 보존 JSONL을 읽기 전용 분석한다(`LOG`는 실제 파일 경로). 기본 출력은 한국어이며 v1~v7·null/SDK 0·최종 회차·본시험/정리를 구분한다. 전화기 단독/합성 실행은 `--exclude-trial UUID`를 반복해 제외한다. `--visits CSV --observer-offset-ms INTEGER`는 실제 관찰자 기록과 측정한 시계 차이만 전달한다. `tools/field_visits.csv`는 헤더만 있는 양식이며, 빈 기록·시계 미확인에서는 비율을 만들지 않는다. [대조 조건·시각·제외 목록](wiki/Device-Validation.md#실행-조건과-관찰자-csv)을 먼저 확인한다. 오류 0은 로그 완전성·물리 감지 성공의 증거가 아니다.
 휴대폰 단독 실측은 일반 앱 FGS의 35분 생존·30분 heartbeat, 별도 65초 `Dozing` 유지, Bluetooth OFF 종료/ON 후 자동 복원 없음, 사용자 잠금 해제 후 실제 `USER_STOP`까지 확인했다. **35분 화면 OFF는 입증되지 않았고**, 비충전 deep Doze·배터리 비용·실차 감지율은 미확인이다. 시험 종료 시 서비스/오디오/GATT wake lock 없음·Bluetooth ON, 1,277행 로그와 이전 1,156행 전체 prefix 보존을 확인했다.
 
 
@@ -166,13 +173,15 @@ USB 없이도 코드 작업·빌드·정책 검증을 할 수 있다. 새 APK를
 | [상태 머신과 안전](wiki/State-Machine.md) | 전이·취소·만료·결과 불명과 테스트 계약 |
 | [기술 타당성과 근거](wiki/Feasibility.md) | 문서 확인 사실·가설·실기기 미확인 사항 |
 | [초기 설정 및 실기기 검증](wiki/Device-Validation.md) | 권한, 체크리스트, 배터리와 복구 시험 |
-| [Tesla 연동과 비용](wiki/Tesla-Integration.md) | OAuth, 가상 키, 서명, 상태 확인과 과금 |
+| [Tesla 연동과 비용](wiki/Tesla-Integration.md) | 로컬 BLE 키·등록·인증, 선택 Fleet API/OAuth, UWB와 안전·비용 경계 |
 
 Wiki 원본은 루트의 `wiki/`에서 관리한다. 문서의 커밋·푸시와 별개로 **GitHub Wiki 웹 게시 여부는 따로 관리하며, 아직 게시하지 않았다.**
 
+2026-10-08 [공개 저장소](https://github.com/sim-gyu-bin/Hey-Tesla)를 조회했을 때 기본 브랜치는 README·Wiki만 있는 이전 문서 상태였다. 위 빌드와 기능 설명은 **현재 로컬 소스·단말 설치** 기준이며 공개 APK 배포를 뜻하지 않는다. GitHub Wiki URL도 저장소 홈으로 이동했다. 로컬 빌드에는 공개 릴리스 서명·서버 배포 구성이 없으며, 커밋·푸시·Wiki 게시를 자동 수행하지 않는다.
+
 ## 비용과 현재 제약
 
-Fleet API는 사용량 과금이며 월 할인과 결제수단·한도 조건이 있다. 서버·도메인·선택 음성 SDK 비용은 별도다. 무조건 무료라고 약속하지 않으며 실제 도입 전 승인받는다. 가격과 공식 출처는 [Tesla 연동 문서](wiki/Tesla-Integration.md)에 정리한다.
+우선 경로는 Fleet API를 호출하지 않는 로컬 BLE 등록·인증·제어다. API 호출 과금·결제카드·월 무료 크레딧을 이 경로의 전제로 두지 않는다. 선택 Fleet API를 채택하면 사용량 과금·월 할인·결제수단·한도 조건을 별도로 적용하며, 서버·도메인·선택 음성 SDK 비용은 도입 전 승인받는다. 제품 전체의 무조건 무료나 실차 성공을 약속하지 않는다. 공식 출처와 조건은 [Tesla 연동 문서](wiki/Tesla-Integration.md)에 정리한다.
 
 다음 사항은 아직 검증되지 않았다.
 

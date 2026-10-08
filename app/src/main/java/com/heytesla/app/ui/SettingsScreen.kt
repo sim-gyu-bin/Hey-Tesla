@@ -10,30 +10,25 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.heytesla.app.BleProbeState
 import com.heytesla.app.BleProbeStatus
 import com.heytesla.app.DiagnosticState
+import com.heytesla.app.VehicleVinState
+import com.heytesla.app.VehicleVinStatus
 
 private enum class SettingsDetail { VEHICLE, PERMISSIONS, ASSISTANT }
 
@@ -43,26 +38,13 @@ internal fun SettingsScreen(
     ble: BleProbeState,
     actions: AppActions,
     onOpenDiagnostics: () -> Unit,
+    onOpenKeyRegistration: () -> Unit,
 ) {
-    // VIN은 이 화면의 메모리에만 둔다. 상세를 닫거나 다른 상세로 옮기면 즉시 비운다.
-    var vin by remember { mutableStateOf("") }
     var expanded by remember { mutableStateOf<SettingsDetail?>(null) }
     val appSettings = Settings.ACTION_APPLICATION_DETAILS_SETTINGS
-    val owner = LocalLifecycleOwner.current
-    DisposableEffect(owner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_DESTROY) vin = ""
-        }
-        owner.lifecycle.addObserver(observer)
-        onDispose {
-            owner.lifecycle.removeObserver(observer)
-            vin = ""
-        }
-    }
 
     fun toggle(detail: SettingsDetail) {
         expanded = if (expanded == detail) null else detail
-        vin = ""
     }
 
     Column(
@@ -76,7 +58,7 @@ internal fun SettingsScreen(
         AppSection(title = "초기 준비") {
             AppRow(
                 title = "차량 등록",
-                subtitle = if (state.associationCount == 0) "등록 필요" else "등록됨",
+                subtitle = if (state.associationCount == 0) "시스템 등록 필요" else "시스템 등록됨",
                 symbol = AppSymbol.VEHICLE,
                 expanded = expanded == SettingsDetail.VEHICLE,
                 onClick = { toggle(SettingsDetail.VEHICLE) },
@@ -84,15 +66,22 @@ internal fun SettingsScreen(
             if (expanded == SettingsDetail.VEHICLE) {
                 VehicleDetail(
                     registered = state.associationCount > 0,
-                    vin = vin,
-                    onVinChange = { vin = it.take(17) },
-                    onAssociate = {
-                        val input = vin
-                        vin = ""
-                        actions.associateVehicle(input)
-                    },
+                    vinState = state.vehicleVin,
+                    blocked = actions.vehicleVinChangeBlockedReason(),
+                    onOpenVinRegistration = onOpenDiagnostics,
+                    onAssociate = actions.associateVehicle,
                 )
             }
+            AppRow(
+                title = "차량에 앱 키 등록",
+                subtitle = if (state.teslaKeyCleanupFailed) {
+                    "정리 불명 · 앱 프로세스 재시작 필요"
+                } else {
+                    "시스템 등록과 별개 · 키카드로 직접 승인"
+                },
+                symbol = AppSymbol.VEHICLE,
+                onClick = onOpenKeyRegistration,
+            )
             AppRow(
                 title = "권한",
                 subtitle = permissionMenuSummary(state),
@@ -163,10 +152,15 @@ internal fun SettingsScreen(
 @Composable
 private fun VehicleDetail(
     registered: Boolean,
-    vin: String,
-    onVinChange: (String) -> Unit,
+    vinState: VehicleVinState,
+    blocked: String?,
+    onOpenVinRegistration: () -> Unit,
     onAssociate: () -> Unit,
 ) {
+    Text(vehicleVinConsumerLabel(vinState))
+    TextButton(onClick = onOpenVinRegistration, modifier = Modifier.heightIn(min = 48.dp)) {
+        Text("개발자 진단에서 공통 VIN 등록·변경")
+    }
     if (registered) {
         Text(
             text = "차량 등록됨",
@@ -180,18 +174,9 @@ private fun VehicleDetail(
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    OutlinedTextField(
-        value = vin,
-        onValueChange = onVinChange,
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("차량 VIN · 메모리 전용") },
-        visualTransformation = PasswordVisualTransformation(),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-        singleLine = true,
-    )
     Button(
         onClick = onAssociate,
-        enabled = vin.isNotBlank(),
+        enabled = vinState.status == VehicleVinStatus.READY && blocked == null,
         shape = MaterialTheme.shapes.medium,
         colors = ButtonDefaults.buttonColors(
             containerColor = MaterialTheme.colorScheme.primary,
@@ -201,10 +186,11 @@ private fun VehicleDetail(
         Text("차량 선택 시작")
     }
     Text(
-        text = "VIN은 이 화면의 메모리에만 보관하며, 제출 직전에 비웁니다.",
+        text = "명시적으로 등록한 공통 VIN으로 차량을 선택합니다. 시스템 등록은 앱 키 인증·차량 제어 가능을 뜻하지 않습니다.",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+    blocked?.let { Text(vehicleVinBlockedLabel(it), color = MaterialTheme.colorScheme.error) }
 }
 
 @Composable
