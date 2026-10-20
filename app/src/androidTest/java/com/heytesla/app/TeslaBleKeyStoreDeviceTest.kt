@@ -32,6 +32,16 @@ class TeslaBleKeyStoreDeviceTest {
         assertTrue(MessageDigest.isEqual(first, second))
         assertTrue(store().hasKey())
     }
+    @Test fun existingReadOnlyLoadReusesIdentityAndDoesNotGenerateMissingAlias() {
+        val existing = store().getOrCreate().publicKeyBytes()
+        val loaded = store().getExistingReadOnly().publicKeyBytes()
+        assertTrue(MessageDigest.isEqual(existing, loaded))
+        val missing = TeslaBleKeyStore(context, "heytesla.ble.missing-read-only.${java.util.UUID.randomUUID()}")
+        org.junit.Assert.assertFalse(missing.hasKey())
+        org.junit.Assert.assertThrows(TeslaBleKeyException::class.java) { missing.getExistingReadOnly() }
+        org.junit.Assert.assertFalse(missing.hasKey())
+    }
+
 
     @Test
     fun androidAgreementMatchesVehicleSideAgreement() {

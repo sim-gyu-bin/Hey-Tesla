@@ -2,7 +2,7 @@
 
 잠긴 휴대폰을 주머니에서 꺼내지 않고 차량에 접근해 음성으로 프렁크 개방을 요청하는 **Android 네이티브 앱**의 제품·기술 문서다.
 
-> 현재 소스·S23 설치: `0.25.0-probe` OS 전달 기반 BLE 감지. 기존 foreground service·LOW_POWER·40초/120초 예약을 유지하면서 PendingIntent·5초 배치 수신·고아 등록 정리를 구현했다. 공통 VIN 암호화 재사용과 명시 시작을 유지한다. v24 실차 P 관측·VIN 유지는 확인됐지만 실제 광고명 match·잠금/주머니 재접근·전력 절감·UWB 거리는 미확인이다. [현재 실측과 한계](Device-Validation.md)를 따른다.
+> 현재 소스·기기 설치 `0.38.0-probe`. AltBeacon 감지·FGS는 유지하고 Nordic GATT만 Android 직접 API·직렬 큐로 교체했다. 빌드·JVM268·Python72·S23 검증31개·데이터 보존 설치를 확인했다. 실제 차량의 첫 쓰기·BODY/DRIVE·133 개선 효과는 미검증이다. 이전 v37의 두 접근은 첫 쓰기 `-3`으로 실패했으며 이를 새 버전의 결과로 취급하지 않는다. [v38 검증·실차 절차](Device-Validation.md#0380-probe--직접-gatt-전환), [Tesla REA 조사](Tesla-Integration.md#tesla-앱-rea-추가-조사), [반복 작업 규칙](../AGENTS.md)을 따른다.
 >
 > [UI 개편 기록](UI-Design.md)과 프로젝트 전용 [hey-tesla-ui 스킬](../.omp/skills/hey-tesla-ui/SKILL.md)에 따라 **홈 → 설정 → 개발자 진단** 분리, 차콜 테마, 상태별 주 행동, 진단 탭·입력 선택·접힌 상세를 구현했다. 자동 호출어·실차 제어 기능을 추가한 것은 아니다.
 
@@ -14,7 +14,7 @@
 - 기본 음성 비서로 선택된 `VoiceInteractionService`와 저전력 접근 신호를 조합한 경로를 우선 시험한다. 네이티브 전환이나 기본 비서 지정만으로 Android 제약이 해소된다고 가정하지 않는다.
 - 기본 개발 모드는 mock/dry-run이며, 실제 명령은 프렁크 하나로 제한한다. 실차 동작은 별도 명시적 승인 후에만 시험한다.
 - 차량 키는 앱 전용 AndroidKeyStore에서 생성·재사용하며 BLE 등록 요청을 사용자가 키카드·차량 화면에서 승인한다. 공식 앱 폰키를 가져오거나 API에서 개인키를 발급받지 않는다. Fleet API/OAuth·서버·도메인·결제는 필요성과 승인 확인 후 선택하며 BLE의 선행 조건이 아니다.
-- v21의 실차 앱 키 인증·암호 상태 조회·같은 키의 새 BLE 연결 조회는 통과했다. 다음은 주차 기어 P 읽기, 그다음 차량 감지 개선이다. 이전 BLE 단독 감지 실패를 반영하고 UWB의 세션 키·주소·채널/OOB 교환 및 차량 상대 지원을 별도로 확인한다. 신선한 P·감지·안전 게이트 뒤 승인된 수동 프렁크를 시험하고 이후 음성과 결합한다. [요구사항](Requirements.md#차량-연동-개발-기준)을 따른다.
+- v21 앱 키 인증·암호 조회·재연결, v24 P UI 관측·VIN 유지, v25 장시간 실행 뒤 광고명 감지를 각각 확인했다. 현재는 v38 직접 GATT의 첫 쓰기와 BODY/DRIVE를 실차에서 다시 확인하는 단계다. UWB는 BLE/OOB 합의 뒤 정밀 거리 단계이며 현재 앱은 지원 조회만 제공한다. UWB를 BLE 기능의 필수 조건으로 만들지 않는다. 신선한 P·감지·안전 게이트 뒤 승인된 프렁크를 시험하고 이후 음성과 결합한다. [요구사항](Requirements.md#차량-연동-개발-기준)을 따른다.
 
 ## 문서 지도
 
@@ -26,7 +26,7 @@
 | [상태 머신과 실행 안전](State-Machine.md) | 상태 전이, 취소·만료·중복 방지, 명령 해석, 테스트 계약 |
 | [기술 타당성과 공식 근거](Feasibility.md) | 확인된 사실, 구현 가설, 미확인 사항, 중단 기준 |
 | [초기 설정과 실기기 검증](Device-Validation.md) | 권한, 기기 기록, 무터치 시험, 배터리·복구·오류 체크리스트 |
-| [Tesla 연동과 비용](Tesla-Integration.md) | 로컬 BLE 키·등록·인증, 선택 Fleet API/OAuth, UWB와 안전·비용 경계 |
+| [Tesla 연동과 비용](Tesla-Integration.md) | 로컬 BLE 키·등록·인증, Tesla APK의 BLE·UWB REA 조사·개발 우선순위, 선택 Fleet API/OAuth와 안전·비용 경계 |
 | [18단계 구현 계획과 승인 경계](Implementation-Plan.md) | 승인된 5단계 18항목의 세부 작업, 통과 기준, 의존성, 사용자 승인 경계 |
 
 ## 단계별 개발 순서와 진행 조건
@@ -57,7 +57,7 @@
 
 ## 빌드·실행 상태
 
-현재 APK의 빌드·설치·실기기 검증은 [v25 실행 기록](Device-Validation.md#0250-probe--os-전달-기반-ble-감지), [빌드 절차](../README.md#빌드와-실행), [음성 후보](Native-Architecture.md#호출어와-stt)를 따른다. 공식 SDK의 BLE 등록·프렁크 지원, Android 구현, 실차 결과는 구분한다. 개발 기준 문서 정리는 새 차량 제어 구현이나 실차 성공의 증거가 아니다.
+현재 APK의 빌드·설치·실기기 검증은 [v38 실행·실차 절차](Device-Validation.md#0380-probe--직접-gatt-전환), [빌드 절차](../README.md#빌드와-실행), [음성 후보](Native-Architecture.md#호출어와-stt)를 따른다. 공식 SDK 지원, Android 구현, 실차 결과는 구분한다. REA 정적 코드와 USB smoke는 실차 인증·제어 성공의 증거가 아니다.
 
 ## 문서 운영과 게시 범위
 

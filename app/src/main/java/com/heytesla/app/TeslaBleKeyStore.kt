@@ -57,24 +57,38 @@ internal class TeslaBleKeyStore(context: Context, private val alias: String = KE
                     generateKeyPair()
                 }
             }
-            val entry = store.getEntry(alias, null) as? KeyStore.PrivateKeyEntry
-                ?: throw TeslaBleKeyException()
-            val publicKey = entry.certificate.publicKey as? ECPublicKey
-                ?: throw TeslaBleKeyException()
-            requireP256(publicKey)
-            val info = KeyFactory.getInstance(KeyProperties.KEY_ALGORITHM_EC, PROVIDER)
-                .getKeySpec(entry.privateKey, KeyInfo::class.java)
-            // imported/software-only/다른 용도의 alias는 재사용하지 않는다. fallback도 없다.
-            if (info.origin != KeyProperties.ORIGIN_GENERATED ||
-                info.purposes != KeyProperties.PURPOSE_AGREE_KEY ||
-                info.isUserAuthenticationRequired ||
-                (info.securityLevel != KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT &&
-                    info.securityLevel != KeyProperties.SECURITY_LEVEL_STRONGBOX)
-            ) throw TeslaBleKeyException()
-            AndroidTeslaBleCredential(entry.privateKey, publicKey)
+            loadCredential(store)
         } catch (_: Exception) {
             throw TeslaBleKeyException()
         }
+    }
+    /** 인증 읽기만 사용한다. 잠금 예외여도 기존 alias의 원자 로드만 하며 생성/교체하지 않는다. */
+    fun getExistingReadOnly(): TeslaBleCredential = synchronized(keyLock) {
+        try {
+            val store = loadStore()
+            if (!store.containsAlias(alias)) throw TeslaBleKeyException()
+            loadCredential(store)
+        } catch (_: Exception) {
+            throw TeslaBleKeyException()
+        }
+    }
+
+    private fun loadCredential(store: KeyStore): TeslaBleCredential {
+        val entry = store.getEntry(alias, null) as? KeyStore.PrivateKeyEntry
+            ?: throw TeslaBleKeyException()
+        val publicKey = entry.certificate.publicKey as? ECPublicKey
+            ?: throw TeslaBleKeyException()
+        requireP256(publicKey)
+        val info = KeyFactory.getInstance(KeyProperties.KEY_ALGORITHM_EC, PROVIDER)
+            .getKeySpec(entry.privateKey, KeyInfo::class.java)
+        // imported/software-only/다른 용도의 alias는 재사용하지 않는다. fallback도 없다.
+        if (info.origin != KeyProperties.ORIGIN_GENERATED ||
+            info.purposes != KeyProperties.PURPOSE_AGREE_KEY ||
+            info.isUserAuthenticationRequired ||
+            (info.securityLevel != KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT &&
+                info.securityLevel != KeyProperties.SECURITY_LEVEL_STRONGBOX)
+        ) throw TeslaBleKeyException()
+        return AndroidTeslaBleCredential(entry.privateKey, publicKey)
     }
 
     private fun loadStore(): KeyStore = KeyStore.getInstance(PROVIDER).apply { load(null) }

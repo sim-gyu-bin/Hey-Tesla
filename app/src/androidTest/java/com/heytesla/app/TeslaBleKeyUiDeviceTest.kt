@@ -350,9 +350,12 @@ class TeslaBleKeyUiDeviceTest {
     }
 
     private fun awaitNode(predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo {
+        instrumentation.waitForIdleSync()
+        findNode(predicate)?.let { return it }
         repeat(12) {
             if (findNode { it.isScrollable }?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) != true) return@repeat
             instrumentation.waitForIdleSync()
+            SystemClock.sleep(50)
         }
         val deadline = SystemClock.elapsedRealtime() + 5_000
         while (SystemClock.elapsedRealtime() < deadline) {

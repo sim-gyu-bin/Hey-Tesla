@@ -4,6 +4,182 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class BleFieldTrialPolicyTest {
+    @Test fun authenticatedRetryRequiresCloseCooldownAndNewAdvertisementAndKeepsCandidateBudget() {
+        var time = 1_000L
+        val p = BleFieldTrialPolicy(BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ, { time })
+        assertEquals(1L, p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
+        time = 15_000
+        assertNull(p.tick().cancelAttempt)
+        assertTrue(p.present)
+        assertNull(p.expiresElapsedMs)
+        p.finished(1, BleProbeState(status = BleProbeStatus.FAILED,
+            reason = "GATT_WRITE_FAILED", localClosed = true), true)
+        assertFalse(p.waitingForDeparture)
+        assertEquals(25_000L, p.nextWakeAt)
+        time = 18_499
+        assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
+        time = 18_500
+        repeat(3) { assertNull(p.tick().startAttempt) }
+        for (received in listOf(15_000L, 18_499L, 18_498L, 18_501L, 8_499L)) {
+            assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, received).startAttempt)
+        }
+        assertEquals(2L, p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
+        assertEquals(1L, p.candidateCount)
+        assertEquals(41_000L, p.attemptDeadline)
+        p.finished(1, BleProbeState(status = BleProbeStatus.COMPLETE, localClosed = true), true)
+        assertEquals(2L, p.currentAttempt)
+        time++
+        p.finished(2, BleProbeState(status = BleProbeStatus.FAILED,
+            reason = "GATT_WRITE_FAILED", localClosed = true), true)
+        assertTrue(p.waitingForDeparture)
+        time += 3_500
+        assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
+        assertEquals(2L, p.attemptCount)
+    }
+
+    @Test fun authenticatedTerminalFailuresAndInsufficientBudgetNeverRetrySameCandidate() {
+        for (state in listOf(
+            BleProbeState(status = BleProbeStatus.COMPLETE, localClosed = true),
+            BleProbeState(status = BleProbeStatus.BLOCKED, localClosed = true),
+            BleProbeState(status = BleProbeStatus.CANCELED, localClosed = true),
+            BleProbeState(status = BleProbeStatus.FAILED, reason = "PROTOCOL_RESPONSE_INVALID", localClosed = true),
+            BleProbeState(status = BleProbeStatus.FAILED, reason = "GATT_CONNECT_PERMISSION_DENIED", localClosed = true),
+        )) {
+            var time = 1_000L
+            val p = BleFieldTrialPolicy(BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ, { time })
+            p.signal(BleEvidenceSignal.FILTERED_SCAN, time)
+            p.finished(1, state, true)
+            repeat(9) {
+                time += 1_000
+                assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
+            }
+            assertTrue(p.waitingForDeparture)
+        }
+        var time = 1_000L
+        val p = BleFieldTrialPolicy(BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ, { time })
+        p.signal(BleEvidenceSignal.FILTERED_SCAN, time)
+        time = 39_000
+        p.finished(1, BleProbeState(status = BleProbeStatus.TIMED_OUT,
+            reason = "DEADLINE_EXPIRED", localClosed = true), true)
+        assertTrue(p.waitingForDeparture)
+        time++
+        assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
+    }
+
+    @Test fun authenticatedUnknownCloseAndOffCannotRetry() {
+        for (closed in listOf(false, true)) {
+            var time = 1_000L
+            val p = BleFieldTrialPolicy(BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ, { time })
+            p.signal(BleEvidenceSignal.FILTERED_SCAN, time)
+            if (closed) p.stop()
+            p.finished(1, BleProbeState(status = BleProbeStatus.FAILED,
+                reason = "GATT_CONNECT_FAILED", localClosed = closed), true)
+            time += 4_000
+            assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
+            assertFalse(p.accepting)
+        }
+    }
+    @Test fun authenticatedRamPortTimeoutKeepsLeaseThroughCleanupAndCloseFailureCannotRearm() {
+        val h = Consumer(BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ)
+        h.signal(BleEvidenceSignal.FILTERED_SCAN)
+        h.signal(BleEvidenceSignal.BT_CONNECTED)
+        h.signal(BleEvidenceSignal.CDM_BLE_APPEARED)
+        assertEquals(1, h.ports.size)
+        h.advanceBy(BleGattSession.CONNECT_MS)
+        assertEquals(BleProbeStatus.CLEANING_UP, h.trial.state.status)
+        assertTrue(h.released.isEmpty())
+        assertEquals(1L, h.policy.currentAttempt)
+        h.port.failClose = true
+        h.advanceBy(BleGattSession.CLEANUP_MS)
+        assertEquals(BleProbeStatus.CLEANUP_FAILED, h.trial.state.status)
+        assertTrue(h.released.isEmpty())
+        assertTrue(h.policy.leaseRetained)
+        h.advanceBy(BleFieldTrialPolicy.SIGNAL_FRESH_MS)
+        h.signal(BleEvidenceSignal.FILTERED_SCAN)
+        assertEquals(1, h.ports.size)
+    }
+
+    @Test fun authenticatedApproachStartsOnlyOnceFromFreshScanAndCdmBtCannotExtendOrRearm() {
+        var time = 1_000L
+        val p = BleFieldTrialPolicy(BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ, { time })
+        for (signal in listOf(BleEvidenceSignal.CDM_BLE_APPEARED, BleEvidenceSignal.BT_CONNECTED)) {
+            assertNull(p.signal(signal, time).startAttempt)
+        }
+        assertFalse(p.present)
+        assertEquals(1L, p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
+        p.finished(1, BleProbeState(status = BleProbeStatus.FAILED, localClosed = true), true)
+        repeat(10) {
+            time += 1_000
+            assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
+        }
+        val expiry = p.nextWakeAt
+        assertEquals(21_000L, expiry)
+        time += 1_000
+        p.signal(BleEvidenceSignal.CDM_BLE_APPEARED, time)
+        p.signal(BleEvidenceSignal.BT_CONNECTED, time)
+        assertEquals(expiry, p.nextWakeAt)
+        assertFalse(p.cdmPresent)
+        time = 20_999L
+        assertNull(p.tick().startAttempt)
+        assertTrue(p.present)
+        assertEquals(1L, p.attemptCount)
+        time = checkNotNull(expiry)
+        assertNull(p.tick().startAttempt)
+        assertFalse(p.present)
+        p.signal(BleEvidenceSignal.CDM_BLE_DISAPPEARED, time)
+        assertFalse(p.present)
+        assertEquals(2L, p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
+    }
+
+    @Test fun authenticatedApproachRejectsStaleFutureDuplicateAndReorderedScanAfterExpiry() {
+        var time = 20_000L
+        val p = BleFieldTrialPolicy(BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ, { time })
+        assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, 9_999).startAttempt)
+        assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, time + 1).startAttempt)
+        assertEquals(1L, p.signal(BleEvidenceSignal.FILTERED_SCAN, time - 10_000).startAttempt)
+        p.finished(1, BleProbeState(status = BleProbeStatus.COMPLETE, localClosed = true), true)
+        val expiry = p.nextWakeAt
+        assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, 10_000).startAttempt)
+        assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, 9_999).startAttempt)
+        assertEquals(expiry, p.nextWakeAt)
+        time = checkNotNull(expiry)
+        p.tick()
+        assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, 10_000).startAttempt)
+        assertFalse(p.present)
+        assertEquals(2L, p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
+    }
+
+    @Test fun pauseAcquisitionIsBoundedAndDeadlineCancelDoesNotReturnLeaseOrRetry() {
+        var time = 100L
+        val p = BleFieldTrialPolicy(BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ, { time })
+        val attempt = checkNotNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
+        assertEquals(40_100L, p.attemptDeadline)
+        assertEquals(p.attemptDeadline, p.nextWakeAt)
+        time = 40_100
+        assertEquals(attempt, p.tick().cancelAttempt)
+        assertNull(p.tick().cancelAttempt)
+        assertEquals(attempt, p.currentAttempt)
+        assertTrue(p.localGattActive)
+        p.finished(attempt, BleProbeState(status = BleProbeStatus.TIMED_OUT, localClosed = true), true)
+        assertNull(p.currentAttempt)
+        assertFalse(p.localGattActive)
+        assertNull(p.tick().startAttempt)
+        assertTrue(p.waitingForDeparture)
+    }
+
+    @Test fun authenticatedCleanupFailureLatchesCandidateAndSuppressesEveryLaterConsumerSignal() {
+        val p = BleFieldTrialPolicy(BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ, { 1_000 })
+        val attempt = checkNotNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, 1_000).startAttempt)
+        p.finished(attempt, BleProbeState(status = BleProbeStatus.CLEANUP_FAILED), false)
+        assertTrue(p.leaseRetained)
+        assertFalse(p.accepting)
+        for (signal in BleEvidenceSignal.entries) assertNull(p.signal(signal, 1_000).startAttempt)
+        assertNull(p.tick().startAttempt)
+        p.finished(attempt, BleProbeState(status = BleProbeStatus.COMPLETE, localClosed = true), true)
+        assertEquals(attempt, p.currentAttempt)
+        assertTrue(p.leaseRetained)
+    }
+
     @Test fun advertisedNameDetectionMergesCdmAndScanButNeverSchedulesGattOrBtAssist() {
         val h = Consumer(BleFieldConfig.VEHICLE_NAME_DETECTION)
         h.signal(BleEvidenceSignal.BT_CONNECTED)
@@ -130,7 +306,7 @@ class BleFieldTrialPolicyTest {
     @Test fun filteredScanExpiresAtFreshnessLimitAndOldPositiveSignalsCannotCreateCandidates() {
         val h = Consumer(BleFieldConfig.IMPROVED.copy(observationOnly = true))
         h.signal(BleEvidenceSignal.FILTERED_SCAN)
-        h.advanceBy(179_999)
+        h.advanceBy(59_999)
         assertTrue(h.policy.present)
         h.advanceBy(1)
         assertFalse(h.policy.present)
@@ -191,7 +367,7 @@ class BleFieldTrialPolicyTest {
         h.signal(BleEvidenceSignal.CDM_BLE_DISAPPEARED)
         h.advanceBy(30_000)
         assertTrue(h.policy.present)
-        h.advanceTo(180_000)
+        h.advanceTo(60_000)
         assertFalse(h.policy.present)
         assertEquals(1L, h.policy.candidateCount)
         assertEquals(1L, h.policy.attemptCount)

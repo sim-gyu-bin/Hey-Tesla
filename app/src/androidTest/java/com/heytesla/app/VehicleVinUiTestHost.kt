@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
 import android.os.SystemClock
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.test.platform.app.InstrumentationRegistry
@@ -36,7 +37,12 @@ internal class VehicleVinUiTestHost {
     var foreignBlocked: String? = null
     private val revision = MutableStateFlow(0)
     val state = MutableStateFlow(DiagnosticState())
+    private val supportState = MutableStateFlow(SpeechProbeState())
+    private val supportProbe = SpeechSupportProbe(app, supportState) { event ->
+        android.util.Log.i("VehicleVinUiTestHost", event)
+    }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var contentReady = false
 
     fun launch(): MainActivity {
         activity = instrumentation.startActivitySync(
@@ -52,12 +58,15 @@ internal class VehicleVinUiTestHost {
             // 실제 runtime 저장·복원 결과를 전달하되 권한·association은 UI 소비값만 격리한다.
             scope.launch {
                 runtime.state.collect { snapshot ->
-                    state.value = snapshot.copy(bluetoothPermission = true, bluetoothScanPermission = true, associationCount = 0)
+                    state.value = snapshot.copy(bluetoothPermission = true, bluetoothScanPermission = true,
+                        locationPermission = true, locationEnabled = true, associationCount = 0)
                 }
             }
             installContent()
         }
-        await { runtime.state.value.vehicleVin.status != VehicleVinStatus.LOADING && state.value.vehicleVin == runtime.state.value.vehicleVin }
+        await { contentReady && runtime.state.value.vehicleVin.status != VehicleVinStatus.LOADING &&
+            state.value.vehicleVin == runtime.state.value.vehicleVin }
+        instrumentation.waitForIdleSync()
         return activity
     }
 
@@ -72,24 +81,30 @@ internal class VehicleVinUiTestHost {
             associateVehicle = { associateCount++; forbidden() },
             setApproachEnabled = { forbidden() }, setAutomaticMicrophone = { forbidden() }, observeVehicle = { forbidden() },
             refresh = { invalidate() }, startMicrophone = { forbidden() }, stopSession = { forbidden() },
-            querySupport = { forbidden() }, cancelSupport = { forbidden() }, queryUwbSupport = { forbidden() },
+            querySupport = supportProbe::query, cancelSupport = { supportProbe.cancel() }, queryUwbSupport = { forbidden() },
             cancelUwbSupport = { forbidden() }, startTrial = { forbidden() }, finishCapture = { forbidden() }, cancelTrial = { forbidden() },
             startBle = { startCount++; forbidden() },
             cancelBle = { runtime.stopBleFieldTrial() }, bleFieldBlockedReason = { foreignBlocked },
             startTeslaKey = { _, _ -> startCount++; forbidden() },
             cancelTeslaKey = { runtime.cancelTeslaKey() },
             teslaKeyBlockedReason = { foreignBlocked ?: runtime.teslaKeyBlockedReason() },
-            leaveDiagnostics = { runtime.cancelTeslaKey("DIAGNOSTICS_HIDDEN") },
+            leaveDiagnostics = {
+                supportProbe.cancel()
+                runtime.cancelTeslaKey("DIAGNOSTICS_HIDDEN")
+            },
         )
 
     fun installContent() {
+        contentReady = false
         activity.setContent {
             val snapshot by state.collectAsState()
             val key by runtime.teslaKeyState.collectAsState()
             val ble by runtime.bleProbeState.collectAsState()
+            val support by supportState.collectAsState()
             val marker by revision.collectAsState()
             val actions = androidx.compose.runtime.remember(snapshot, key, ble, marker) { createActions() }
-            HeyTeslaApp(snapshot, SpeechProbeState(), SpeechTrialState(), ble, UwbProbeState(), key, actions)
+            HeyTeslaApp(snapshot, support, SpeechTrialState(), ble, UwbProbeState(), key, actions)
+            SideEffect { contentReady = true }
         }
     }
 
@@ -115,6 +130,7 @@ internal class VehicleVinUiTestHost {
             if (!::runtime.isInitialized || !::activity.isInitialized) return@runOnMainSync
             runtime.activityVisible = false
             runtime.cancelTeslaKey("TEST_HOST_CLOSED")
+            supportProbe.cancel()
             scope.cancel()
             activity.finish()
         }

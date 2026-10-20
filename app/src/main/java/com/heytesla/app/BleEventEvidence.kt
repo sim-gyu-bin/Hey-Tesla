@@ -4,6 +4,7 @@ enum class BleEvidenceKind {
     PRESENCE_RECEIVED, PRESENCE_DISPATCHED, PRESENCE_REJECTED,
     CANDIDATE_SIGNAL, CANDIDATE_MERGED, CANDIDATE_EXPIRED, SIGNAL_SHADOWED, SIGNAL_SELF_SUPPRESSED,
     SCAN_STARTED, SCAN_STOPPED, SCAN_FAILED, SCAN_MATCH,
+    SCAN_TIMER_DELAYED, SCAN_RECOVERY_SCHEDULED, SCAN_RECOVERY_EXHAUSTED,
     RETRY_SCHEDULED, RETRY_SUPPRESSED,
     GATT_REQUEST, GATT_CALLBACK, GATT_CALLBACK_IGNORED, GATT_FIRST_RX,
 }
@@ -44,6 +45,11 @@ data class BleEventEvidence(
     val localGattActive: Boolean? = null,
     val localGattRecent: Boolean? = null,
     val scanRunning: Boolean? = null,
+    val scheduledElapsedMs: Long? = null,
+    val timerDelayMs: Long? = null,
+    val retryCount: Int? = null,
+    val interactive: Boolean? = null,
+    val deviceLocked: Boolean? = null,
 ) {
     internal fun encode(): String = buildString(384) {
         append("{\"kind\":").append(FieldJson.quote(kind.name))
@@ -64,6 +70,11 @@ data class BleEventEvidence(
         field("localGattActive", localGattActive?.toString())
         field("localGattRecent", localGattRecent?.toString())
         field("scanRunning", scanRunning?.toString())
+        field("scheduledElapsedMs", scheduledElapsedMs?.coerceAtLeast(0)?.toString())
+        field("timerDelayMs", timerDelayMs?.coerceAtLeast(0)?.toString())
+        field("retryCount", retryCount?.coerceAtLeast(0)?.toString())
+        field("interactive", interactive?.toString())
+        field("deviceLocked", deviceLocked?.toString())
         append('}')
     }
 }

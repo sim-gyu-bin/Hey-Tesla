@@ -24,10 +24,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -52,6 +54,10 @@ import com.heytesla.app.DiagnosticCommandResult
 import com.heytesla.app.FieldLogFailureCode
 import com.heytesla.app.FieldLogHealth
 import com.heytesla.app.FieldLogStatus
+import com.heytesla.app.FrunkVoiceStep
+import com.heytesla.app.FrunkVoicePolicy
+import com.heytesla.app.frunkVoiceReasonLabel
+import com.heytesla.app.progressStep
 import com.heytesla.app.SpeechCommandDecision
 import com.heytesla.app.SpeechProbeState
 import com.heytesla.app.SpeechProbeStatus
@@ -68,6 +74,7 @@ import com.heytesla.app.TeslaGear
 import com.heytesla.app.TeslaKeyOutcome
 import com.heytesla.app.TeslaKeyProbeState
 import com.heytesla.app.TeslaKeyStage
+import com.heytesla.app.TeslaApproachReadSummary
 import com.heytesla.app.VehicleVinStatus
 import java.util.Locale
 
@@ -167,7 +174,7 @@ internal fun DiagnosticsScreen(
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
             )
         }
-        if (teslaKey.active || state.bleFieldBusy() || ble.active || trial.active || state.sessionId != null || support.status == SpeechProbeStatus.RUNNING || uwb.status == UwbProbeStatus.RUNNING) {
+        if (!state.frunkVoice.active && (teslaKey.active || state.bleFieldBusy() || ble.active || trial.active || state.sessionId != null || support.status == SpeechProbeStatus.RUNNING || uwb.status == UwbProbeStatus.RUNNING)) {
             FlowRow(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -707,11 +714,14 @@ private fun BleDiagnostics(
     actions: AppActions,
 ) {
     var detailsExpanded by remember { mutableStateOf(false) }
+    var candidateDetailsExpanded by remember { mutableStateOf(false) }
     val optionsLocked = state.bleFieldBusy() || ble.active || state.bleDiagnosticActive
     val config = if (optionsLocked) state.bleFieldConfig else selectedConfig
     val nameDetection = config.scanFilterMode == BleScanFilterMode.VEHICLE_NAME
+    val authenticatedRead = config.authenticatedReadOnly
     val canChangeOptions = !optionsLocked && !nameDetection
     val needsScanPermission = config.supplementalScan && !state.bluetoothScanPermission
+    val needsLocationPermission = config.supplementalScan && !state.locationPermission
     val blocked = when {
         support.reason == "DESTROY_FAILED" || support.reason == "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED" -> "진단 자원 정리 실패 · 앱 프로세스 재시작 필요"
         else -> actions.bleFieldBlockedReason(config)
@@ -726,13 +736,25 @@ private fun BleDiagnostics(
     }
     AppSection("차량 BLE 감지 · 비교 진단") {
         DetailRow("서비스 상태", bleFieldStatus(state, ble))
+        DetailRow("광고명 감지 활성화 설정", if (state.bleDetectionEnabled) "켜짐 · 조건 충족 시 복원 시도" else "꺼짐")
+        DetailRow("AltBeacon 스캔 주기", "화면 사용: 1.1초 / 공백 0초 · 백그라운드: 30초 / 공백 0초")
+        state.previousExitReason?.let { DetailRow("이전 프로세스 종료 이유", "Android 코드 $it · 시각 ${state.previousExitWallMs}") }
         DetailRow(
             "당회차 단계",
-            if (state.bleFieldConfig.observationOnly) "감지만 모드 · GATT 수행 안 함" else bleStatusLabel(ble.status),
+            when {
+                state.bleFieldConfig.authenticatedReadOnly ->
+                    state.teslaApproachRead?.stage?.let { stage ->
+                        TeslaKeyStage.entries.firstOrNull { it.name == stage }?.let(::teslaKeyStageLabel) ?: stage
+                    } ?: "접근 후 인증·상태 조회 대기"
+                state.bleFieldConfig.observationOnly -> "감지만 모드 · GATT 수행 안 함"
+                else -> bleStatusLabel(ble.status)
+            },
         )
         DetailRow("광고·근접 신호 후보 수", state.bleFieldCandidateCount.toString())
         DetailRow("보조 스캔 상태", when {
             state.bleFieldScanFailure != null -> "실패 · 코드 ${state.bleFieldScanFailure}"
+            state.bleFieldTrialActive && state.bleFieldScanRecoveryAt != null ->
+                "OS 오류 · 코드 ${state.bleFieldScanRecoveryError} · 제한복구 대기"
             state.bleFieldScanRunning -> "OS 필터 스캔 등록됨 · 광고 수신과 별개"
             !state.bleFieldConfig.supplementalScan -> "최근 실행 조건에서 사용 안 함"
             state.bleFieldTrialStopping -> "중지·정리 중"
@@ -741,6 +763,37 @@ private fun BleDiagnostics(
         })
         DetailRow("시도 / 종료 회차", "${state.bleFieldTrialAttemptCount} / ${state.bleFieldTrialCompletedCount}")
         DetailRow("로그 건강 · 상한", bleFieldLogStatus(state))
+        DetailRow("다음 접근 조회", when {
+            state.bleFieldTrialStopping -> "중지·정리 중"
+            state.teslaKeyCleanupFailed || state.teslaApproachRead?.stage == "CLEANUP_FAILED" -> "정리 확인 필요 · 조회 차단"
+            !state.bleFieldTrialActive -> "시험 꺼짐"
+            !state.bleFieldConfig.authenticatedReadOnly -> "인증 조회 모드 아님"
+            !state.bluetooth || !state.bluetoothPermission || !state.bluetoothScanPermission ||
+                !state.locationPermission || !state.locationEnabled || !state.observationServiceRunning -> "감지 조건 확인 필요"
+            state.bleCandidateDiagnostics == null -> "관측 준비 중"
+            state.bleCandidateDiagnostics.readInFlight -> "읽기 조회 중"
+            !state.bleFieldScanRunning || state.bleFieldScanFailure != null -> "감지 제한 · 스캔 상태 확인"
+            state.bleCandidateDiagnostics.candidatePresent -> "이탈 판정 대기 · 같은 후보"
+            else -> "새 접근 대기 · 다음 유효 광고에서 조회"
+        })
+        state.bleCandidateDiagnostics?.let { candidate ->
+            AppDisclosure(
+                expanded = candidateDetailsExpanded,
+                expandLabel = "광고·재접근 상세 보기",
+                collapseLabel = "광고·재접근 상세 접기",
+                onToggle = { candidateDetailsExpanded = !candidateDetailsExpanded },
+            ) {
+                DetailRow("관측 갱신 · elapsed ms", candidate.observedElapsedMs.toString())
+                DetailRow("후보 / 유지", "${candidate.candidate ?: "없음"} / ${candidate.candidatePresent}")
+                DetailRow("유효 광고 누계 / 현재 후보", "${candidate.acceptedAdvertisementCount} / ${candidate.candidateAdvertisementCount}")
+                DetailRow("같은 후보 조회 억제 광고 수", candidate.suppressedReadCount.toString())
+                DetailRow("마지막 광고 원 수신 · elapsed ms", candidate.lastAcceptedReceivedElapsedMs?.toString() ?: "미수신")
+                DetailRow("마지막 광고 앱 처리 · elapsed ms", candidate.lastAcceptedDeliveredElapsedMs?.toString() ?: "미처리")
+                DetailRow("후보 만료 예정 · elapsed ms", candidate.expiresElapsedMs?.toString() ?: "현재 예정 없음")
+                DetailRow("마지막 만료 / 지연 · ms", "${candidate.lastExpiredElapsedMs ?: "미관측"} / ${candidate.lastExpiryDelayMs ?: "미관측"}")
+                Text("유효 광고가 계속 들어오면 이탈 판정을 기다립니다. 누계는 무선 전체 패킷 수·방문 수·차량 인증의 증거가 아닙니다.", style = MaterialTheme.typography.bodySmall)
+            }
+        }
         state.bleFieldTrialStopReason?.let { DetailRow("시험 중지 코드", it) }
         Text("후보는 광고·근접 신호이며 거리·차량 인증·주차 P·제어 성공을 뜻하지 않습니다. 후보 수는 실제 방문수가 아니며 종료 회차에는 실패·취소도 포함됩니다.", style = MaterialTheme.typography.bodySmall)
         if (ble.status == BleProbeStatus.CLEANUP_FAILED) {
@@ -751,6 +804,7 @@ private fun BleDiagnostics(
             )
         }
         ble.reason?.let { DetailRow("막힘·진단 코드", it) }
+        state.teslaApproachRead?.let { TeslaApproachReadResult(it) }
         Text(
             if (optionsLocked) "실행 중 고정 조건" else "시작 전 비교 조건 · RAM 전용",
             style = MaterialTheme.typography.titleMedium,
@@ -760,6 +814,13 @@ private fun BleDiagnostics(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            FilterChip(
+                selected = config == BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ,
+                onClick = { selectConfig(BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ) },
+                enabled = !optionsLocked,
+                modifier = Modifier.heightIn(min = 48.dp).semantics { role = Role.RadioButton },
+                label = { Text("접근 시 인증·상태 조회") },
+            )
             FilterChip(
                 selected = config == BleFieldConfig.VEHICLE_NAME_DETECTION,
                 onClick = { selectConfig(BleFieldConfig.VEHICLE_NAME_DETECTION) },
@@ -826,7 +887,8 @@ private fun BleDiagnostics(
         Text(
             when {
                 optionsLocked -> "표시는 런타임 실행 스냅샷입니다. 중지·정리가 끝난 뒤 다음 실행 조건을 바꿀 수 있습니다."
-                nameDetection -> "기본은 차량 광고명 감지입니다. VIN에서 계산한 공식 광고명을 필터로 사용하며 GATT·TX·마이크·UWB를 시작하지 않습니다. BT 보조·재시도·백그라운드 연결도 꺼짐으로 고정합니다."
+                authenticatedRead -> "신선한 차량 광고에서 기존 앱 키로 잠금·프렁크 상태와 기어를 조회합니다. GATT 동안 스캔을 정지하고 정리 후 재개합니다. 키 등록·차량 제어·마이크·UWB는 실행하지 않습니다."
+                nameDetection -> "AltBeacon 차량 광고명 감지입니다. GATT·TX·마이크·UWB는 시작하지 않습니다. 화면 사용·백그라운드 모두 스캔 사이 대기 공백을 두지 않습니다. 배터리 소비는 실측 전입니다."
                 config == BleFieldConfig.BASELINE -> "기준 비교: 등록 주소의 CDM 출현 신호를 사용합니다. 선택만으로 시작하지 않습니다."
                 config == BleFieldConfig.IMPROVED -> "개선 비교: 등록 주소의 BT 보조·보조 스캔·제한 재시도. 감지만·백그라운드 연결은 별도 선택입니다."
                 else -> "등록 주소의 사용자 지정 비교 조건입니다. 백그라운드 연결은 별도 옵션이며 기본은 꺼짐입니다."
@@ -835,6 +897,9 @@ private fun BleDiagnostics(
         )
         if (config.observationOnly) {
             Text("감지만 모드는 근접 신호·후보만 관찰합니다. GATT 연결·구독 시험을 수행하지 않습니다.", style = MaterialTheme.typography.bodyMedium)
+        }
+        if (authenticatedRead) {
+            Text("초기 연결 오류 133은 2초 뒤 기존 GATT로 한 번 재접속합니다. 조회가 일시 통신 오류로 끝나면 정리 후 3.5초·새 광고 조건에서 후보당 최대 2회·총 40초 안에서 재조회합니다. 성공·보안 오류·정리 불명은 자동 반복하지 않습니다. 60초 이탈 대기는 없고 광고 부재 기준은 10초입니다. 프로세스 복원 뒤 인증 조회는 직접 다시 시작해야 합니다.", style = MaterialTheme.typography.bodyMedium)
         }
         Text(vehicleVinConsumerLabel(state.vehicleVin))
         if (nameDetection) {
@@ -846,6 +911,8 @@ private fun BleDiagnostics(
         }
         if (config.supplementalScan) {
             DetailRow("Bluetooth 스캔 권한", if (state.bluetoothScanPermission) "허용됨" else "허용 필요 · 사용자가 직접 승인")
+            DetailRow("위치 권한 · AltBeacon FGS", if (state.locationPermission) "정확한 위치 권한 허용됨" else "허용 필요")
+            DetailRow("시스템 위치 서비스", if (state.locationEnabled) "켜짐" else "꺼짐 · 감지 시작 불가")
         }
         if (needsScanPermission && !optionsLocked) {
             Button(
@@ -854,6 +921,12 @@ private fun BleDiagnostics(
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
             ) { Text("Bluetooth 스캔 권한 요청") }
             Text("시스템 권한 창에서 직접 승인하세요. 허용 후에도 자동 시작하지 않으며 시험 시작을 다시 눌러야 합니다.", style = MaterialTheme.typography.bodySmall)
+        } else if (needsLocationPermission && !optionsLocked) {
+            Button(
+                onClick = { actions.requestPermission(Manifest.permission.ACCESS_FINE_LOCATION) },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+            ) { Text("AltBeacon 위치 권한 요청") }
+            Text("라이브러리의 위치 유형 포그라운드 서비스에 필요합니다. GPS 위치는 수집하지 않습니다.", style = MaterialTheme.typography.bodySmall)
         } else {
             Button(
                 onClick = ::submit,
@@ -861,21 +934,27 @@ private fun BleDiagnostics(
                 shape = MaterialTheme.shapes.medium,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
             ) { Text(when {
+                authenticatedRead -> "접근 인증·상태 조회 시작"
                 nameDetection -> "차량 광고명 감지 시작"
                 config.observationOnly -> "감지만 모드 시작"
                 else -> "선택한 조건으로 BLE 시험 시작"
             }) }
         }
-        if (state.bleFieldBusy()) {
+        if (state.bleFieldBusy() || state.bleDetectionEnabled) {
             OutlinedButton(
                 onClick = actions.cancelBle,
                 enabled = !state.bleFieldTrialStopping,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-            ) { Text("주말 BLE 시험 중지") }
+            ) { Text("감지 끄기 · 자동 복원 해제") }
         }
         if (!optionsLocked) blocked?.let {
             Text(
-                if (it == "BLUETOOTH_SCAN_PERMISSION_REQUIRED") "보조 스캔에는 Bluetooth 스캔 권한이 필요합니다." else it,
+                when (it) {
+                    "BLUETOOTH_SCAN_PERMISSION_REQUIRED" -> "AltBeacon 감지에는 Bluetooth 스캔 권한이 필요합니다."
+                    "BLE_LOCATION_PERMISSION_REQUIRED" -> "AltBeacon 포그라운드 서비스에는 정확한 위치 권한이 필요합니다."
+                    "BLE_LOCATION_DISABLED" -> "시스템 위치 서비스를 켠 뒤 다시 시작하세요."
+                    else -> it
+                },
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
@@ -883,7 +962,7 @@ private fun BleDiagnostics(
             Text("시작하면 진행 중 지원 조회를 취소합니다.", style = MaterialTheme.typography.bodySmall)
         }
         Text(
-            "화면 이탈·HOME·잠금에도 명시적으로 시작한 서비스 감지는 유지됩니다. 마이크는 사용하지 않습니다. 감지만 모드가 아닌 등록 주소 비교에서만 읽기 전용 GATT 진단을 수행합니다.",
+            "화면 이탈·HOME·잠금에도 명시적으로 시작한 서비스는 유지됩니다. 마이크는 사용하지 않습니다. 접근 인증 모드는 기존 키로 읽기만 수행하며, 감지만 모드는 GATT를 시작하지 않습니다.",
             style = MaterialTheme.typography.bodySmall,
         )
         Text(
@@ -897,15 +976,18 @@ private fun BleDiagnostics(
             onToggle = { detailsExpanded = !detailsExpanded },
         ) {
             Text("최근 실행 스냅샷", style = MaterialTheme.typography.titleSmall)
-            Text("LOW_POWER 필터 스캔 결과를 OS가 PendingIntent로 전달합니다. 5초 배치 수신 · 40초 실행 / 최소 120초 시작 간격을 유지하며 절전 중 타이머 실행은 늦어질 수 있습니다. 광고 미관측은 차량 부재를 뜻하지 않으며 전력 절감·UWB 거리 측정은 확인하지 않았습니다.", style = MaterialTheme.typography.bodySmall)
+            Text("AltBeacon FGS가 정확한 OS 필터와 원 광고 수신 시각을 사용합니다. 화면 사용·백그라운드 대기는 모두 0초입니다. 등록 유지가 실제 수신·배터리 효율을 보장하지 않으며 광고 미관측만으로 재시작하지 않습니다.", style = MaterialTheme.typography.bodySmall)
             DetailRow("스캔 필터", if (state.bleFieldConfig.scanFilterMode == BleScanFilterMode.VEHICLE_NAME) "차량 광고명 · 식별값 표시 안 함" else "등록 주소 · 식별값 표시 안 함")
             DetailRow("observationOnly", bleOptionLabel(state.bleFieldConfig.observationOnly))
+            DetailRow("authenticatedReadOnly", bleOptionLabel(state.bleFieldConfig.authenticatedReadOnly))
             DetailRow("btAssist", bleOptionLabel(state.bleFieldConfig.btAssist))
             DetailRow("supplementalScan", bleOptionLabel(state.bleFieldConfig.supplementalScan))
             DetailRow("retryEnabled", bleOptionLabel(state.bleFieldConfig.retryEnabled))
             DetailRow("backgroundConnect", bleOptionLabel(state.bleFieldConfig.backgroundConnect))
             if (state.bleFieldConfig.observationOnly) {
                 Text("감지만 모드 · GATT 연결·정리·RX 증거는 생성하지 않습니다.", style = MaterialTheme.typography.bodyMedium)
+            } else if (state.bleFieldConfig.authenticatedReadOnly) {
+                Text("인증·조회·연결 정리는 위 접근 조회 결과를 확인하세요. BODY·DRIVE를 각각 새 인증 세션으로 조회하며 지난 P를 현재 제어 허가로 사용하지 않습니다.", style = MaterialTheme.typography.bodyMedium)
             } else {
                 DetailRow("GATT 연결 콜백", bleEvidence(ble.connected))
                 DetailRow("Tesla 서비스", bleEvidence(ble.serviceFound))
@@ -929,6 +1011,106 @@ private fun BleDiagnostics(
             }
         }
     }
+}
+
+@Composable
+private fun TeslaApproachReadResult(result: TeslaApproachReadSummary) {
+    var expanded by remember { mutableStateOf(false) }
+    val complete = result.stage == "COMPLETE" && result.bodyVerified && result.driveVerified &&
+        result.localClosed && !result.leaseRetained
+    val failed = when (result.stage) {
+        "BLOCKED", "CANCELED", "TIMED_OUT", "FAILED", "CLEANUP_FAILED" -> true
+        else -> false
+    }
+    val terminal = failed || result.stage == "COMPLETE"
+    val partial = terminal && (result.bodyVerified || result.driveVerified)
+    val cleanupIncomplete = result.stage == "COMPLETE" && !result.localClosed
+    Text("최근 접근 조회 · 지난 관측", style = MaterialTheme.typography.titleMedium)
+    DetailRow("조회 결과", when {
+        result.leaseRetained || result.stage == "CLEANUP_FAILED" -> "정리 불명 · 예약 유지 · 재시작 필요"
+        complete -> "BODY·DRIVE 응답 검증 · 로컬 연결 종료"
+        cleanupIncomplete -> "조회 응답 수신 · 로컬 정리 미확인"
+        partial -> "부분 조회 · 전체 완료 아님"
+        terminal -> "조회 미완료"
+        else -> TeslaKeyStage.entries.firstOrNull { it.name == result.stage }?.let(::teslaKeyStageLabel) ?: result.stage
+    })
+    DetailRow("잠금 · 지난 조회", if (result.bodyVerified) teslaLockStateLabel(result.lockState) else "미확인")
+    DetailRow("프렁크 · 지난 조회", if (result.bodyVerified) teslaFrontTrunkStateLabel(result.frontTrunkState) else "미확인")
+    DetailRow("기어 · 지난 조회", when {
+        !result.driveVerified -> "미확인"
+        result.gear == "P" -> "P 관측 · 현재 P 보장 아님"
+        result.gear == "R" || result.gear == "N" || result.gear == "D" -> "${result.gear} · P 아님"
+        else -> "UNKNOWN · 확인 안 됨"
+    })
+    AppDisclosure(
+        expanded = expanded,
+        expandLabel = "조회·시각 상세 보기",
+        collapseLabel = "조회·시각 상세 접기",
+        onToggle = { expanded = !expanded },
+    ) {
+        DetailRow("후보 / 회차", "${result.candidate ?: "미발급"} / ${result.attempt ?: "미발급"}")
+        DetailRow("BODY 응답", if (result.bodyVerified) "검증된 읽기 응답" else "검증된 응답 없음")
+        DetailRow("DRIVE 응답", if (result.driveVerified) "검증된 읽기 응답" else "검증된 응답 없음")
+        DetailRow("BODY 수신 · elapsed ms", result.bodyReceivedElapsedMs?.toString() ?: "미수신")
+        DetailRow("DRIVE 수신 · elapsed ms", result.driveReceivedElapsedMs?.toString() ?: "미수신")
+        DetailRow("절전 상태 · 검증된 BODY의 지난 관측", when {
+            !result.bodyVerified || result.bodyReceivedElapsedMs == null -> "미관측"
+            result.bodyVehicleSleepStatus == 0 -> "UNKNOWN · 상태 불명"
+            result.bodyVehicleSleepStatus == 1 -> "AWAKE 보고 · 현재 DRIVE 준비 보장 아님"
+            result.bodyVehicleSleepStatus == 2 -> "ASLEEP 보고"
+            result.bodyVehicleSleepStatus != null && result.bodyVehicleSleepStatus >= 0 -> "미지원 코드 ${result.bodyVehicleSleepStatus}"
+            else -> "미관측"
+        })
+        DetailRow("DRIVE 원본 · epoch ms", result.driveSourceWallMs?.toString() ?: "응답에 없음")
+        DetailRow("GATT 실행 계층", if (result.gattTransport == "NATIVE") "Android 직접 GATT" else "미관측")
+        DetailRow("연결 준비 대기 시작 / 완료 · elapsed ms", "${result.connectSettleStartedElapsedMs ?: "미관측"} / ${result.connectSettleCompletedElapsedMs ?: "미완료"}")
+        DetailRow("native 연결 status / state", "${result.gattConnectionStatus ?: "미관측"} / ${result.gattConnectionState ?: "미관측"}")
+        DetailRow("native 연결 콜백 시각 · elapsed ms", result.gattConnectionElapsedMs?.toString() ?: "미수신")
+        DetailRow("광고 connectable · 원 관측", result.advertisementConnectable?.toString() ?: "미관측")
+        DetailRow("native connect 발급 / 반환 · elapsed ms", "${result.gattConnectIssuedElapsedMs ?: "미발급"} / ${result.gattConnectReturnedElapsedMs ?: "미관측"}")
+        DetailRow("handle 생성 autoConnect · 원 관측", result.gattAutoConnect?.toString() ?: "미관측")
+        DetailRow("native connect 동작 · 원 관측", result.gattConnectAction?.takeIf { it == "CREATE" || it == "RECONNECT" } ?: "미관측")
+        DetailRow("native connect SDK 접수 · 원 관측", when (result.gattConnectAccepted) {
+            true -> "접수 관측 · 연결·인증 성공 아님"
+            false -> "거절 관측"
+            null -> "미관측"
+        })
+        DetailRow("connect 발급 시 광고 age · ms", result.advertisementAgeAtConnectMs?.toString() ?: "미관측")
+        DetailRow("CCCD SDK 반환 / native 완료", "${result.gattDescriptorRequestStatus ?: "미관측"} / ${result.gattDescriptorCallbackStatus ?: "미수신"}")
+        DetailRow("native CCCD 콜백 시각 · elapsed ms", result.gattDescriptorCallbackElapsedMs?.toString() ?: "미수신")
+        DetailRow("쓰기 예약 대기", result.writeDispatchQueued?.toString() ?: "미관측")
+        DetailRow("native 쓰기 발급 시각 · elapsed ms", result.writeDispatchElapsedMs?.toString() ?: "미실행")
+        DetailRow("쓰기 로컬 순번", result.writeSequence?.toString() ?: "미관측")
+        DetailRow("201 미접수 후 추가 발급", result.writeBusyRetryCount?.takeIf { it in 0..2 }?.toString() ?: "미관측")
+        DetailRow("SDK 쓰기 반환", result.writeRequestStatus?.toString() ?: "미관측")
+        DetailRow("쓰기 예외 분류", result.writeException ?: "없음 / 미관측")
+        DetailRow("native 쓰기 완료 status", result.writeCallbackStatus?.toString() ?: "콜백 미수신")
+        DetailRow("쓰기 방식 / TX 속성", "${result.writeType ?: "미관측"} / ${result.txProperties ?: "미관측"}")
+        DetailRow("MTU / 프레임 / 조각 / offset", "${result.negotiatedMtu ?: "미관측"} / ${result.frameLength ?: "미관측"} / ${result.chunkLength ?: "미관측"} / ${result.frameOffset ?: "미관측"}")
+        DetailRow("호출 전 쓰기 / 구독 pending", "${result.writePendingBefore ?: "미관측"} / ${result.descriptorPendingBefore ?: "미관측"}")
+        DetailRow("쓰기 요청 / 반환 · elapsed ms", "${result.writeRequestedElapsedMs ?: "미관측"} / ${result.writeReturnedElapsedMs ?: "미관측"}")
+        DetailRow("native 쓰기 콜백 시각 · elapsed ms", result.writeCallbackElapsedMs?.toString() ?: "미수신")
+        Text("SDK 반환 0은 요청 접수이며 차량 인증 성공이 아닙니다. 로컬 순번은 native 요청 ID가 아닙니다.", style = MaterialTheme.typography.bodySmall)
+        DetailRow("회차 누적 RX / 프레임 / 처리", "${result.rxNotificationCount ?: "미관측"} / ${result.rxFrameCount ?: "미관측"} / ${result.rxProtocolCount ?: "미관측"}")
+        DetailRow("마지막 native RX / 프레임 · elapsed ms", "${result.lastRxElapsedMs ?: "미수신"} / ${result.lastFrameElapsedMs ?: "미수신"}")
+        DetailRow("마지막 응답 처리 대상", result.responseQuery ?: "미처리")
+        DetailRow("마지막 응답 처리 분류", result.responseDisposition ?: "미관측")
+        DetailRow("기대 / 수신 도메인", "${result.responseExpectedDomain ?: "미관측"} / ${result.responseFromDomain ?: "없음 / 미관측"}")
+        DetailRow("출발 대상 존재 / 형식", "${result.responseFromPresent ?: "미관측"} / ${result.responseFromKind ?: "미관측"}")
+        DetailRow("수신 대상 존재 / 형식", "${result.responseToPresent ?: "미관측"} / ${result.responseToKind ?: "미관측"}")
+        DetailRow("응답 payload 종류", result.responsePayloadKind ?: "미관측")
+        DetailRow("도메인 제외 세부", result.responseDomainMismatchReason ?: "없음 / 미관측")
+        DetailRow("요청 UUID 존재 / 현재 요청 일치", "${result.responseRequestUuidPresent ?: "미관측"} / ${result.responseRequestUuidMatches ?: "미관측"}")
+        DetailRow("수신 to / 현재 route 일치", result.responseToRouteMatches?.toString() ?: "미관측")
+        DetailRow("응답 상태 필드 존재", result.responseSignedStatusPresent?.toString() ?: "미관측")
+        DetailRow("응답 fault / operation 원 코드", "${result.responseSignedMessageFault ?: "미관측"} / ${result.responseOperationStatus ?: "미관측"}")
+        Text("BODY의 정상 ACK는 상태 응답 대기이며 조회 완료가 아닙니다. 상태 코드와 헤더는 비인증 관측입니다.", style = MaterialTheme.typography.bodySmall)
+        Text("수신 header는 인증 전 관측입니다. 도메인 일치나 메시지 종류만으로 차량 인증·조회 성공을 뜻하지 않습니다.", style = MaterialTheme.typography.bodySmall)
+        Text("수신 횟수는 회차 누적값입니다. 마지막 BODY 응답 분류는 DRIVE 응답을 받았다는 뜻이 아닙니다.", style = MaterialTheme.typography.bodySmall)
+        DetailRow("로컬 연결 정리", if (result.localClosed && !result.leaseRetained) "로컬 자원 해제 · 예약 반환" else "반환 미확인")
+    }
+    result.reason?.let { DetailRow("조회·정리 코드", it) }
+    Text("광고·인증 응답·지난 상태는 현재 P·제어 허가·프렁크 물리 완료를 보장하지 않습니다. 차량 명령은 전송하지 않습니다.", color = AppWarningColor, style = MaterialTheme.typography.bodySmall)
 }
 
 private fun bleOptionLabel(enabled: Boolean) = if (enabled) "켜짐" else "꺼짐"
@@ -980,6 +1162,39 @@ private fun SpeechDiagnostics(
     var conditionsExpanded by remember { mutableStateOf(false) }
     val queryBlocked = supportQueryBlockedReason(state, support, trial)
     val canQuery = support.status != SpeechProbeStatus.RUNNING && queryBlocked == null
+    val owner = LocalLifecycleOwner.current
+    val currentActions by rememberUpdatedState(actions)
+    var resumed by remember(owner) { mutableStateOf(false) }
+    var autoQueryAttempted by remember(owner) { mutableStateOf(false) }
+    DisposableEffect(owner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> resumed = true
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_DESTROY -> {
+                    resumed = false
+                    autoQueryAttempted = false
+                    currentActions.cancelSupport()
+                }
+                else -> Unit
+            }
+        }
+        owner.lifecycle.addObserver(observer)
+        resumed = owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        onDispose {
+            owner.lifecycle.removeObserver(observer)
+            currentActions.cancelSupport()
+        }
+    }
+    // 화면 표시·기존 진단 종료 뒤 한 번만 메타데이터를 조회한다. 실패/취소는 자동 반복하지 않는다.
+    LaunchedEffect(resumed, queryBlocked, state.microphonePermission) {
+        if (resumed && queryBlocked == null &&
+            (!autoQueryAttempted ||
+                (support.status == SpeechProbeStatus.PERMISSION_REQUIRED && state.microphonePermission))
+        ) {
+            autoQueryAttempted = true
+            currentActions.querySupport()
+        }
+    }
     val canStartTrial = support.status == SpeechProbeStatus.COMPLETE &&
         support.metadata?.koKrInstalled == true &&
         state.microphonePermission &&
@@ -991,14 +1206,20 @@ private fun SpeechDiagnostics(
         state.sessionId == null &&
         !state.enabled
 
+    actions.frunkVoice?.let { FrunkVoiceDiagnostics(state, support, it) }
+
     AppSection("온디바이스 한국어 지원") {
         DetailRow("현재 상태", support.status.label)
-        TextButton(
-            onClick = if (support.status == SpeechProbeStatus.RUNNING) actions.cancelSupport else actions.querySupport,
-            enabled = support.status == SpeechProbeStatus.RUNNING || canQuery,
-            modifier = Modifier.heightIn(min = 48.dp),
-        ) {
-            Text(if (support.status == SpeechProbeStatus.RUNNING) "지원 조회 취소" else "지원 확인")
+        Text("화면 진입 시 자동 확인합니다. 마이크 녹음이나 차량 제어는 시작하지 않습니다.",
+            style = MaterialTheme.typography.bodySmall)
+        if (support.status != SpeechProbeStatus.COMPLETE || support.metadata?.koKrInstalled != true) {
+            TextButton(
+                onClick = if (support.status == SpeechProbeStatus.RUNNING) actions.cancelSupport else actions.querySupport,
+                enabled = support.status == SpeechProbeStatus.RUNNING || canQuery,
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) {
+                Text(if (support.status == SpeechProbeStatus.RUNNING) "지원 조회 취소" else "지원 조회 다시 시도")
+            }
         }
         queryBlocked?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         AppDisclosure(
@@ -1011,7 +1232,7 @@ private fun SpeechDiagnostics(
         }
     }
 
-    AppSection("입력 선택") {
+    AppSection("차량 미전송 · dry-run 입력 선택") {
         FlowRow(
             modifier = Modifier.selectableGroup(),
             maxItemsInEachRow = 2,
@@ -1054,6 +1275,129 @@ private fun SpeechDiagnostics(
     }
 
     SpeechResult(trial, state.speechDiagnosticActive)
+}
+
+/** 명시적 실차 capability가 있는 생산 화면에만 노출한다. 동의는 저장·복원하지 않는다. */
+@Composable
+internal fun FrunkVoiceDiagnostics(
+    state: DiagnosticState,
+    support: SpeechProbeState,
+    actions: FrunkVoiceActions,
+) {
+    val voice = state.frunkVoice
+    var consent by remember(state.vehicleVin, state.associationCount) { mutableStateOf(false) }
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(owner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> actions.visible(true)
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_DESTROY -> {
+                    consent = false
+                    actions.visible(false)
+                }
+                else -> Unit
+            }
+        }
+        owner.lifecycle.addObserver(observer)
+        actions.visible(owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+        onDispose {
+            consent = false
+            actions.visible(false)
+            owner.lifecycle.removeObserver(observer)
+        }
+    }
+    val blocked = actions.blockedReason()
+    val modelReady = support.status == SpeechProbeStatus.COMPLETE && support.metadata?.koKrInstalled == true
+    val idle = !voice.active && !state.speechDiagnosticActive && !state.teslaKeyDiagnosticActive
+    val canStart = idle && blocked == null && modelReady && state.frunkVoiceVisible
+
+    AppSection("실제 차량 동작 · 프렁크 1회") {
+        Text("화면을 켜고 잠금을 해제한 실차 시험입니다. 주변 사람·재생 음성도 인식될 수 있으므로 차량 앞 안전을 직접 확인하세요.",
+            color = AppWarningColor)
+        Text("“헤이 테슬라 프렁크 열어줘”가 인식되면 추가 확인 없이 안전 조건을 검사해 개방을 요청합니다.")
+        val step = voice.progressStep()
+        Text(step.label, style = MaterialTheme.typography.titleMedium,
+            color = when (step) {
+                FrunkVoiceStep.CLEANUP_FAILED, FrunkVoiceStep.FAILED,
+                FrunkVoiceStep.UNKNOWN, FrunkVoiceStep.TIMED_OUT -> MaterialTheme.colorScheme.error
+                FrunkVoiceStep.COMPLETE -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.onSurface
+            },
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+        // 종료·실패 시에도 어디까지 실제로 갔는지 남긴다. 완료는 아래 관측 행이 근거를 보여준다.
+        if (!voice.active && step != FrunkVoiceStep.COMPLETE && step != FrunkVoiceStep.IDLE &&
+            step != FrunkVoiceStep.COMMAND && step != FrunkVoiceStep.CLEANING
+        ) {
+            voice.lastCoreStep?.let { DetailRow("마지막 실제 단계", it.label) }
+        }
+        val reason = voice.reason ?: when (step) {
+            // 관측 사유가 비어도 결과 불명을 성공으로 보이게 두지 않는다.
+            FrunkVoiceStep.UNKNOWN -> "열림 보고를 확인하지 못했습니다."
+            FrunkVoiceStep.CLEANUP_FAILED -> "정리 결과를 확인하지 못했습니다."
+            else -> null
+        }
+        reason?.let {
+            Text(frunkVoiceReasonLabel(it), style = MaterialTheme.typography.bodySmall, color = AppWarningColor)
+        }
+        if (voice.coreStarted) {
+            DetailRow("명령 요청", if (voice.frunkCommandRequested) "core에서 실차 요청 접수" else "요청 접수 미관측")
+            DetailRow("신선한 P", if (voice.frunkFreshParkVerified) "이번 회차에서 확인됨" else "확인 전 · 전송 근거 아님")
+            DetailRow("요청 전송", when {
+                voice.frunkCommandSent -> "SDK 접수됨 · 차량 응답 대기"
+                voice.active -> "전송 미관측 · 같은 회차의 신선한 P·권한 검사 중"
+                voice.reason == "FRUNK_VOICE_CORE_UNKNOWN" -> "결과 불명 · 전송되었을 수 있음"
+                else -> "전송 미관측"
+            })
+            DetailRow("차량 응답", if (voice.frunkCommandAcknowledged) "명령 ACK 확인됨" else "ACK 미확인")
+            DetailRow("열림 관측", if (voice.frunkOpenObserved) "후속 BODY에서 프렁크 열림 보고" else "미관측")
+            Text("SDK 접수·차량 ACK·BODY 열림 보고·물리 개방은 서로 다른 단계입니다. 열림 보고만으로 물리 개방 완료를 표시하지 않습니다.",
+                style = MaterialTheme.typography.bodySmall)
+            if (voice.cancelRequested || voice.frunkCommandSent) {
+                Text("전송 후 취소는 차량 동작을 철회하지 못할 수 있습니다. 결과 불명에서는 자동 재전송하지 않습니다.", color = AppWarningColor)
+            }
+        }
+        if (voice.active) {
+            OutlinedButton(onClick = actions.cancel, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text(if (voice.frunkCommandSent) "결과 관측 중단 · 전송 철회 불가" else "진행 취소")
+            }
+        } else {
+            androidx.compose.foundation.layout.Row(
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Checkbox(checked = consent, onCheckedChange = { consent = it }, enabled = canStart,
+                    modifier = Modifier.semantics { contentDescription = "실제 차량 프렁크 1회 시험과 마스킹 인식 로그 저장 동의" })
+                Text("프렁크 1회 시험과 마스킹한 인식 문장·신뢰도·차단 사유의 앱 내부 순환 저장에 동의합니다. 시험 어휘 밖 내용은 가리며 녹음은 저장하지 않습니다.", modifier = Modifier.weight(1f))
+            }
+            Button(
+                onClick = {
+                    if (canStart && consent) {
+                        consent = false
+                        actions.start(true)
+                    }
+                },
+                enabled = canStart && consent,
+                shape = MaterialTheme.shapes.medium,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+            ) { Text("실차 음성 시험 시작") }
+            if (!canStart) {
+                Text(when {
+                    blocked == "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED" -> "정리 불명 · 새 시험 차단 · 앱 프로세스 재시작 필요"
+                    !idle -> "기존 진단·정리가 끝난 뒤 시작하세요."
+                    blocked == "DETECTION_MUST_STOP" -> "감지는 제품 음성과 미통합입니다. 기존 중지 버튼으로 감지를 정상 중지한 뒤 시작하세요."
+                    blocked != null -> teslaKeyBlockedLabel(blocked)
+                    !modelReady -> "온디바이스 한국어 지원 확인을 먼저 완료하세요."
+                    else -> "음성 진단 화면을 표시한 상태에서만 시작할 수 있습니다."
+                }, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        Text("명령 10초 · 신뢰도 ${FrunkVoicePolicy.MIN_CONFIDENCE} 이상(보수적 시험값). 누락·0.0·부분·분할 결과는 차단합니다.",
+            style = MaterialTheme.typography.bodySmall)
+        Text("명령이 인정된 시점부터 최대 40초의 기존 작업 기한이 적용됩니다. 남은 시간을 채우는 가짜 진행 없이 실제 관측된 단계만 표시합니다.",
+            style = MaterialTheme.typography.bodySmall)
+        voice.commandConfidence?.let { DetailRow("명령 신뢰도", it.toString()) }
+        Text("HOME·잠금·화면 이탈은 신규 전송을 취소합니다. 화면 복귀·회전으로 다시 시작하지 않습니다. 잠금·주머니 동작은 미지원입니다.",
+            style = MaterialTheme.typography.bodySmall)
+    }
 }
 
 @Composable
@@ -1315,15 +1659,15 @@ private fun EventDiagnostics(state: DiagnosticState, actions: AppActions) {
         DetailRow("유실 기록", "${status.dropped}건")
         DetailRow("거부 코드", "${status.rejected}건")
         Text(
-            "한 줄에 사건 하나인 JSONL입니다. 앱 프로세스가 끝나도 파일은 남고 새 실행은 기존 내용 뒤에 이어 씁니다. 자동 삭제·회전·덮어쓰기는 하지 않으며 상한에 도달하면 기록만 멈추고 위 상태가 이번 프로세스 동안 계속 표시됩니다.",
+            "새 JSONL 로그는 전체 용량 상한 안에서 순환 보관합니다. 로그 실패는 감지를 중지시키지 않으며 기록 유실 상태를 별도로 표시합니다. 이전 events.jsonl은 변경하지 않습니다.",
             style = MaterialTheme.typography.bodySmall,
         )
         Text(
-            "사용자가 USB 디버깅을 승인한 PC에서 회수하세요. 일반 USB 파일 전송에는 보이지 않습니다. 디버그 빌드 명령: adb -d exec-out run-as com.heytesla.app cat no_backup/field-diagnostics/events.jsonl. 마지막 줄이 잘렸으면 손상 행으로 구분하고 원본은 보존하세요.",
+            "USB 디버깅을 승인한 PC에서 새 로그를 회수하세요: adb -d exec-out run-as com.heytesla.app cat no_backup/field-diagnostics/events-v2.jsonl. 회전 파일도 함께 회수하세요. 손상 행과 기록 유실을 구분하세요.",
             style = MaterialTheme.typography.bodySmall,
         )
         Text(
-            "자동 삭제와 삭제 버튼은 없습니다. 정리가 필요하면 파일을 회수한 뒤 별도 승인하여 처리하세요. 앱 데이터 초기화는 등록도 지우므로 사용하지 마세요.",
+            "새 로그만 용량 제한에 따라 자동 정리합니다. 이전 주말 로그·차량 키·설정은 보존합니다. 앱 데이터 초기화는 사용하지 마세요.",
             style = MaterialTheme.typography.bodySmall,
         )
     }

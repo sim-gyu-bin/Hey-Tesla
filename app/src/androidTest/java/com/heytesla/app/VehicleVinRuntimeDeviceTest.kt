@@ -25,6 +25,54 @@ class VehicleVinRuntimeDeviceTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val app get() = instrumentation.targetContext.applicationContext as DiagnosticApp
 
+    @Test fun authenticatedReadCannotBeRestoredAndUnarmedOwnerCannotAcquireBackgroundLease() {
+        val fixture = fixture("approach-owner")
+        fixture.store.save(FIRST)
+        val runtime = restoredRuntime(fixture)
+        onMain {
+            runtime.activityVisible = false
+            runtime.startBleFieldTrial(BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ, restoring = true)
+            assertFalse(runtime.state.value.bleDetectionEnabled)
+            assertNoWork(runtime)
+            val device = requireNotNull(app.getSystemService(android.bluetooth.BluetoothManager::class.java).adapter)
+                .getRemoteDevice("AA:BB:CC:DD:EE:03")
+            val owner = ObservationService()
+            val request = TeslaApproachReadRequest(owner, "unarmed-test-request", 1, 1, 1, device,
+                runtime.now() * 1_000_000, runtime.now() + 40_000)
+            assertNull(runtime.acquireTeslaApproachRead(request))
+            var finished: TeslaApproachReadSummary? = null
+            runtime.startTeslaApproachRead(request) { summary, retained ->
+                assertFalse(retained)
+                finished = summary
+            }
+            assertEquals("BLOCKED", finished?.stage)
+            assertEquals("FIELD_OWNER_NOT_ARMED", finished?.reason)
+            assertTrue(finished?.localClosed == true)
+            assertFalse(finished?.bodyVerified == true)
+            assertFalse(finished?.driveVerified == true)
+            assertNull(request.device)
+            assertFalse(fixture.keyStore.hasKey())
+            assertNoWork(runtime)
+        }
+    }
+
+    @Test fun manualReadAndRegistrationRemainVisibleOnlyAndCannotCreateAKeyWhenHidden() {
+        val fixture = fixture("manual-hidden")
+        fixture.store.save(FIRST)
+        val runtime = restoredRuntime(fixture)
+        onMain {
+            runtime.activityVisible = false
+            for (register in listOf(false, true)) {
+                runtime.startTeslaKey(register)
+                assertEquals(TeslaKeyStage.BLOCKED, runtime.teslaKeyState.value.stage)
+                assertEquals("VISIBLE_UI_REQUIRED", runtime.teslaKeyState.value.reason)
+                assertFalse(runtime.teslaKeyState.value.transmissionAttempted)
+                assertNoWork(runtime)
+            }
+            assertFalse(fixture.keyStore.hasKey())
+        }
+    }
+
     @Test fun loadingAndMissingVinBlockEveryVehicleStartBeforeAnyLeaseOrService() {
         val fixture = fixture("missing")
         lateinit var runtime: DiagnosticRuntime
@@ -300,7 +348,8 @@ class VehicleVinRuntimeDeviceTest {
             assertEquals(reason, runtime.teslaKeyState.value.reason)
             assertFalse(runtime.teslaKeyState.value.transmissionAttempted)
         }
-        for (config in listOf(BleFieldConfig.BASELINE, BleFieldConfig.IMPROVED, BleFieldConfig.VEHICLE_NAME_DETECTION)) {
+        for (config in listOf(BleFieldConfig.BASELINE, BleFieldConfig.IMPROVED, BleFieldConfig.VEHICLE_NAME_DETECTION,
+            BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ)) {
             runtime.startBleFieldTrial(config)
             assertEquals(reason, runtime.state.value.bleFieldTrialStopReason)
             assertNoWork(runtime)

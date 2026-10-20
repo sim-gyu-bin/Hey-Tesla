@@ -1,323 +1,299 @@
 package com.heytesla.app
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
-import android.content.Context
 import android.os.Looper
-import java.util.UUID
 
-/** 주소 또는 공식 광고명 하나만 RAM에서 exact 필터링한다. 무필터 스캔·식별자 기록은 없다. */
-@SuppressLint("MissingPermission")
+/** AltBeacon만 scan을 등록한다. 앱은 RAM 대상·정책 전달·세대 게이트만 소유한다. */
 internal class BleSupplementalScanner(
-    context: Context,
+    context: android.content.Context,
     private val runtime: DiagnosticRuntime,
-    private val onMatch: (Long, Int, Boolean) -> Unit,
+    private val onMatch: (ScanResult, Boolean) -> Unit,
     private val onRunning: (Boolean) -> Unit,
     private val onFailure: (String, Int) -> Unit,
-    private val transport: BleScanTransport = AndroidBleScanTransport(context, runtime),
-    private val now: () -> Long = runtime::now,
+    foregroundNotification: android.app.Notification? = null,
+    private val transport: BleScanTransport = AndroidBleScanTransport(context, runtime, foregroundNotification),
     private val scanPermission: () -> Boolean = { runtime.granted(Manifest.permission.BLUETOOTH_SCAN) },
     private val evidence: (BleEventEvidence) -> Unit = runtime::recordBleEvidence,
-    private val postDelayed: (Runnable, Long) -> Unit = { task, delay -> runtime.handler.postDelayed(task, delay); Unit },
-    private val removeCallbacks: (Runnable) -> Unit = { runtime.handler.removeCallbacks(it) },
+    private val now: () -> Long = runtime::now,
 ) {
     private var target: BleScanTarget? = null
-    private var filters: List<ScanFilter>? = null
-    private val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
-        .setReportDelay(REPORT_DELAY_MS).build()
     private var enabled = false
     private var paused = false
     private var generation = 0L
     private var session: BleScanSession? = null
-    private var windowStarted = false
-    private var timer: Runnable? = null
-    private var nextStartAt = 0L
-    private var windowEndsAt = 0L
-    private var hasMatch = false
+    private var started = false
+    private var stopping = false
     private var cleanupFailed = false
+    private var hasMatch = false
+    private var pausedAction: (() -> Unit)? = null
+    private var pendingFailure: Pair<String, Int>? = null
+    private var stoppedAction: ((Boolean) -> Unit)? = null
+    private var authenticatedReadOnly = false
+    private var lastReadTimestampNanos = Long.MIN_VALUE
 
-    val running: Boolean get() = session != null && windowStarted && !cleanupFailed
+    val running: Boolean get() = started && !paused && !stopping && !cleanupFailed
 
     fun start(associationId: Int, config: BleFieldConfig, advertisedName: String? = null) {
         mainThread()
-        if (enabled || cleanupFailed) return
-        config.safetyBlockedReason()?.let {
-            fail(it, FAILURE_UNAVAILABLE, BleEvidenceGate.UNAVAILABLE)
-            return
-        }
+        if (enabled || stopping || cleanupFailed) return
+        config.safetyBlockedReason()?.let { fail(it, FAILURE_UNAVAILABLE); return }
         try {
-            // 새 사용자 시작 전에만 고아 등록을 정리한다. 등록 복원/자동 scan 시작은 없다.
             transport.prepare()
-            if (!scanPermission()) {
-                fail("BLE_SCAN_PERMISSION_REQUIRED", FAILURE_PERMISSION, BleEvidenceGate.PERMISSION)
-                return
-            }
-            val selectedTarget = when (config.scanFilterMode) {
+            if (!scanPermission()) { fail("BLE_SCAN_PERMISSION_REQUIRED", FAILURE_PERMISSION); return }
+            val selected = when (config.scanFilterMode) {
                 BleScanFilterMode.ASSOCIATION_ADDRESS -> {
                     val address = transport.associationAddress(associationId)
-                    if (address == null) {
-                        fail("BLE_SCAN_ADDRESS_UNAVAILABLE", FAILURE_ADDRESS, BleEvidenceGate.UNAVAILABLE)
-                        return
-                    }
+                    if (address == null) { fail("BLE_SCAN_ADDRESS_UNAVAILABLE", FAILURE_ADDRESS); return }
                     BleScanTarget.associationAddress(address)
                 }
                 BleScanFilterMode.VEHICLE_NAME -> {
-                    if (advertisedName == null) {
-                        fail("BLE_SCAN_NAME_UNAVAILABLE", FAILURE_NAME, BleEvidenceGate.UNAVAILABLE)
-                        return
-                    }
+                    if (advertisedName == null) { fail("BLE_SCAN_NAME_UNAVAILABLE", FAILURE_NAME); return }
                     BleScanTarget.vehicleName(advertisedName)
                 }
             }
-            target = selectedTarget
-            filters = listOf(checkNotNull(selectedTarget.configure(
-                address = { ScanFilter.Builder().setDeviceAddress(it).build() },
-                name = { ScanFilter.Builder().setDeviceName(it).build() },
-            )))
+            target = selected
             enabled = true
-            nextStartAt = now()
+            paused = false
+            authenticatedReadOnly = config.authenticatedReadOnly
+            lastReadTimestampNanos = Long.MIN_VALUE
             hasMatch = false
-            cycle()
+            begin()
         } catch (_: BleScanCleanupException) {
             cleanupFailed = true
-            fail("BLE_SCAN_ORPHAN_CLEANUP_FAILED", FAILURE_STOP, BleEvidenceGate.UNAVAILABLE)
+            fail("BLE_SCAN_ORPHAN_CLEANUP_FAILED", FAILURE_STOP)
         } catch (_: SecurityException) {
-            fail("BLE_SCAN_PERMISSION_REQUIRED", FAILURE_PERMISSION, BleEvidenceGate.PERMISSION)
+            fail("BLE_SCAN_PERMISSION_REQUIRED", FAILURE_PERMISSION)
         } catch (_: Exception) {
-            fail("BLE_SCAN_UNAVAILABLE", FAILURE_UNAVAILABLE, BleEvidenceGate.UNAVAILABLE)
+            fail("BLE_SCAN_START_FAILED", FAILURE_START)
         }
     }
 
-    fun pause() {
+    /** GATT는 실제 native stop 무예외 반환 뒤에만 발급한다. 실패 시 action을 호출하지 않는다. */
+    fun pause(onPaused: () -> Unit = {}) {
         mainThread()
-        if (!enabled || paused) return
+        if (!enabled || cleanupFailed) return
         paused = true
-        clearTimer()
-        stopCurrent()
+        pausedAction = onPaused
+        if (!stopping) stopCurrent(release = false)
     }
 
     fun resume() {
         mainThread()
-        if (!enabled || !paused) return
+        if (!enabled || !paused || cleanupFailed) return
         paused = false
-        cycle()
+        pausedAction = null
+        if (!stopping) begin()
     }
 
-    fun stop() {
+    fun stop(onStopped: ((Boolean) -> Unit)? = null) {
         mainThread()
+        if (onStopped != null) stoppedAction = onStopped
         enabled = false
         paused = false
-        clearTimer()
+        pausedAction = null
         target?.clear()
         target = null
-        stopCurrent()
-        filters = null
+        if (cleanupFailed) {
+            val action = stoppedAction
+            stoppedAction = null
+            action?.invoke(false)
+            return
+        }
+        if (!stopping && !cleanupFailed) stopCurrent(release = true)
     }
 
-    private fun cycle() {
-        if (!enabled || paused || cleanupFailed) return
-        if (now() < nextStartAt) {
-            schedule(nextStartAt)
-            return
-        }
-        if (!scanPermission()) {
-            fail("BLE_SCAN_PERMISSION_REVOKED", FAILURE_PERMISSION, BleEvidenceGate.PERMISSION)
-            return
-        }
+    /** 기간 1100/30000ms·대기 0은 AltBeacon 소유다. 앱은 권한·FGS 준비만 확인한다. */
+    fun reconcile() {
+        mainThread()
+        if (!enabled || paused || stopping || cleanupFailed) return
+        if (!scanPermission()) { fail("BLE_SCAN_PERMISSION_REVOKED", FAILURE_PERMISSION); return }
+        transport.blockedReason()?.let { fail(it, FAILURE_UNAVAILABLE) }
+    }
+
+    private fun begin() {
+        if (!enabled || paused || stopping || cleanupFailed || session != null) return
+        if (!scanPermission()) { fail("BLE_SCAN_PERMISSION_REVOKED", FAILURE_PERMISSION); return }
+        transport.blockedReason()?.let { fail(it, FAILURE_UNAVAILABLE); return }
+        val selected = target ?: return
+        val filters = selected.configure(
+            address = { listOf(ScanFilter.Builder().setDeviceAddress(it).build()) },
+            name = { listOf(ScanFilter.Builder().setDeviceName(it).build()) },
+        ) ?: return
+        val identity = ++generation
+        lateinit var delivery: BleScanSession
+        delivery = BleScanSession(
+            onStarted = { dispatch {
+                if (!owns(identity, delivery) || started) return@dispatch
+                started = true
+                evidence(BleEventEvidence(BleEvidenceKind.SCAN_STARTED, scanRunning = true))
+                if (owns(identity, delivery)) onRunning(true)
+            } },
+            onResult = { result -> dispatch { consumeResult(identity, delivery, selected, result) } },
+            onResults = { results -> dispatch { consume(identity, delivery, selected, results) } },
+            onFailure = { reason, code -> dispatch { if (owns(identity, delivery)) fail(reason, code) } },
+        )
+        session = delivery
+        try { transport.start(filters, delivery) }
+        catch (_: SecurityException) { if (owns(identity, delivery)) fail("BLE_SCAN_PERMISSION_REVOKED", FAILURE_PERMISSION) }
+        catch (_: Exception) { if (owns(identity, delivery)) fail("BLE_SCAN_START_FAILED", FAILURE_START) }
+    }
+
+    private fun owns(identity: Long, source: BleScanSession): Boolean =
+        enabled && !paused && !stopping && !cleanupFailed && generation == identity && session === source
+
+    private fun consume(identity: Long, source: BleScanSession, selected: BleScanTarget, results: List<ScanResult>) {
+        if (!owns(identity, source)) return
+        if (!scanPermission()) { fail("BLE_SCAN_PERMISSION_REVOKED", FAILURE_PERMISSION); return }
         try {
-            if (!transport.isEnabled()) {
-                fail("BLE_SCAN_UNAVAILABLE", FAILURE_UNAVAILABLE, BleEvidenceGate.UNAVAILABLE)
-                return
-            }
-            if (!transport.supportsOffloadedFiltering()) {
-                fail("BLE_SCAN_NO_OFFLOADED_FILTER", FAILURE_OFFLOADED_FILTER, BleEvidenceGate.NO_OFFLOADED_FILTER)
-                return
-            }
-            if (!transport.supportsOffloadedBatching()) {
-                fail("BLE_SCAN_NO_OFFLOADED_BATCH", FAILURE_OFFLOADED_BATCH, BleEvidenceGate.UNAVAILABLE)
-                return
-            }
-            val selectedFilters = filters
-            val selectedTarget = target
-            if (selectedTarget == null || selectedFilters == null) {
-                fail("BLE_SCAN_UNAVAILABLE", FAILURE_UNAVAILABLE, BleEvidenceGate.UNAVAILABLE)
-                return
-            }
-            val identity = ++generation
-            lateinit var delivery: BleScanSession
-            delivery = BleScanSession(
-                onResults = { results, error -> dispatch { consume(identity, delivery, selectedTarget, results, error) } },
-                onMalformed = { dispatch {
-                    if (accepts(identity, delivery)) {
-                        fail("BLE_SCAN_DELIVERY_FAILED", FAILURE_DELIVERY, BleEvidenceGate.UNAVAILABLE)
-                    }
-                } },
-            )
-            session = delivery
-            val startedAt = now()
-            nextStartAt = startedAt + PERIOD_MS
-            windowEndsAt = startedAt + WINDOW_MS
-            val error = transport.start(selectedFilters, settings, delivery)
-            if (error != 0) {
-                fail("BLE_SCAN_PENDING_INTENT_FAILED", error, BleEvidenceGate.UNAVAILABLE)
-                return
-            }
-            if (!enabled || paused || session !== delivery) return
-            windowStarted = true
-            evidence(BleEventEvidence(BleEvidenceKind.SCAN_STARTED, scanRunning = true))
-            // evidence는 로그 실패 등으로 동기 stop/rearm을 유발할 수 있다.
-            if (!accepts(identity, delivery)) return
-            onRunning(true)
-            if (enabled && !paused && session === delivery) schedule(windowEndsAt)
-        } catch (_: SecurityException) {
-            fail("BLE_SCAN_PERMISSION_REVOKED", FAILURE_PERMISSION, BleEvidenceGate.PERMISSION)
-        } catch (_: Exception) {
-            fail("BLE_SCAN_START_FAILED", FAILURE_START, BleEvidenceGate.UNAVAILABLE)
-        }
-    }
-
-    private fun accepts(identity: Long, source: BleScanSession): Boolean {
-        if (!enabled || paused || cleanupFailed || !windowStarted ||
-            generation != identity || session !== source
-        ) return false
-        if (now() < windowEndsAt) return true
-        // 절전 뒤 늦은 delivery가 깨어나면 현재 만료 등록을 즉시 닫는다.
-        // 새 scan은 여기서 시작하지 않고 기존 nextStartAt 기준 Main timer에만 맡긴다.
-        if (stopCurrent() && enabled && !paused) schedule(nextStartAt)
-        return false
-    }
-
-    private fun consume(identity: Long, source: BleScanSession, selectedTarget: BleScanTarget,
-        results: List<ScanResult>, error: Int,
-    ) {
-        // 늦은 배치/오류는 타깃 접근·권한 검사·정책 전달보다 먼저 폐기한다.
-        if (!accepts(identity, source)) return
-        if (!scanPermission()) {
-            fail("BLE_SCAN_PERMISSION_REVOKED", FAILURE_PERMISSION, BleEvidenceGate.PERMISSION)
-            return
-        }
-        if (error != 0) {
-            fail("BLE_SCAN_PENDING_INTENT_FAILED", error, BleEvidenceGate.UNAVAILABLE)
-            return
-        }
-        try {
-            val latest = selectedTarget.latestMatching(
-                results,
-                address = { if (selectedTarget.mode == BleScanFilterMode.ASSOCIATION_ADDRESS) it.device.address else null },
-                advertisedName = { if (selectedTarget.mode == BleScanFilterMode.VEHICLE_NAME) it.scanRecord?.deviceName else null },
+            val latest = selected.latestMatching(results,
+                address = { if (selected.mode == BleScanFilterMode.ASSOCIATION_ADDRESS) it.device.address else null },
+                advertisedName = { if (selected.mode == BleScanFilterMode.VEHICLE_NAME) it.scanRecord?.deviceName else null },
                 timestamp = { it.timestampNanos },
             ) ?: return
-            val firstMatch = !hasMatch
-            hasMatch = true
-            onMatch(latest.timestampNanos / 1_000_000L, latest.rssi, firstMatch)
-        } catch (_: SecurityException) {
-            fail("BLE_SCAN_PERMISSION_REVOKED", FAILURE_PERMISSION, BleEvidenceGate.PERMISSION)
-        } catch (_: Exception) {
-            fail("BLE_SCAN_DELIVERY_FAILED", FAILURE_DELIVERY, BleEvidenceGate.UNAVAILABLE)
+            deliver(latest)
+        } catch (_: SecurityException) { fail("BLE_SCAN_PERMISSION_REVOKED", FAILURE_PERMISSION) }
+        catch (_: Exception) { fail("BLE_SCAN_DELIVERY_FAILED", FAILURE_DELIVERY) }
+    }
+
+    private fun consumeResult(identity: Long, source: BleScanSession, selected: BleScanTarget, result: ScanResult) {
+        if (!owns(identity, source)) return
+        if (!scanPermission()) { fail("BLE_SCAN_PERMISSION_REVOKED", FAILURE_PERMISSION); return }
+        try {
+            val address = if (selected.mode == BleScanFilterMode.ASSOCIATION_ADDRESS) result.device.address else null
+            val name = if (selected.mode == BleScanFilterMode.VEHICLE_NAME) result.scanRecord?.deviceName else null
+            if (selected.matches(address, name)) deliver(result)
+        } catch (_: SecurityException) { fail("BLE_SCAN_PERMISSION_REVOKED", FAILURE_PERMISSION) }
+        catch (_: Exception) { fail("BLE_SCAN_DELIVERY_FAILED", FAILURE_DELIVERY) }
+    }
+
+    private fun deliver(result: ScanResult) {
+        if (authenticatedReadOnly) {
+            val timestamp = result.timestampNanos
+            val received = timestamp / 1_000_000L
+            val current = now()
+            if (result.device == null || timestamp <= 0 || timestamp <= lastReadTimestampNanos ||
+                received > current || current - received > BleFieldTrialPolicy.READ_START_FRESH_MS
+            ) return
+            lastReadTimestampNanos = timestamp
         }
+        val first = !hasMatch
+        hasMatch = true
+        // 광고 자체의 원시 단조시각이다. 앱 윈도우 만료·처리시각 대체는 없다.
+        onMatch(result, first)
     }
 
-    /** Main의 uptime timer는 절전 중 elapsed 40초 종료를 보장하지 않는다. 수신 gate는 elapsed 기준이다. */
-    private fun schedule(at: Long) {
-        clearTimer()
-        val identity = generation
-        val task = Runnable {
-            timer = null
-            if (!enabled || paused || generation != identity) return@Runnable
-            if (running && !stopCurrent()) return@Runnable
-            cycle()
-        }
-        timer = task
-        postDelayed(task, (at - now()).coerceAtLeast(0))
-    }
-
-    private fun clearTimer() {
-        timer?.let(removeCallbacks)
-        timer = null
-    }
-
-    private fun stopCurrent(reportFailure: Boolean = true): Boolean {
-        if (cleanupFailed) return false
+    private fun stopCurrent(release: Boolean) {
+        if (cleanupFailed || stopping) return
         generation++
-        val old = session ?: return true
-        var stopped = true
-        try { transport.stop(old) } catch (_: Exception) { stopped = false }
-        if (stopped) session = null else cleanupFailed = true
-        onRunning(false)
-        if (windowStarted || !stopped) {
-            evidence(BleEventEvidence(BleEvidenceKind.SCAN_STOPPED,
-                gate = if (stopped) null else BleEvidenceGate.UNAVAILABLE, accepted = stopped, scanRunning = false))
+        val old = session
+        started = false
+        stopping = true
+        fun complete(nativeStopped: Boolean) {
+            dispatch {
+                if (!stopping || session !== old) return@dispatch
+                var success = nativeStopped
+                var released = release
+                if (success && !enabled && !released) {
+                    try { transport.release(); released = true } catch (_: Exception) { success = false }
+                }
+                if (!success) cleanupFailed = true else session = null
+                onRunning(false)
+                if (old != null || !success) evidence(BleEventEvidence(BleEvidenceKind.SCAN_STOPPED,
+                    gate = if (success) null else BleEvidenceGate.UNAVAILABLE, accepted = success, scanRunning = false))
+                // 정리 콜백의 동기 stop도 서비스 해제 결과를 확인한 뒤 완료한다.
+                if (success && !enabled && !released) {
+                    try { transport.release() } catch (_: Exception) {
+                        success = false
+                        cleanupFailed = true
+                        session = old
+                    }
+                }
+                stopping = false
+                if (!success) {
+                    enabled = false
+                    pausedAction = null
+                    target?.clear()
+                    target = null
+                    pendingFailure = "BLE_SCAN_STOP_FAILED" to FAILURE_STOP
+                }
+                val failure = pendingFailure
+                pendingFailure = null
+                val action = stoppedAction
+                stoppedAction = null
+                if (failure != null) {
+                    evidence(BleEventEvidence(BleEvidenceKind.SCAN_FAILED,
+                        gate = if (failure.second == FAILURE_PERMISSION) BleEvidenceGate.PERMISSION else BleEvidenceGate.UNAVAILABLE,
+                        scanFailureCode = failure.second, accepted = false, scanRunning = false))
+                    onFailure(failure.first, failure.second)
+                } else if (enabled && paused && success) {
+                    val pausedCallback = pausedAction
+                    pausedAction = null
+                    pausedCallback?.invoke()
+                } else if (enabled && !paused && success) begin()
+                action?.invoke(success)
+            }
         }
-        windowStarted = false
-        if (!stopped && reportFailure) {
-            fail("BLE_SCAN_STOP_FAILED", FAILURE_STOP, BleEvidenceGate.UNAVAILABLE)
-        }
-        return stopped
+        try {
+            if (old == null) {
+                if (release) transport.release()
+                complete(true)
+            } else transport.stop(old, release, ::complete)
+        } catch (_: Exception) { complete(false) }
     }
 
-    private fun fail(reason: String, code: Int, gate: BleEvidenceGate) {
+    private fun fail(reason: String, code: Int) {
         enabled = false
         paused = false
-        clearTimer()
+        pausedAction = null
         target?.clear()
         target = null
-        // 정리 예외를 원래 start/delivery 실패 뒤에 숨기지 않는다. 같은 handle은 유지한다.
-        val stopped = stopCurrent(reportFailure = false)
-        filters = null
-        val cleanupFailure = !stopped
-        val finalCode = if (cleanupFailure) FAILURE_STOP else code
-        val finalReason = if (cleanupFailure && reason != "BLE_SCAN_ORPHAN_CLEANUP_FAILED") "BLE_SCAN_STOP_FAILED" else reason
-        evidence(BleEventEvidence(BleEvidenceKind.SCAN_FAILED,
-            gate = if (cleanupFailure) BleEvidenceGate.UNAVAILABLE else gate,
-            scanFailureCode = finalCode, accepted = false, scanRunning = false))
-        onFailure(finalReason, finalCode)
+        pendingFailure = reason to code
+        if (cleanupFailed && session == null) {
+            pendingFailure = null
+            evidence(BleEventEvidence(BleEvidenceKind.SCAN_FAILED, gate = BleEvidenceGate.UNAVAILABLE,
+                scanFailureCode = code, accepted = false, scanRunning = false))
+            onFailure(reason, code)
+        } else if (!stopping) stopCurrent(release = true)
     }
 
     private fun dispatch(action: () -> Unit) {
         if (Looper.myLooper() == runtime.handler.looper) action() else runtime.handler.post { action() }
     }
-
     private fun mainThread() = check(Looper.myLooper() == runtime.handler.looper)
 
     companion object {
-        const val WINDOW_MS = 40_000L
-        const val PERIOD_MS = 120_000L
-        const val REPORT_DELAY_MS = 5_000L
         const val FAILURE_ADDRESS = -1
         const val FAILURE_PERMISSION = -2
-        const val FAILURE_OFFLOADED_FILTER = -3
         const val FAILURE_UNAVAILABLE = -4
         const val FAILURE_START = -5
         const val FAILURE_STOP = -6
         const val FAILURE_NAME = -7
-        const val FAILURE_OFFLOADED_BATCH = -8
         const val FAILURE_DELIVERY = -9
     }
 }
 
-/** 세션 token에는 타깃이 없다. receiver와 scanner가 동일 RAM 세션을 소유할 때만 소비한다. */
 internal class BleScanSession(
-    private val onResults: (List<ScanResult>, Int) -> Unit,
-    private val onMalformed: () -> Unit,
+    private val onStarted: () -> Unit,
+    private val onResult: (ScanResult) -> Unit,
+    private val onResults: (List<ScanResult>) -> Unit,
+    private val onFailure: (String, Int) -> Unit,
 ) {
-    val token: String = UUID.randomUUID().toString()
-    fun results(results: List<ScanResult>) = onResults(results, 0)
-    fun failure(error: Int) = onResults(emptyList(), error)
-    fun malformed() = onMalformed()
+    fun started() = onStarted()
+    fun result(result: ScanResult) = onResult(result)
+    fun results(results: List<ScanResult>) = onResults(results)
+    fun failure(code: Int, reason: String = "BLE_SCAN_CALLBACK_FAILED") = onFailure(reason, code)
+    fun malformed() = onFailure("BLE_SCAN_DELIVERY_FAILED", BleSupplementalScanner.FAILURE_DELIVERY)
 }
 
-/** 실제 Android 스캔 IO 한 경계. 계측의 RAM transport는 test 파일 안에서만 구현한다. */
 internal interface BleScanTransport {
     fun prepare()
     fun associationAddress(associationId: Int): String?
-    fun isEnabled(): Boolean
-    fun supportsOffloadedFiltering(): Boolean
-    fun supportsOffloadedBatching(): Boolean
-    fun start(filters: List<ScanFilter>, settings: ScanSettings, session: BleScanSession): Int
-    fun stop(session: BleScanSession)
+    fun blockedReason(): String?
+    fun start(filters: List<ScanFilter>, session: BleScanSession)
+    fun stop(session: BleScanSession, release: Boolean, complete: (Boolean) -> Unit)
+    fun release()
 }
 
 internal class BleScanCleanupException : IllegalStateException()

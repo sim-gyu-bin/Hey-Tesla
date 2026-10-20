@@ -37,6 +37,15 @@ internal class AppActions(
     val cancelTeslaKey: () -> Unit,
     val teslaKeyBlockedReason: () -> String?,
     val leaveDiagnostics: () -> Unit,
+    /** 실차 동작을 허용하지 않는 계측 화면에는 이 capability를 제공하지 않는다. */
+    val frunkVoice: FrunkVoiceActions? = null,
+)
+
+internal class FrunkVoiceActions(
+    val start: (consent: Boolean) -> Unit,
+    val cancel: () -> Unit,
+    val visible: (Boolean) -> Unit,
+    val blockedReason: () -> String?,
 )
 
 internal fun DiagnosticState.bleFieldBusy(): Boolean =
@@ -49,8 +58,13 @@ internal fun bleFieldStatus(state: DiagnosticState, ble: BleProbeState): String 
     state.bleFieldTrialActive && ble.status == BleProbeStatus.CLEANING_UP -> "당회차 연결 정리 중"
     state.bleFieldTrialActive && ble.active -> "주말 BLE 반복 시험 · 당회차 진단 중"
     state.bleFieldTrialActive && state.bleFieldScanFailure != null -> "보조 스캔 실패 · 코드 ${state.bleFieldScanFailure}"
+    state.bleFieldTrialActive && state.bleFieldScanRecoveryAt != null -> "OS 스캔 오류 · 제한복구 대기 · 중지 가능"
     state.bleFieldTrialActive && state.bleFieldConfig.observationOnly -> "감지만 모드 · 후보 관찰 중 · GATT 수행 안 함"
+    state.bleFieldTrialActive && state.bleFieldConfig.authenticatedReadOnly &&
+        state.teslaKeyDiagnosticActive -> "기존 앱 키로 BODY·DRIVE 읽기 조회 중"
     state.bleFieldTrialActive && state.bleFieldTrialWaitingForDeparture -> "이탈 신호 후 다음 후보 대기"
+    state.bleFieldTrialActive && state.bleFieldConfig.authenticatedReadOnly && state.present &&
+        state.teslaApproachRead?.localClosed == true -> "연결 정리됨 · 새 광고에서 제한 재조회 대기"
     state.bleFieldTrialActive -> "근접 신호 대기"
     state.bleFieldTrialStopReason != null -> "주말 BLE 반복 시험 중지됨"
     else -> "주말 BLE 반복 시험 꺼짐"

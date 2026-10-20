@@ -10,12 +10,18 @@ data class BleFieldConfig(
     val backgroundConnect: Boolean = false,
     val retryEnabled: Boolean = false,
     val scanFilterMode: BleScanFilterMode = BleScanFilterMode.ASSOCIATION_ADDRESS,
+    val authenticatedReadOnly: Boolean = false,
 ) {
-    /** 이름 감지는 읽기 전용 GATT 시험과도 섞지 않는다. 잘못된 조합은 보정하지 않고 거부한다. */
-    internal fun safetyBlockedReason(): String? =
-        if (scanFilterMode == BleScanFilterMode.VEHICLE_NAME &&
-            (!observationOnly || !supplementalScan || btAssist || backgroundConnect || retryEnabled)
-        ) "BLE_NAME_DETECTION_OPTIONS_INVALID" else null
+    /** 승인된 두 이름 모드만 허용한다. 잘못된 조합을 더 안전한 값으로 조용히 보정하지 않는다. */
+    internal fun safetyBlockedReason(): String? = when {
+        authenticatedReadOnly && (scanFilterMode != BleScanFilterMode.VEHICLE_NAME ||
+            observationOnly || !supplementalScan || btAssist || backgroundConnect || retryEnabled) ->
+            "BLE_AUTHENTICATED_READ_OPTIONS_INVALID"
+        scanFilterMode == BleScanFilterMode.VEHICLE_NAME && !authenticatedReadOnly &&
+            (!observationOnly || !supplementalScan || btAssist || backgroundConnect || retryEnabled) ->
+            "BLE_NAME_DETECTION_OPTIONS_INVALID"
+        else -> null
+    }
 
     companion object {
         val BASELINE = BleFieldConfig()
@@ -24,6 +30,11 @@ data class BleFieldConfig(
             observationOnly = true,
             supplementalScan = true,
             scanFilterMode = BleScanFilterMode.VEHICLE_NAME,
+        )
+        val VEHICLE_NAME_AUTHENTICATED_READ = BleFieldConfig(
+            supplementalScan = true,
+            scanFilterMode = BleScanFilterMode.VEHICLE_NAME,
+            authenticatedReadOnly = true,
         )
     }
 }

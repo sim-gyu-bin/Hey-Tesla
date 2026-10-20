@@ -115,13 +115,13 @@ class BleGattOwnershipTest {
         ownership.watch(lease.id, watchdog)
         assertEquals(BleProbeStatus.IDLE, session.state.status)
 
-        // BLE_PROBE_STARTED 기록 실패가 호출하는 실제 소유자 stop 순서: 정책 봉인 → cancel.
+        // 명시적 중지는 재진입한 start보다 먼저 정책·GATT 발급을 봉인한다.
         assertEquals(attempt, field.stop())
-        session.cancel("FIELD_LOG_UNHEALTHY")
-        session.start() // 기록 호출이 반환된 뒤 이어지는 start도 새 GATT를 발급하지 못한다.
+        session.cancel("USER_STOP")
+        session.start()
 
         assertEquals(BleProbeStatus.CANCELED, final?.status)
-        assertEquals("FIELD_LOG_UNHEALTHY", final?.reason)
+        assertEquals("USER_STOP", final?.reason)
         assertTrue(checkNotNull(final).localClosed)
         assertFalse(checkNotNull(final).connected)
         assertEquals(0, port.connectRequests)

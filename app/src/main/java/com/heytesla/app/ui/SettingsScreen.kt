@@ -217,6 +217,12 @@ private fun PermissionDetail(
         actions = actions,
     )
     PermissionRow(
+        title = "AltBeacon 정확한 위치 권한",
+        granted = state.locationPermission,
+        requestPermission = Manifest.permission.ACCESS_FINE_LOCATION,
+        actions = actions,
+    )
+    PermissionRow(
         title = "진단 알림",
         granted = state.notificationPermission,
         requestPermission = Manifest.permission.POST_NOTIFICATIONS,
@@ -230,11 +236,11 @@ private fun PermissionDetail(
     )
     AppRow(
         title = "시스템 위치 서비스",
-        subtitle = "CDM 검색 조건일 수 있음",
+        subtitle = if (state.locationEnabled) "켜짐 · AltBeacon FGS 조건" else "꺼짐 · AltBeacon 감지 시작 불가",
         symbol = AppSymbol.PERMISSIONS,
         onClick = { actions.openSystemSettings(Settings.ACTION_LOCATION_SOURCE_SETTINGS) },
     )
-    RowNote("앱은 위치를 수집하거나 위치 권한을 요청하지 않습니다.")
+    RowNote("AltBeacon 위치 유형 FGS에 위치 권한이 필요합니다. GPS 위치는 수집하지 않습니다.")
 }
 
 @Composable
@@ -282,14 +288,14 @@ private fun PermissionRow(
 }
 
 private fun permissionMenuSummary(state: DiagnosticState): String {
-    val granted = listOf(
-        state.microphonePermission,
-        state.bluetoothPermission,
-        state.notificationPermission,
-    ).count { it }
+    val granted = (if (state.microphonePermission) 1 else 0) +
+        (if (state.bluetoothPermission) 1 else 0) +
+        (if (state.bluetoothScanPermission) 1 else 0) +
+        (if (state.locationPermission) 1 else 0) +
+        (if (state.notificationPermission) 1 else 0)
     return when (granted) {
-        3 -> "모두 허용됨"
+        5 -> "모두 허용됨"
         0 -> "허용 필요"
-        else -> "허용 $granted/3"
+        else -> "허용 $granted/5"
     }
 }

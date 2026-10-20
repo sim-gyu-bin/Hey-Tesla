@@ -13,6 +13,21 @@
       "env": {
         "MOBILEMCP_DISABLE_TELEMETRY": "1"
       }
+    },
+    "rea": {
+      "type": "stdio",
+      "command": "/Users/simgyubin/.nvm/versions/node/v22.21.1/bin/node",
+      "args": [
+        "/Users/simgyubin/.local/share/hey-tesla/rea/6.5.0/node_modules/rea-agents/scripts/rea.mjs",
+        "mcp"
+      ],
+      "timeout": 300000,
+      "env": {
+        "JAVA_HOME": "/Applications/Android Studio.app/Contents/jbr/Contents/Home",
+        "REA_JADX_MCP_JAR": "/Users/simgyubin/.local/share/hey-tesla/rea/android/jadx-headless-mcp-0.7.1-all.jar",
+        "REA_JADX_HEAP_MIB": "4096",
+        "TMPDIR": "/Users/simgyubin/.cache/hey-tesla/rea/tmp"
+      }
     }
   }
 }

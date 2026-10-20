@@ -125,7 +125,7 @@ internal fun HomeScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = "개발 중 · 차량 제어 미연결",
+                text = "개발 중 · 자동 음성 제어 미연결",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -176,6 +176,8 @@ internal fun HomeScreen(
 private fun permissionSummary(state: DiagnosticState): String = when {
     !state.microphonePermission || !state.bluetoothPermission -> "권한 필요"
     !state.notificationPermission -> "알림 권한 확인"
+    !state.bluetoothScanPermission -> "Bluetooth 스캔 권한 필요"
+    !state.locationPermission -> "AltBeacon 위치 권한 필요"
     else -> "허용됨"
 }
 

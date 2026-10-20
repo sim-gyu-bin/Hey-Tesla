@@ -1,288 +1,280 @@
 package com.heytesla.app
 
+import android.Manifest
 import android.annotation.SuppressLint
-import android.app.Application
+import android.app.ActivityManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.bluetooth.BluetoothManager
-import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
+import android.location.LocationManager
+import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.util.UUID
+import org.altbeacon.beacon.BeaconConsumer
+import org.altbeacon.beacon.BeaconManager
+import org.altbeacon.beacon.Identifier
+import org.altbeacon.beacon.Region
+import org.altbeacon.beacon.Settings
+import org.altbeacon.beacon.logging.LogManager
+import org.altbeacon.beacon.logging.Loggers
+import org.altbeacon.beacon.service.BeaconService
+import org.altbeacon.beacon.service.scanner.RawScanCallback
 
-/** 비공개 명시 receiver. 고아 delivery는 정리만 하며 시험·FGS·GATT를 시작하지 않는다. */
+/** 이전 버전 PI의 정리 전용 receiver. 새 scan/FGS/GATT/정책 전달을 발급하지 않는다. */
 class BleScanReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        shared(context).receive(intent)
+        val app = context.applicationContext as? DiagnosticApp ?: return
+        cleanupOrphanedScans(context, app.runtime)
     }
 
     companion object {
-        private var registry: BlePendingScanRegistry? = null
-
-        private fun shared(context: Context): BlePendingScanRegistry {
-            check(Looper.myLooper() == Looper.getMainLooper())
-            return registry ?: BlePendingScanRegistry(context.applicationContext,
-                BleScanTokenFile(context.applicationContext), AndroidPendingScanIo(context.applicationContext),
-            ).also { registry = it }
-        }
-
-        /** Application.onCreate의 runtime 생성 뒤 Main에서 호출. 복원은 정리만, 새 scan은 명시 start만 한다. */
+        @SuppressLint("MissingPermission")
         internal fun cleanupOrphanedScans(context: Context, runtime: DiagnosticRuntime): Boolean {
-            val owner = transport(context, runtime)
-            return try {
-                owner.prepare()
-                true
-            } catch (_: BleScanCleanupException) {
-                false
-            }
-        }
-
-        internal fun transport(context: Context, runtime: DiagnosticRuntime): BlePendingScanRegistry =
-            shared(context).also { owner ->
-                owner.onCleanupFailure = {
-                    // 기존 runtime 정리 불명 gate를 봉인한다. target/intent/예외 원문은 기록하지 않는다.
-                    runtime.recordBleEvidence(BleEventEvidence(BleEvidenceKind.SCAN_FAILED,
-                        gate = BleEvidenceGate.UNAVAILABLE, scanFailureCode = BleSupplementalScanner.FAILURE_STOP,
-                        accepted = false, scanRunning = false))
-                }
-            }
-    }
-}
-
-/** 영속 상태는 비민감 단일 무작위 scan token뿐이다. 앱 설정/차량 대상은 저장하지 않는다. */
-internal interface BleScanTokenJournal {
-    fun read(): String?
-    fun write(token: String?)
-}
-
-private class BleScanTokenFile(context: Context) : BleScanTokenJournal {
-    private val file = File(context.noBackupFilesDir, "ble_pending_scan_token")
-
-    override fun read(): String? {
-        val value = try {
-            FileInputStream(file).use { input ->
-                val bytes = ByteArray(37)
-                var count = 0
-                while (count < bytes.size) {
-                    val read = input.read(bytes, count, bytes.size - count)
-                    if (read == -1) break
-                    count += read
-                }
-                check(count == 0 || count == 36)
-                if (count == 0) null else String(bytes, 0, count, Charsets.US_ASCII)
-            }
-        } catch (failure: java.io.FileNotFoundException) {
-            // 존재하는 marker를 읽을 수 없으면 정리 불명이다. 단순 최초 실행만 빈 journal이다.
-            if (file.exists()) throw failure
-            null
-        }
-        check(value == null || BlePendingScanRegistry.validToken(value))
-        return value
-    }
-
-    override fun write(token: String?) {
-        check(token == null || BlePendingScanRegistry.validToken(token))
-        // 교체 중 프로세스가 죽어 부분 token이 남으면 다음 시작은 fail closed한다.
-        // scan IO는 write/flush/fd.sync가 모두 반환된 뒤에만 실행된다.
-        FileOutputStream(file, false).use { output ->
-            if (token != null) output.write(token.toByteArray(Charsets.US_ASCII))
-            output.flush()
-            output.fd.sync()
-        }
-    }
-}
-
-/** 테스트는 이 IO만 RAM으로 교체한다. production에는 fake/fallback을 설치하지 않는다. */
-internal interface BlePendingScanIo {
-    fun start(filters: List<ScanFilter>, settings: ScanSettings, pendingIntent: PendingIntent): Int
-    fun stop(pendingIntent: PendingIntent)
-}
-
-@SuppressLint("MissingPermission")
-private class AndroidPendingScanIo(context: Context) : BlePendingScanIo {
-    private val bluetooth = context.getSystemService(BluetoothManager::class.java)
-    private var scanner: BluetoothLeScanner? = null
-
-    override fun start(filters: List<ScanFilter>, settings: ScanSettings, pendingIntent: PendingIntent): Int {
-        val owner = bluetooth?.adapter?.bluetoothLeScanner ?: return BleSupplementalScanner.FAILURE_UNAVAILABLE
-        scanner = owner
-        return owner.startScan(filters, settings, pendingIntent)
-    }
-
-    override fun stop(pendingIntent: PendingIntent) {
-        // 프로세스 재생성에는 저장한 handle identity로 현재 scanner에 정리를 요청한다.
-        val owner = scanner ?: bluetooth?.adapter?.bluetoothLeScanner
-        // 공개 SDK의 void 무예외 반환만 관측한다. Binder/라디오 해제 ACK를 받았다는 뜻은 아니다.
-        checkNotNull(owner).stopScan(pendingIntent)
-        scanner = null
-    }
-}
-
-/** Main 직렬 소유자. extras 갱신/고정 slot 재사용 없이 window마다 PI identity를 새로 발급한다. */
-internal class BlePendingScanRegistry(
-    context: Context,
-    private val journal: BleScanTokenJournal,
-    private val io: BlePendingScanIo,
-) {
-    // 프로세스 수명의 registry는 Activity/Service context를 보관하지 않는다.
-    private val context = context.applicationContext as Application
-    private class Active(val session: BleScanSession, val pendingIntent: PendingIntent) {
-        var sealed = false
-    }
-    private var active: Active? = null
-    private var cleanupFailed = false
-    internal var onCleanupFailure: () -> Unit = { Log.e("BleScanReceiver", "BLE_SCAN_ORPHAN_CLEANUP_FAILED") }
-
-    fun prepare() {
-        mainThread()
-        if (cleanupFailed) throw BleScanCleanupException()
-        // 별도 scanner가 기존 RAM 소유자의 scan을 고아로 취급해서 정리하지 못하게 한다.
-        if (active != null) throw BleScanCleanupException()
-        try {
-            journal.read()?.let { cleanOrphan(it) }
-        } catch (_: Exception) {
-            sealCleanupFailure()
-            throw BleScanCleanupException()
-        }
-    }
-
-    fun start(filters: List<ScanFilter>, settings: ScanSettings, session: BleScanSession): Int {
-        mainThread()
-        if (cleanupFailed) throw BleScanCleanupException()
-        check(active == null)
-        check(filters.size == 1)
-        val pendingIntent = pendingIntent(session.token)
-        try {
-            check(journal.read() == null)
-            // start 호출보다 먼저 durable marker를 남겨 어느 crash 지점도 새 scan으로 복원하지 않는다.
-            journal.write(session.token)
-        } catch (_: Exception) {
-            // 아직 scan IO 전이다. 이 handle로 등록된 scan은 없으므로 취소가 안전하다.
-            pendingIntent.cancel()
-            sealCleanupFailure()
-            throw BleScanCleanupException()
-        }
-        active = Active(session, pendingIntent)
-        return io.start(filters, settings, pendingIntent)
-    }
-
-    fun stop(session: BleScanSession) {
-        mainThread()
-        if (cleanupFailed) throw BleScanCleanupException()
-        val old = active ?: return
-        check(old.session === session)
-        old.sealed = true
-        try {
-            // stopScan에 동일 handle을 먼저 전달한다. 예외면 cancel/marker 비움/소유자 교체를 하지 않는다.
-            io.stop(old.pendingIntent)
-            old.pendingIntent.cancel()
-            check(journal.read() == old.session.token)
-            journal.write(null)
-            active = null
-        } catch (_: Exception) {
-            sealCleanupFailure()
-            throw BleScanCleanupException()
-        }
-    }
-
-    fun receive(intent: Intent) {
-        mainThread()
-        val token = tokenOf(intent) ?: return
-        if (cleanupFailed) return
-        val current = active
-        if (current != null && current.session.token == token) {
-            if (current.sealed) return
-            // RAM 소유자 확인 이후에만 Android가 덧붙인 extras를 해석한다.
+            check(Looper.myLooper() == Looper.getMainLooper())
             try {
-                val error = intent.getIntExtra(BluetoothLeScanner.EXTRA_ERROR_CODE, 0)
-                if (error != 0) current.session.failure(error)
-                else {
-                    val results = intent.getParcelableArrayListExtra(
-                        BluetoothLeScanner.EXTRA_LIST_SCAN_RESULT, ScanResult::class.java,
-                    )
-                    if (results == null) current.session.malformed() else current.session.results(results)
-                }
+                val file = File(context.noBackupFilesDir, "ble_pending_scan_token")
+                val token = try {
+                    FileInputStream(file).use { input ->
+                        val bytes = ByteArray(37)
+                        var count = 0
+                        while (count < bytes.size) {
+                            val n = input.read(bytes, count, bytes.size - count)
+                            if (n == -1) break
+                            count += n
+                        }
+                        check(count == 0 || count == 36)
+                        if (count == 0) null else String(bytes, 0, count, Charsets.US_ASCII)
+                    }
+                } catch (failure: java.io.FileNotFoundException) {
+                    if (file.exists()) throw failure
+                    null
+                } ?: return true
+                check(token.length == 36 && UUID.fromString(token).toString() == token)
+                val intent = Intent(context, BleScanReceiver::class.java).setPackage(context.packageName)
+                    .setAction("com.heytesla.app.BLE_SCAN_DELIVERY").setIdentifier(token)
+                val handle = PendingIntent.getBroadcast(context, 0, intent, PendingIntent.FLAG_MUTABLE)
+                val scanner = context.getSystemService(BluetoothManager::class.java)?.adapter?.bluetoothLeScanner
+                checkNotNull(scanner).stopScan(handle)
+                // 사용자 기존 marker도 보존한다. 파일 삭제·journal 비움·새 native 등록은 없다.
+                return true
             } catch (_: Exception) {
-                current.session.malformed()
+                runtime.recordBleEvidence(BleEventEvidence(BleEvidenceKind.SCAN_FAILED,
+                    gate = BleEvidenceGate.UNAVAILABLE, scanFailureCode = BleSupplementalScanner.FAILURE_STOP,
+                    accepted = false, scanRunning = false))
+                return false
             }
-            return
-        }
-        // 불명/위조 token 및 이미 정리한 세대는 어떤 scan도 정리하지 않는다.
-        try {
-            if (journal.read() == token) cleanOrphan(token)
-        } catch (_: Exception) {
-            sealCleanupFailure()
-        }
-    }
-
-    private fun cleanOrphan(token: String) {
-        check(active == null)
-        val handle = pendingIntent(token)
-        io.stop(handle)
-        handle.cancel()
-        check(journal.read() == token)
-        journal.write(null)
-    }
-
-    private fun pendingIntent(token: String): PendingIntent =
-        PendingIntent.getBroadcast(context, REQUEST_CODE, intent(context, token), PendingIntent.FLAG_MUTABLE)
-
-    private fun tokenOf(source: Intent): String? {
-        if (source.action != ACTION || source.component != ComponentName(context, BleScanReceiver::class.java) ||
-            source.`package` != context.packageName || source.data != null || source.categories != null
-        ) return null
-        return source.identifier?.takeIf(::validToken)
-    }
-
-    private fun sealCleanupFailure() {
-        if (cleanupFailed) return
-        cleanupFailed = true
-        active?.sealed = true
-        onCleanupFailure()
-    }
-
-    private fun mainThread() = check(Looper.myLooper() == Looper.getMainLooper())
-
-    companion object {
-        const val ACTION = "com.heytesla.app.BLE_SCAN_DELIVERY"
-        const val REQUEST_CODE = 0
-
-        internal fun intent(context: Context, token: String): Intent {
-            check(validToken(token))
-            return Intent(context, BleScanReceiver::class.java).setPackage(context.packageName)
-                .setAction(ACTION).setIdentifier(token)
-        }
-
-        internal fun validToken(token: String): Boolean = try {
-            token.length == 36 && UUID.fromString(token).toString() == token
-        } catch (_: IllegalArgumentException) {
-            false
         }
     }
 }
 
+/** 실제 IO는 AltBeacon BeaconService만 소유한다. parser/simulator로 차량 광고를 위장하지 않는다. */
+@Suppress("DEPRECATION")
 @SuppressLint("MissingPermission")
-internal class AndroidBleScanTransport(context: Context, private val runtime: DiagnosticRuntime) : BleScanTransport {
-    private val bluetooth = context.applicationContext.getSystemService(BluetoothManager::class.java)
-    private val owner = BleScanReceiver.transport(context, runtime)
+internal class AndroidBleScanTransport(
+    context: Context,
+    private val runtime: DiagnosticRuntime,
+    private val notification: Notification? = null,
+) : BleScanTransport {
+    private val context = context.applicationContext
+    private val manager = BeaconManager.getInstanceForApplication(this.context)
+    private val handler: Handler get() = runtime.handler
+    private var consumer: BeaconConsumer? = null
+    private var connected = false
+    private var active: BleScanSession? = null
+    private var ranged = false
+    private var nativeAttempted = false
+    private var stopCompletion: ((Boolean) -> Unit)? = null
+    private var releaseAfterStop = false
+    private var stopTimeout: Runnable? = null
+    private var startTimeout: Runnable? = null
+    private var serviceBindingIssued = false
+    private var ownsManager = false
+    // 스캔 수명만 유지하는 실제 Region. 광고를 Beacon으로 변환하거나 ranging 결과를 사용하지 않는다.
+    private val region = Region("heytesla-raw-observation", emptyList<Identifier>())
 
-    override fun prepare() = owner.prepare()
+    override fun prepare() {
+        check(consumer == null && manager.rawScanCallback == null && !manager.isAnyConsumerBound)
+        if (!BleScanReceiver.cleanupOrphanedScans(context, runtime)) throw BleScanCleanupException()
+        ownsManager = true
+        LogManager.setLogger(Loggers.empty()) // 주소·광고 byte 등 upstream 원시 로그를 영속 로그에 남기지 않는다.
+        val notifications = context.getSystemService(NotificationManager::class.java)
+        notifications.createNotificationChannel(NotificationChannel(ObservationService.CHANNEL,
+            "등록 차량 접근 관찰", NotificationManager.IMPORTANCE_LOW))
+        val foreground = notification ?: Notification.Builder(context, ObservationService.CHANNEL)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentTitle("등록 차량 BLE 감지")
+            .setContentText("관찰 전용 · 차량 권한 아님").setOngoing(true).build()
+        // 스캔 기간·무선 모드는 기본값을 유지하고 화면 전환과 무관하게 대기 공백만 제거한다.
+        manager.adjustSettings(Settings(regionStatePersistenceEnabled = false,
+            scanPeriods = Settings.ScanPeriods(
+                foregroundBetweenScanPeriodMillis = 0,
+                backgroundBetweenScanPeriodMillis = 0),
+            scanStrategy = Settings.ForegroundServiceScanStrategy(foreground, ObservationService.ALTBEACON_NOTIFICATION_ID)))
+    }
+
     override fun associationAddress(associationId: Int): String? =
         runtime.cdm?.myAssociations?.singleOrNull { !it.isSelfManaged }
             ?.takeIf { it.id == associationId }?.deviceMacAddress?.toString()
-    override fun isEnabled(): Boolean = bluetooth?.adapter?.isEnabled == true
-    override fun supportsOffloadedFiltering(): Boolean = bluetooth?.adapter?.isOffloadedFilteringSupported == true
-    override fun supportsOffloadedBatching(): Boolean = bluetooth?.adapter?.isOffloadedScanBatchingSupported == true
-    override fun start(filters: List<ScanFilter>, settings: ScanSettings, session: BleScanSession): Int =
-        owner.start(filters, settings, session)
-    override fun stop(session: BleScanSession) = owner.stop(session)
+
+    override fun blockedReason(): String? = when {
+        !runtime.granted(Manifest.permission.ACCESS_FINE_LOCATION) -> "BLE_SCAN_LOCATION_PERMISSION_REQUIRED"
+        context.getSystemService(LocationManager::class.java)?.isLocationEnabled != true -> "BLE_SCAN_LOCATION_SERVICES_DISABLED"
+        context.getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled != true -> "BLE_SCAN_UNAVAILABLE"
+        manager.foregroundServiceStartFailed() -> "BLE_SCAN_FGS_FALLBACK"
+        connected && nativeAttempted && !foregroundObserved() -> "BLE_SCAN_FGS_NOT_RUNNING"
+        else -> null
+    }
+
+    override fun start(filters: List<ScanFilter>, session: BleScanSession) {
+        check(active == null && stopCompletion == null)
+        active = session
+        nativeAttempted = false
+        manager.setRawScanFilters(filters)
+        manager.setRawScanCallback(object : RawScanCallback {
+            override fun onScanResult(result: ScanResult) {
+                // session은 등록 당시 인스턴스다. 이전 native delivery를 새 세대에 귀속시키지 않는다.
+                session.result(result)
+            }
+            override fun onBatchScanResults(results: List<ScanResult>) = session.results(results)
+            override fun onScanStarted() = dispatch {
+                if (active !== session || stopCompletion != null) return@dispatch
+                clearStartTimeout()
+                nativeAttempted = true
+                val blocked = blockedReason()
+                if (blocked != null) session.failure(BleSupplementalScanner.FAILURE_UNAVAILABLE, blocked)
+                else session.started()
+            }
+            override fun onScanFailed(errorCode: Int) = dispatch {
+                if (active !== session) return@dispatch
+                clearStartTimeout()
+                if (stopCompletion != null) finishStop(false)
+                else session.failure(errorCode, when (errorCode) {
+                    BleSupplementalScanner.FAILURE_PERMISSION -> "BLE_SCAN_PERMISSION_REVOKED"
+                    BleSupplementalScanner.FAILURE_UNAVAILABLE -> "BLE_SCAN_UNAVAILABLE"
+                    BleSupplementalScanner.FAILURE_START -> "BLE_SCAN_START_FAILED"
+                    else -> "BLE_SCAN_CALLBACK_FAILED"
+                })
+            }
+            override fun onScanStopped(success: Boolean) = dispatch {
+                if (active === session && stopCompletion != null) finishStop(success)
+                else if (active === session && !success) session.failure(BleSupplementalScanner.FAILURE_STOP, "BLE_SCAN_STOP_FAILED")
+            }
+        })
+        if (!connected) {
+            val timeout = Runnable {
+                if (active === session && !connected && stopCompletion == null) {
+                    session.failure(BleSupplementalScanner.FAILURE_START, "BLE_SCAN_START_FAILED")
+                }
+            }
+            startTimeout = timeout
+            handler.postDelayed(timeout, BIND_TIMEOUT_MS)
+        }
+        if (connected) startRanging(session)
+        else if (consumer == null) {
+            val owner = object : BeaconConsumer {
+                override fun getApplicationContext(): Context = context
+                override fun bindService(intent: Intent, connection: ServiceConnection, flags: Int): Boolean =
+                    context.bindService(intent, connection, flags).also { serviceBindingIssued = it }
+                override fun unbindService(connection: ServiceConnection) {
+                    if (serviceBindingIssued) context.unbindService(connection)
+                    serviceBindingIssued = false
+                }
+                override fun onBeaconServiceConnect() {
+                    if (consumer !== this) return
+                    clearStartTimeout()
+                    connected = true
+                    active?.let(::startRanging)
+                }
+            }
+            consumer = owner
+            manager.bind(owner)
+            if (manager.foregroundServiceStartFailed()) session.failure(BleSupplementalScanner.FAILURE_UNAVAILABLE, "BLE_SCAN_FGS_FALLBACK")
+        }
+    }
+
+    private fun startRanging(session: BleScanSession) {
+        if (active !== session || stopCompletion != null) return
+        blockedReason()?.let { session.failure(BleSupplementalScanner.FAILURE_UNAVAILABLE, it); return }
+        if (!foregroundObserved()) {
+            session.failure(BleSupplementalScanner.FAILURE_UNAVAILABLE, "BLE_SCAN_FGS_NOT_RUNNING")
+            return
+        }
+        ranged = true
+        manager.startRangingBeaconsInRegion(region)
+    }
+
+    override fun stop(session: BleScanSession, release: Boolean, complete: (Boolean) -> Unit) {
+        check(active === session && stopCompletion == null)
+        clearStartTimeout()
+        stopCompletion = complete
+        releaseAfterStop = release
+        if (!ranged) { finishStop(true); return }
+        // native onScanStopped hook가 실제 동일 callback stopScan 반환을 확인한다.
+        val timeout = Runnable { if (active === session && stopCompletion != null) finishStop(false) }
+        stopTimeout = timeout
+        handler.postDelayed(timeout, STOP_ACK_TIMEOUT_MS)
+        manager.stopRangingBeaconsInRegion(region)
+        ranged = false
+    }
+
+    private fun finishStop(success: Boolean) {
+        val callback = stopCompletion ?: return
+        stopTimeout?.let(handler::removeCallbacks)
+        stopTimeout = null
+        if (success) {
+            active = null
+            nativeAttempted = false
+            manager.setRawScanCallback(null)
+            if (releaseAfterStop) {
+                try { release() } catch (_: Exception) {
+                    stopCompletion = null
+                    callback(false)
+                    return
+                }
+            }
+        }
+        stopCompletion = null
+        callback(success)
+    }
+
+    override fun release() {
+        if (!ownsManager) return
+        check(active == null && !ranged)
+        clearStartTimeout()
+        consumer?.let { manager.unbind(it) }
+        consumer = null
+        connected = false
+        manager.setRawScanCallback(null)
+        manager.setRawScanFilters(null)
+        ownsManager = false
+    }
+
+    private fun clearStartTimeout() {
+        startTimeout?.let(handler::removeCallbacks)
+        startTimeout = null
+    }
+
+    private fun foregroundObserved(): Boolean = foregroundRunning(context)
+
+    private fun dispatch(action: () -> Unit) {
+        if (Looper.myLooper() == handler.looper) action() else handler.post { action() }
+    }
+
+    companion object {
+        private const val STOP_ACK_TIMEOUT_MS = 10_000L
+        private const val BIND_TIMEOUT_MS = 10_000L
+        @Suppress("DEPRECATION")
+        fun foregroundRunning(context: Context): Boolean = context.getSystemService(ActivityManager::class.java)
+            ?.getRunningServices(Int.MAX_VALUE)
+            ?.any { it.service.className == BeaconService::class.java.name && it.foreground } == true
+    }
 }

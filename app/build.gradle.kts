@@ -14,8 +14,8 @@ android {
         applicationId = "com.heytesla.app"
         minSdk = 36
         targetSdk = 36
-        versionCode = 25
-        versionName = "0.25.0-probe"
+        versionCode = 46
+        versionName = "0.46.0-probe"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -52,7 +52,16 @@ protobuf {
     }
 }
 
+// 동일 2.21.2 배포 소스의 최소 raw scan 패치 모듈로만 치환한다.
+configurations.configureEach {
+    resolutionStrategy.dependencySubstitution {
+        substitute(module("org.altbeacon:android-beacon-library:2.21.2"))
+            .using(project(":altbeacon"))
+    }
+}
+
 dependencies {
+    implementation("org.altbeacon:android-beacon-library:2.21.2")
     implementation("com.google.protobuf:protobuf-javalite:4.36.2")
     implementation(platform("androidx.compose:compose-bom:2026.06.01"))
     implementation("androidx.activity:activity-compose:1.13.0")

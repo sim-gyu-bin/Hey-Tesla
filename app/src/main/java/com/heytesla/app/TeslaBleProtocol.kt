@@ -27,6 +27,10 @@ internal enum class TeslaBleQuery {
         }
 }
 
+internal enum class TeslaBlePurpose { READ_ONLY, FRUNK_OPEN }
+
+internal enum class TeslaFrunkReply { ACKNOWLEDGED, REJECTED, UNCONFIRMED }
+
 internal enum class TeslaGear { P, R, N, D, UNKNOWN }
 
 /** 인증된 읽기 결과일 뿐 차량 감지·주차 안전허가·제어 권한이 아니다. */
@@ -40,6 +44,8 @@ internal data class TeslaReadOnlyStatus(
     val lockState: Int? = null,
     val frontTrunkState: Int? = null,
     val driveState: TeslaDriveState? = null,
+    /** 이번 BODY 수신 시점의 원 enum code. DRIVE 준비 여부나 제어 허가가 아니다. */
+    val bodyVehicleSleepStatus: Int? = null,
 )
 
 /**
@@ -63,11 +69,12 @@ internal enum class TeslaBleAuthEvidence(val eventCode: String) {
 }
 
 internal sealed interface TeslaBleStep {
-    data class Send(val payload: ByteArray, val phase: TeslaBlePhase) : TeslaBleStep {
-        override fun toString(): String = "Send(phase=$phase)"
+    data class Send(val payload: ByteArray, val phase: TeslaBlePhase, val actuator: Boolean = false) : TeslaBleStep {
+        override fun toString(): String = "Send(phase=$phase, actuator=$actuator)"
     }
     data class Waiting(val phase: TeslaBlePhase, val authEvidence: TeslaBleAuthEvidence? = null) : TeslaBleStep
     data class Complete(val status: TeslaReadOnlyStatus) : TeslaBleStep
+    data class FrunkResult(val reply: TeslaFrunkReply) : TeslaBleStep
     data class Failed(val reason: String, val authEvidence: TeslaBleAuthEvidence? = null) : TeslaBleStep
 }
 
@@ -76,7 +83,7 @@ internal sealed interface TeslaBleStep {
  * pkg/vehicle/security.go SendAddKeyRequestWithRole: raw legacy PRESENT_KEY envelope.
  * pkg/protocol/protocol.md: fresh domain별 handshake, HMAC, personalized AES-GCM, response hash.
  * pkg/vehicle/state.go·infotainment.go: DRIVE_STATE는 domain3 GetVehicleData.getDriveState만 요청.
- * now는 elapsedRealtime 같은 monotonic milliseconds. 자동 재전송·세션 캐시·제어 명령 없음.
+ * now는 elapsedRealtime 같은 monotonic milliseconds. 자동 재전송·세션 캐시 없음.
  * HELLO에서 상관관계가 맞는 fault0·operation_status OK ACK는 성공이 아니라 대기이며
  * phase/전체 deadline을 연장하지 않는다(공식 internal/dispatcher/dispatcher.go tryStartSession).
  * 등록 보고는 인증 전의 비인증 legacy 관측이며, 차량에 키가 저장됐다는 증거가 아니다.
@@ -87,6 +94,10 @@ internal class TeslaBleConversation(
     credential: TeslaBleCredential,
     vin: ByteArray,
     private val query: TeslaBleQuery = TeslaBleQuery.BODY_STATUS,
+    private val purpose: TeslaBlePurpose = TeslaBlePurpose.READ_ONLY,
+    private val authorizeFrunk: (() -> String?)? = null,
+    private val frunkDeadline: Long? = null,
+    private val onResponseObservation: ((TeslaBleResponseObservation) -> Unit)? = null,
     private val now: () -> Long,
 ) : Closeable {
     private enum class State { NEW, CARD, HELLO, STATUS, TERMINAL, CLOSED }
@@ -111,6 +122,20 @@ internal class TeslaBleConversation(
     private var vehicleClock = 0L
     private var commandCounter = 0L
     private val responseCounters = HashSet<Long>()
+    private var responseDisposition = "RESPONSE_INVALID"
+    private var responseFromPresent: Boolean? = null
+    private var responseFromKind: String? = null
+    private var responseFromDomain: Int? = null
+    private var responseToPresent: Boolean? = null
+    private var responseToKind: String? = null
+    private var responsePayloadKind: String? = null
+    private var responseDomainMismatchReason: String? = null
+    private var responseRequestUuidPresent: Boolean? = null
+    private var responseRequestUuidMatches: Boolean? = null
+    private var responseToRouteMatches: Boolean? = null
+    private var responseSignedStatusPresent: Boolean? = null
+    private var responseSignedMessageFault: Int? = null
+    private var responseOperationStatus: Int? = null
 
     @Volatile
     var registrationReported: Boolean = false
@@ -120,6 +145,9 @@ internal class TeslaBleConversation(
     fun start(register: Boolean): TeslaBleStep {
         if (state != State.NEW) return fail("키 시험 작업이 이미 시작되었거나 종료되었습니다")
         return guarded {
+            if (purpose == TeslaBlePurpose.FRUNK_OPEN &&
+                (register || query != TeslaBleQuery.BODY_STATUS || authorizeFrunk == null || frunkDeadline == null)
+            ) return@guarded fail("FRUNK_PURPOSE_INVALID")
             if (register && query != TeslaBleQuery.BODY_STATUS) {
                 return@guarded fail("앱 키 등록은 기본 차량 상태 조회에서만 허용됩니다")
             }
@@ -143,10 +171,25 @@ internal class TeslaBleConversation(
 
     @Synchronized
     fun receive(payload: ByteArray, receivedAtElapsedRealtime: Long = now()): TeslaBleStep {
-        if (state == State.NEW || state == State.TERMINAL || state == State.CLOSED) {
-            return fail("활성 키 시험 작업이 없습니다")
+        responseDisposition = if (state == State.CARD) "RESPONSE_WAITING" else "RESPONSE_INVALID"
+        if (onResponseObservation != null) {
+            responseFromPresent = null
+            responseFromKind = null
+            responseFromDomain = null
+            responseToPresent = null
+            responseToKind = null
+            responsePayloadKind = null
+            responseDomainMismatchReason = null
+            responseRequestUuidPresent = null
+            responseRequestUuidMatches = null
+            responseToRouteMatches = null
+            responseSignedStatusPresent = null
+            responseSignedMessageFault = null
+            responseOperationStatus = null
         }
-        return guarded {
+        val step = if (state == State.NEW || state == State.TERMINAL || state == State.CLOSED) {
+            fail("활성 키 시험 작업이 없습니다")
+        } else guarded {
             require(payload.size <= TESLA_BLE_MAX_FRAME_BYTES)
             val current = now()
             if (current < lastNow) return@guarded fail("키 시험 시간 기준이 변경되었습니다")
@@ -162,6 +205,26 @@ internal class TeslaBleConversation(
                 else -> fail("활성 키 시험 작업이 없습니다")
             }
         }
+        if (step is TeslaBleStep.Failed && responseDisposition == "RESPONSE_WAITING") {
+            responseDisposition = "RESPONSE_REJECTED"
+        }
+        // 판정 완료 뒤 관측만 전달한다. callback 예외는 보안 검증 실패로 위장하지 않는다.
+        try {
+            onResponseObservation?.invoke(TeslaBleResponseObservation(
+                disposition = responseDisposition, expectedDomain = domain.number,
+                fromPresent = responseFromPresent, fromKind = responseFromKind, fromDomain = responseFromDomain,
+                toPresent = responseToPresent, toKind = responseToKind, payloadKind = responsePayloadKind,
+                domainMismatchReason = responseDomainMismatchReason,
+                requestUuidPresent = responseRequestUuidPresent, requestUuidMatches = responseRequestUuidMatches,
+                toRouteMatches = responseToRouteMatches,
+                signedStatusPresent = responseSignedStatusPresent,
+                signedMessageFault = responseSignedMessageFault, operationStatus = responseOperationStatus,
+            ))
+        } catch (failure: Exception) {
+            if (step is TeslaBleStep.Send) step.payload.fill(0)
+            throw failure
+        }
+        return step
     }
 
     private inline fun guarded(action: () -> TeslaBleStep): TeslaBleStep = try {
@@ -193,6 +256,7 @@ internal class TeslaBleConversation(
         // 일부 펌웨어는 legacy FromVCSEC를, 일부는 universal에 담긴 VCSEC 응답을 보낸다.
         // legacy에는 request correlation/authentication이 없으므로 보고와 인증을 분리한다.
         val envelope = UniversalMessage.RoutableMessage.parseFrom(payload)
+        captureResponseObservation(envelope)
         val wrapped = envelope.hasFromDestination() || envelope.hasToDestination() ||
             envelope.payloadCase != UniversalMessage.RoutableMessage.PayloadCase.PAYLOAD_NOT_SET
         val response = if (wrapped) {
@@ -237,10 +301,12 @@ internal class TeslaBleConversation(
 
     private fun receiveHandshake(payload: ByteArray, current: Long): TeslaBleStep {
         val response = UniversalMessage.RoutableMessage.parseFrom(payload)
+        captureResponseObservation(response)
         if (!matchesRequest(response)) return TeslaBleStep.Waiting(TeslaBlePhase.HANDSHAKING)
         // 공식 pkg/protocol/error.go GetError: fault가 있으면 다른 어떤 판정보다 먼저 실패다.
         val fault = response.signedMessageStatus.signedMessageFaultValue
         if (fault != 0) {
+            responseDisposition = "RESPONSE_REJECTED"
             val evidence = if (fault == UniversalMessage.MessageFault_E.MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID_VALUE) {
                 TeslaBleAuthEvidence.KEY_NOT_PAIRED_REPORTED
             } else TeslaBleAuthEvidence.REQUEST_REJECTED
@@ -253,17 +319,20 @@ internal class TeslaBleConversation(
         if (response.payloadCase != UniversalMessage.RoutableMessage.PayloadCase.SESSION_INFO) {
             // 공식 internal/dispatcher/dispatcher.go tryStartSession은 payload 없는 GetError(nil)
             // ACK를 받고도 readySignal(session info)을 계속 기다린다. 이는 성공이 아니라 대기다.
-            if (isNominalHelloAck(response)) {
+            if (isNominalAck(response)) {
+                responseDisposition = "ACK_WAITING"
                 return TeslaBleStep.Waiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.ACKNOWLEDGED)
             }
             val ackShaped = response.payloadCase == UniversalMessage.RoutableMessage.PayloadCase.PAYLOAD_NOT_SET &&
                 response.hasSignedMessageStatus()
             return if (ackShaped) {
+                responseDisposition = "RESPONSE_REJECTED"
                 fail("차량이 키 인증 작업을 완료하지 않았습니다", TeslaBleAuthEvidence.OPERATION_REJECTED)
             } else {
                 fail("차량 키 인증 응답이 올바르지 않습니다", TeslaBleAuthEvidence.UNEXPECTED_PAYLOAD)
             }
         }
+        responseDisposition = "SESSION_INFO_INVALID"
         val encodedInfo = response.sessionInfo.toByteArray()
         val info = try {
             Signatures.SessionInfo.parseFrom(encodedInfo)
@@ -272,6 +341,7 @@ internal class TeslaBleConversation(
             return discardHandshake(TeslaBleAuthEvidence.SESSION_INFO_INVALID)
         }
         if (info.status == Signatures.Session_Info_Status.SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST) {
+            responseDisposition = "SESSION_INFO_AUTH_REJECTED"
             // 인증 전 응답의 미등록 보고이며, 차량 신원이나 실제 미등록을 증명하지 않는다.
             // 서명 검증 이전이라도 인증 성공으로 취급하지 않는다.
             encodedInfo.fill(0)
@@ -336,28 +406,46 @@ internal class TeslaBleConversation(
             tag.fill(0)
             encodedInfo.fill(0)
         }
-        return sendStatusRequest(current)
+        val next = sendStatusRequest(current)
+        responseDisposition = "SESSION_READY"
+        return next
     }
 
     // 공식 dispatcher.checkForSessionUpdate처럼 검증 불가능한 세션 응답만 버린다.
     // 키·epoch·counter·route와 phase 시작 시각을 바꾸지 않으며 새 요청도 전송하지 않는다.
-    private fun discardHandshake(evidence: TeslaBleAuthEvidence): TeslaBleStep =
-        TeslaBleStep.Waiting(TeslaBlePhase.HANDSHAKING, evidence)
+    private fun discardHandshake(evidence: TeslaBleAuthEvidence): TeslaBleStep {
+        responseDisposition = when (evidence) {
+            TeslaBleAuthEvidence.SIGNATURE_MISSING, TeslaBleAuthEvidence.TAG_MISSING,
+            TeslaBleAuthEvidence.TAG_LENGTH_INVALID, TeslaBleAuthEvidence.HMAC_MISMATCH ->
+                "SESSION_INFO_AUTH_REJECTED"
+            else -> "SESSION_INFO_INVALID"
+        }
+        return TeslaBleStep.Waiting(TeslaBlePhase.HANDSHAKING, evidence)
+    }
 
     /**
      * 상관관계가 맞는, 차량이 보낸 명목 OK ACK. session info가 아직 없으므로 성공이 아니다.
      * 대기로 처리하며 phaseStartedAt과 전체 deadline을 연장하지 않는다.
      */
-    private fun isNominalHelloAck(response: UniversalMessage.RoutableMessage): Boolean =
+    private fun isNominalAck(response: UniversalMessage.RoutableMessage): Boolean =
         response.payloadCase == UniversalMessage.RoutableMessage.PayloadCase.PAYLOAD_NOT_SET &&
             response.hasSignedMessageStatus() &&
             response.signedMessageStatus.signedMessageFaultValue == 0 &&
             response.signedMessageStatus.operationStatus == UniversalMessage.OperationStatus_E.OPERATIONSTATUS_OK
 
     private fun sendStatusRequest(current: Long): TeslaBleStep {
+        if (purpose == TeslaBlePurpose.FRUNK_OPEN) {
+            checkNotNull(authorizeFrunk).invoke()?.let { return fail(it) }
+        }
         require(commandCounter < UINT32_MAX)
         commandCounter++
-        val expires = vehicleClock + (current - sessionAt) / 1_000L + COMMAND_TTL_SECONDS
+        val currentVehicleClock = vehicleClock + (current - sessionAt) / 1_000L
+        val expires = if (purpose == TeslaBlePurpose.FRUNK_OPEN) {
+            val remaining = checkNotNull(frunkDeadline) - current
+            if (remaining < 1_000L) return fail("FRUNK_COMMAND_EXPIRED")
+            minOf(currentVehicleClock + COMMAND_TTL_SECONDS,
+                vehicleClock + (checkNotNull(frunkDeadline) - sessionAt) / 1_000L)
+        } else currentVehicleClock + COMMAND_TTL_SECONDS
         require(expires in 1..MAX_EPOCH_SECONDS)
         newRequestIdentity()
         val metadata = Metadata()
@@ -365,7 +453,13 @@ internal class TeslaBleConversation(
             .byte(1, domain.number)
             .bytes(2, personalization).bytes(3, epoch).uint(4, expires)
             .uint(5, commandCounter).uint(7, ENCRYPT_RESPONSE_FLAG.toLong()).finish()
-        val plaintext = when (query) {
+        val plaintext = if (purpose == TeslaBlePurpose.FRUNK_OPEN) {
+            // pinned actions.go OpenFrunk → vcsec.go executeClosureAction. RKE 숫자를 확장하지 않는다.
+            Vcsec.UnsignedMessage.newBuilder().setClosureMoveRequest(
+                Vcsec.ClosureMoveRequest.newBuilder()
+                    .setFrontTrunk(Vcsec.ClosureMoveType_E.CLOSURE_MOVE_TYPE_MOVE),
+            ).build().toByteArray()
+        } else when (query) {
             TeslaBleQuery.BODY_STATUS -> Vcsec.UnsignedMessage.newBuilder().setInformationRequest(
                 Vcsec.InformationRequest.newBuilder()
                     .setInformationRequestType(Vcsec.InformationRequestType.INFORMATION_REQUEST_TYPE_GET_STATUS),
@@ -401,7 +495,8 @@ internal class TeslaBleConversation(
                 ).build()
             state = State.STATUS
             phaseStartedAt = current
-            return TeslaBleStep.Send(request.toByteArray(), TeslaBlePhase.READING_STATUS)
+            return TeslaBleStep.Send(request.toByteArray(), TeslaBlePhase.READING_STATUS,
+                actuator = purpose == TeslaBlePurpose.FRUNK_OPEN)
         } finally {
             metadata.fill(0)
             plaintext.fill(0)
@@ -413,15 +508,44 @@ internal class TeslaBleConversation(
 
     private fun receiveStatus(payload: ByteArray, receivedAtElapsedRealtime: Long): TeslaBleStep {
         val response = UniversalMessage.RoutableMessage.parseFrom(payload)
+        captureResponseObservation(response)
         if (!matchesRequest(response)) return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
+        if (purpose == TeslaBlePurpose.FRUNK_OPEN && !response.hasSignatureData()) {
+            // 공식 closure terminal은 payload 없는 nominal ACK도 허용한다. 이는 AEAD 인증된
+            // ACK나 OPEN 증거가 아니므로 별도 fresh BODY 조회로만 넘어간다.
+            return finishFrunk(TeslaFrunkReply.UNCONFIRMED)
+        }
+        if (purpose == TeslaBlePurpose.READ_ONLY && query == TeslaBleQuery.BODY_STATUS) {
+            // 공식 vcsec.go unmarshalVCSECResponse는 GetError를 먼저 확인하고 payload 없는
+            // nominal 응답을 허용한다. 여기서는 실제 암호화 BODY가 오기 전에는 완료하지 않는다.
+            // 이 header는 비인증 관측일 수 있으므로 인증 실패 evidence로 승격하지 않는다.
+            if (response.signedMessageStatus.signedMessageFaultValue != 0 ||
+                response.hasSignedMessageStatus() &&
+                response.signedMessageStatus.operationStatus != UniversalMessage.OperationStatus_E.OPERATIONSTATUS_OK
+            ) {
+                responseDisposition = "RESPONSE_REJECTED"
+                return fail("차량 응답이 상태 조회 오류를 보고했습니다")
+            }
+            if (isNominalAck(response) && !response.hasSignatureData()) {
+                // ACK는 counter를 소비하거나 identity·phase/전체 기한을 갱신하지 않는다.
+                responseDisposition = "ACK_WAITING"
+                return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
+            }
+        }
         if (response.payloadCase != UniversalMessage.RoutableMessage.PayloadCase.PROTOBUF_MESSAGE_AS_BYTES ||
             !response.hasSignatureData() || !response.signatureData.hasAESGCMResponseData()
         ) return fail("암호화된 차량 상태 응답이 필요합니다")
         val signature = response.signatureData.getAESGCMResponseData()
         require(signature.nonce.size() == 12 && signature.tag.size() == 16)
         val counter = unsigned(signature.counter)
-        if (counter in responseCounters) return fail("중복 차량 상태 응답을 거부했습니다")
-        if (responseCounters.size >= MAX_RESPONSES) return fail("차량 상태 응답 한도를 초과했습니다")
+        if (counter in responseCounters) {
+            responseDisposition = "RESPONSE_REJECTED"
+            return fail("중복 차량 상태 응답을 거부했습니다")
+        }
+        if (responseCounters.size >= MAX_RESPONSES) {
+            responseDisposition = "RESPONSE_REJECTED"
+            return fail("차량 상태 응답 한도를 초과했습니다")
+        }
         val metadata = Metadata()
             .byte(0, Signatures.SignatureType.SIGNATURE_TYPE_AES_GCM_RESPONSE_VALUE)
             .byte(1, domain.number)
@@ -436,7 +560,21 @@ internal class TeslaBleConversation(
         try {
             plaintext = aesGcm(Cipher.DECRYPT_MODE, sessionKey, nonce, aad, encrypted)
             responseCounters.add(counter) // 검증에 성공한 counter만 소비한다.
+            if (purpose == TeslaBlePurpose.FRUNK_OPEN) {
+                if (response.signedMessageStatus.signedMessageFaultValue != 0) {
+                    return finishFrunk(TeslaFrunkReply.REJECTED)
+                }
+                if (response.hasSignedMessageStatus() &&
+                    response.signedMessageStatus.operationStatus != UniversalMessage.OperationStatus_E.OPERATIONSTATUS_OK
+                ) {
+                    return if (response.signedMessageStatus.operationStatus == UniversalMessage.OperationStatus_E.OPERATIONSTATUS_WAIT) {
+                        TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
+                    } else finishFrunk(TeslaFrunkReply.REJECTED)
+                }
+                return receiveFrunkResult(plaintext)
+            }
             if (response.signedMessageStatus.signedMessageFaultValue != 0) {
+                responseDisposition = "RESPONSE_REJECTED"
                 return fail("차량이 상태 조회 요청을 거부했습니다")
             }
             return when (query) {
@@ -452,10 +590,46 @@ internal class TeslaBleConversation(
         }
     }
 
+    private fun receiveFrunkResult(plaintext: ByteArray): TeslaBleStep {
+        val response = Vcsec.FromVCSECMessage.parseFrom(plaintext)
+        if (response.hasNominalError()) return finishFrunk(TeslaFrunkReply.REJECTED)
+        if (response.hasCommandStatus()) {
+            // 공식 executeClosureAction.done: CommandStatus가 있으면 아직 terminal이 아니다.
+            // WAIT/OK는 대기이고 명시 ERROR만 거절이다. signedMessageStatus 오류도 보존한다.
+            val status = response.commandStatus
+            if (status.operationStatus == Vcsec.OperationStatus_E.OPERATIONSTATUS_ERROR ||
+                status.hasSignedMessageStatus() && status.signedMessageStatus.signedMessageInformationValue != 0
+            ) return finishFrunk(TeslaFrunkReply.REJECTED)
+            if (status.operationStatus != Vcsec.OperationStatus_E.OPERATIONSTATUS_OK &&
+                status.operationStatus != Vcsec.OperationStatus_E.OPERATIONSTATUS_WAIT
+            ) return finishFrunk(TeslaFrunkReply.UNCONFIRMED)
+            return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
+        }
+        // 빈 AEAD plaintext도 공식 nominal terminal 계약이다. OPEN은 후속 BODY에서만 관측한다.
+        return finishFrunk(TeslaFrunkReply.ACKNOWLEDGED)
+    }
+
+    private fun finishFrunk(reply: TeslaFrunkReply): TeslaBleStep.FrunkResult {
+        responseDisposition = when (reply) {
+            TeslaFrunkReply.ACKNOWLEDGED -> "FRUNK_ACKNOWLEDGED"
+            TeslaFrunkReply.REJECTED -> "RESPONSE_REJECTED"
+            TeslaFrunkReply.UNCONFIRMED -> "FRUNK_UNCONFIRMED"
+        }
+        state = State.TERMINAL
+        eraseEphemeral()
+        return TeslaBleStep.FrunkResult(reply)
+    }
+
     private fun receiveBodyStatus(plaintext: ByteArray): TeslaBleStep {
         val vcsec = Vcsec.FromVCSECMessage.parseFrom(plaintext)
-        if (vcsec.hasNominalError()) return fail("차량이 상태 조회를 거부했습니다")
-        if (!vcsec.hasVehicleStatus()) return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
+        if (vcsec.hasNominalError()) {
+            responseDisposition = "RESPONSE_REJECTED"
+            return fail("차량이 상태 조회를 거부했습니다")
+        }
+        if (!vcsec.hasVehicleStatus()) {
+            responseDisposition = "STATUS_INCOMPLETE"
+            return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
+        }
         val status = vcsec.vehicleStatus
         val lock = if (status.hasVehicleLockState() && status.vehicleLockStateValue in 0..3) {
             status.vehicleLockStateValue
@@ -464,7 +638,8 @@ internal class TeslaBleConversation(
         val frontTrunk = if (status.hasClosureStatuses() && closures.hasFrontTrunk() &&
             closures.frontTrunkValue in 0..6
         ) closures.frontTrunkValue else null
-        return complete(TeslaReadOnlyStatus(lock, frontTrunk))
+        return complete(TeslaReadOnlyStatus(lock, frontTrunk,
+            bodyVehicleSleepStatus = status.vehicleSleepStatusValue.takeIf { it >= 0 }))
     }
 
     private fun receiveDriveState(plaintext: ByteArray, receivedAtElapsedRealtime: Long): TeslaBleStep {
@@ -472,10 +647,12 @@ internal class TeslaBleConversation(
         // 공식 getCarServerResponse의 proto3 계약: ActionStatus 생략은 result 기본값 OK다.
         // AEAD 검증과 실제 DriveState 존재는 별도로 필수이며 알 수 없는 result는 거부한다.
         if (response.actionStatus.result != CarServer.OperationStatus_E.OPERATIONSTATUS_OK) {
+            responseDisposition = "RESPONSE_REJECTED"
             return fail("차량이 주행 상태 조회를 완료하지 않았습니다")
         }
         // 차량이 제공한 result_reason/plain_text는 식별자 등을 포함할 수 있어 노출하지 않는다.
         if (!response.hasVehicleData() || !response.vehicleData.hasDriveState()) {
+            responseDisposition = "STATUS_INCOMPLETE"
             return fail("차량 응답에 주행 상태가 없습니다")
         }
         val drive = response.vehicleData.driveState
@@ -494,22 +671,94 @@ internal class TeslaBleConversation(
     }
 
     private fun complete(status: TeslaReadOnlyStatus): TeslaBleStep.Complete {
+        responseDisposition = "STATUS_VERIFIED"
         state = State.TERMINAL
         eraseEphemeral()
         return TeslaBleStep.Complete(status)
     }
 
+    private fun captureResponseObservation(message: UniversalMessage.RoutableMessage) {
+        if (onResponseObservation == null) return
+        val fromPresent = message.hasFromDestination()
+        val toPresent = message.hasToDestination()
+        val signedStatusPresent = message.hasSignedMessageStatus()
+        responseSignedStatusPresent = signedStatusPresent
+        responseSignedMessageFault = if (signedStatusPresent) message.signedMessageStatus.signedMessageFaultValue else null
+        responseOperationStatus = if (signedStatusPresent) message.signedMessageStatus.operationStatusValue else null
+        responseFromPresent = fromPresent
+        responseFromKind = if (fromPresent) destinationKind(message.fromDestination) else null
+        responseFromDomain = if (fromPresent &&
+            message.fromDestination.subDestinationCase == UniversalMessage.Destination.SubDestinationCase.DOMAIN
+        ) message.fromDestination.domainValue else null
+        responseToPresent = toPresent
+        responseToKind = if (toPresent) destinationKind(message.toDestination) else null
+        // 다음 Send의 identity 회전·종료 시 소거 전에 수신 시점의 비인증 일치 여부만 보존한다.
+        val uuidPresent = !message.requestUuid.isEmpty
+        responseRequestUuidPresent = uuidPresent
+        responseRequestUuidMatches = if (uuidPresent && requestUuid.isNotEmpty()) {
+            observedBytesMatch(message.requestUuid, requestUuid)
+        } else null
+        responseToRouteMatches = if (toPresent && route.isNotEmpty()) {
+            message.toDestination.subDestinationCase == UniversalMessage.Destination.SubDestinationCase.ROUTING_ADDRESS &&
+                observedBytesMatch(message.toDestination.routingAddress, route)
+        } else null
+        responsePayloadKind = when (message.payloadCase) {
+            UniversalMessage.RoutableMessage.PayloadCase.SESSION_INFO -> "SESSION_INFO"
+            UniversalMessage.RoutableMessage.PayloadCase.SESSION_INFO_REQUEST -> "SESSION_INFO_REQUEST"
+            UniversalMessage.RoutableMessage.PayloadCase.PROTOBUF_MESSAGE_AS_BYTES -> "PROTOBUF_MESSAGE_AS_BYTES"
+            UniversalMessage.RoutableMessage.PayloadCase.PAYLOAD_NOT_SET -> "UNSET"
+            else -> "UNKNOWN"
+        }
+    }
+
+    /** 동일 길이는 끝까지 비교한다. 관측용 ByteString·배열 복사나 해시를 만들지 않는다. */
+    private fun observedBytesMatch(observed: ByteString, expected: ByteArray): Boolean {
+        if (observed.size() != expected.size) return false
+        var difference = 0
+        var index = 0
+        while (index < expected.size) {
+            difference = difference or (observed.byteAt(index).toInt() xor expected[index].toInt())
+            index++
+        }
+        return difference == 0
+    }
+
+    private fun destinationKind(destination: UniversalMessage.Destination): String =
+        when (destination.subDestinationCase) {
+            UniversalMessage.Destination.SubDestinationCase.DOMAIN -> "DOMAIN"
+            UniversalMessage.Destination.SubDestinationCase.ROUTING_ADDRESS -> "ROUTING_ADDRESS"
+            UniversalMessage.Destination.SubDestinationCase.SUBDESTINATION_NOT_SET -> "UNSET"
+            else -> "UNKNOWN"
+        }
+
     private fun matchesRequest(message: UniversalMessage.RoutableMessage): Boolean {
-        if (!message.hasFromDestination() || !message.hasToDestination() ||
+        if (!message.hasFromDestination() ||
             message.fromDestination.subDestinationCase != UniversalMessage.Destination.SubDestinationCase.DOMAIN ||
-            message.fromDestination.domain != domain ||
+            message.fromDestination.domain != domain
+        ) {
+            responseDisposition = "DOMAIN_MISMATCH"
+            if (onResponseObservation != null) responseDomainMismatchReason = when {
+                !message.hasFromDestination() -> "FROM_MISSING"
+                message.fromDestination.subDestinationCase != UniversalMessage.Destination.SubDestinationCase.DOMAIN ->
+                    "FROM_NOT_DOMAIN"
+                else -> "DOMAIN_DIFFERENT"
+            }
+            return false
+        }
+        if (!message.hasToDestination() ||
             message.toDestination.subDestinationCase != UniversalMessage.Destination.SubDestinationCase.ROUTING_ADDRESS ||
             !message.toDestination.routingAddress.equals(ByteString.copyFrom(route))
-        ) return false
+        ) {
+            responseDisposition = "ROUTE_MISMATCH"
+            return false
+        }
         // 공식 dispatcher.process/Send: UUID 생략 특례는 VCSEC(domain2)만 허용한다.
         // Infotainment(domain3)는 HELLO와 응답 모두 정확한 request_uuid가 필요하다.
-        return message.requestUuid.equals(ByteString.copyFrom(requestUuid)) ||
+        if (message.requestUuid.equals(ByteString.copyFrom(requestUuid)) ||
             domain == UniversalMessage.Domain.DOMAIN_VEHICLE_SECURITY && message.requestUuid.isEmpty
+        ) return true
+        responseDisposition = "REQUEST_UUID_MISMATCH"
+        return false
     }
 
     private fun newRequestIdentity() {

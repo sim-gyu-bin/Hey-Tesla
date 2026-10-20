@@ -22,7 +22,7 @@ class BleTrialSummaryTest {
     }
 
     @Test fun nextEventHasNoPreviousAttemptAndLegacyBytesRemainUnchanged() {
-        val file = File(Files.createTempDirectory("ble-summary-test").toFile(), "events.jsonl")
+        val file = File(Files.createTempDirectory("ble-summary-test").toFile(), File(FIELD_LOG_RELATIVE_PATH).name)
         val legacy = (1..4).joinToString("") { "{\"version\":$it,\"event\":\"PROCESS_START_OFF\",\"state\":{}}\n" }
         file.writeText(legacy)
         val sink = FieldEventSink(file)
@@ -69,6 +69,29 @@ class BleTrialSummaryTest {
         assertTrue(FieldEvents.isAllowed("BLE_PROBE_CLEANUP_FAILED"))
         assertFalse(FieldEvents.isAllowed("BLE_FIELD_TRIAL_FINISHED_extra"))
         assertFalse(FieldEvents.isAllowed("BLE_PROBE_FAILED_raw"))
+    }
+
+    @Test fun authenticatedReadStopReasonsShareFixedPrivacyBoundary() {
+        val reasons = listOf(
+            "BLE_AUTHENTICATED_READ_OPTIONS_INVALID", "SCAN_RESULT_STALE",
+            "EXISTING_KEY_UNAVAILABLE", "DRIVE_READ_FAILED", "READ_DEADLINE_EXPIRED",
+            "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED",
+        )
+        for (reason in reasons) {
+            val encoded = FieldJson.encode(record("BLE_FIELD_TRIAL_FINISHED", summary().copy(
+                status = "FAILED", reason = reason,
+            )).copy(state = mapOf(FieldStateKeys.BLE_FIELD_TRIAL_STOP_REASON to reason)))
+            assertTrue(encoded.contains("\"reason\":\"$reason\""))
+            assertTrue(encoded.contains("\"bleFieldTrialStopReason\":\"$reason\""))
+            val untrusted = "${reason}_VIN-MAC-KEY-raw"
+            val rejected = FieldJson.encode(record("BLE_FIELD_TRIAL_FINISHED", summary().copy(
+                status = "FAILED", reason = untrusted,
+            )).copy(state = mapOf(FieldStateKeys.BLE_FIELD_TRIAL_STOP_REASON to untrusted)))
+            assertFalse(rejected.contains("VIN-MAC-KEY"))
+            assertTrue(rejected.contains("\"reason\":null"))
+            assertTrue(rejected.contains("\"bleFieldTrialStopReason\":null"))
+            assertTrue(rejected.contains("\"status\":\"FAILED\""))
+        }
     }
 
     private fun record(event: String, summary: BleTrialSummary? = null) = FieldRecord(

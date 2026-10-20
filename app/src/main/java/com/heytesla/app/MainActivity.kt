@@ -35,10 +35,12 @@ class MainActivity : ComponentActivity() {
     private val speechTrialState = MutableStateFlow(SpeechTrialState())
     private val speechTrial = speechTrialState.asStateFlow()
     private lateinit var speechRecognitionProbe: SpeechRecognitionProbe
+    private lateinit var frunkVoiceProbe: FrunkVoiceProbe
     private val vehicleChooserPending = MutableStateFlow(false)
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         runtime.refresh()
         runtime.event("RUNTIME_PERMISSION_RESULT")
+        runtime.restoreBleDetection()
     }
     private val chooser = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         setVehicleChooserPending(false)
@@ -56,6 +58,7 @@ class MainActivity : ComponentActivity() {
         speechSupportProbe = SpeechSupportProbe(applicationContext, speechSupportState) { runtime.event(it) }
         uwbSupportProbe = UwbSupportProbe(applicationContext, uwbSupportState, runtime)
         speechRecognitionProbe = SpeechRecognitionProbe(applicationContext, speechTrialState, runtime)
+        frunkVoiceProbe = FrunkVoiceProbe(applicationContext, runtime)
         setContent {
             val state by runtime.state.collectAsState()
             val support by speechSupport.collectAsState()
@@ -73,7 +76,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun createActions(): AppActions = AppActions(
-            requestPermission = { permission -> permissionRequest.launch(arrayOf(permission)) },
+            requestPermission = { permission ->
+                permissionRequest.launch(
+                    if (permission == android.Manifest.permission.ACCESS_FINE_LOCATION)
+                        arrayOf(android.Manifest.permission.ACCESS_COARSE_LOCATION, permission)
+                    else arrayOf(permission),
+                )
+            },
             openSystemSettings = { action ->
                 settings(Intent(action).apply {
                     if (action == Settings.ACTION_APPLICATION_DETAILS_SETTINGS) {
@@ -98,6 +107,7 @@ class MainActivity : ComponentActivity() {
                 uwbSupportProbe.cancel()
                 speechSupportProbe.cancel()
                 speechRecognitionProbe.cancel()
+                frunkVoiceProbe.cancel()
                 runtime.stop("USER_STOP")
             },
             querySupport = ::querySupport,
@@ -117,16 +127,46 @@ class MainActivity : ComponentActivity() {
             cancelTrial = { speechRecognitionProbe.cancel() },
             startBle = ::startBle,
             cancelBle = { runtime.stopBleFieldTrial() },
-            bleFieldBlockedReason = runtime::bleFieldTrialBlockedReason,
+            bleFieldBlockedReason = { runtime.bleFieldTrialBlockedReason(it) },
             startTeslaKey = ::startTeslaKey,
             cancelTeslaKey = { runtime.cancelTeslaKey() },
             teslaKeyBlockedReason = runtime::teslaKeyBlockedReason,
             leaveDiagnostics = ::leaveDiagnostics,
+            frunkVoice = com.heytesla.app.ui.FrunkVoiceActions(
+                start = { consent ->
+                    // 실차 시험은 다른 진단을 자동 중지하지 않는다. 명시적으로 정리한 뒤에만 입장한다.
+                    val support = speechSupportState.value
+                    if (support.status != SpeechProbeStatus.RUNNING &&
+                        support.reason != "DESTROY_FAILED" && !runtime.uwbSupportActive &&
+                        !runtime.uwbSupportCleanupFailed
+                    ) frunkVoiceProbe.start(consent,
+                        support.status == SpeechProbeStatus.COMPLETE && support.metadata?.koKrInstalled == true)
+                },
+                cancel = { frunkVoiceProbe.cancel() },
+                visible = runtime::setFrunkVoiceVisible,
+                blockedReason = {
+                    when {
+                        speechSupportState.value.status == SpeechProbeStatus.RUNNING -> "SPEECH_SUPPORT_RUNNING"
+                        speechSupportState.value.reason == "DESTROY_FAILED" -> "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED"
+                        else -> runtime.frunkVoiceBlockedReason()
+                    }
+                },
+            ),
     )
 
-    override fun onResume() { super.onResume(); runtime.activityVisible = true; runtime.refresh(); runtime.event("UI_RESUMED") }
+    override fun onResume() {
+        super.onResume()
+        runtime.activityVisible = true
+        org.altbeacon.beacon.BeaconManager.getInstanceForApplication(applicationContext).setBackgroundMode(false)
+        runtime.refresh()
+        runtime.restoreBleDetection()
+        runtime.event("UI_RESUMED")
+    }
     override fun onPause() {
         runtime.activityVisible = false
+        runtime.setFrunkVoiceVisible(false)
+        frunkVoiceProbe.cancel()
+        org.altbeacon.beacon.BeaconManager.getInstanceForApplication(applicationContext).setBackgroundMode(true)
         runtime.cancelTeslaKey("UI_PAUSED")
         uwbSupportProbe.cancel()
         speechSupportProbe.cancel()
@@ -139,6 +179,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         runtime.activityVisible = false
+        runtime.setFrunkVoiceVisible(false)
+        frunkVoiceProbe.cancel()
         runtime.cancelTeslaKey("UI_DESTROYED")
         uwbSupportProbe.cancel()
         speechSupportProbe.cancel()
@@ -147,6 +189,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun leaveDiagnostics() {
+        runtime.setFrunkVoiceVisible(false)
+        frunkVoiceProbe.cancel()
         runtime.cancelTeslaKey("DIAGNOSTICS_HIDDEN")
         uwbSupportProbe.cancel()
         speechSupportProbe.cancel()

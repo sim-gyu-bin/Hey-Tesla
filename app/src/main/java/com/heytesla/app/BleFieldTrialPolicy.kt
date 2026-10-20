@@ -43,6 +43,63 @@ internal class BleFieldTrialPolicy(
     private var candidateAttempts = 0
     private var candidateDeadline: Long? = null
     private var retryAt: Long? = null
+    private var lastScanAt = Long.MIN_VALUE
+    private var attemptCancelRequested = false
+    private var lastFinishedAt = Long.MIN_VALUE
+
+    var acceptedAdvertisementCount = 0L
+        private set
+    private var candidateAdvertisementCount = 0L
+    private var suppressedReadCount = 0L
+    private var lastAcceptedReceivedElapsedMs: Long? = null
+    private var lastAcceptedDeliveredElapsedMs: Long? = null
+    private var lastExpiredElapsedMs: Long? = null
+    private var lastExpiryDelayMs: Long? = null
+
+    /** getter에는 tick/expiry/조회/스캔 동작이 없다. 지연된 timer도 그대로 관측한다. */
+    fun diagnostics(scanRunning: Boolean?): BleCandidateDiagnostics = BleCandidateDiagnostics(
+        candidate = candidateCount.takeIf { it > 0 },
+        observedElapsedMs = now(),
+        candidatePresent = present,
+        readInFlight = currentAttempt != null,
+        waitingForDeparture = waitingForDeparture,
+        scanRunning = scanRunning,
+        acceptedAdvertisementCount = acceptedAdvertisementCount,
+        candidateAdvertisementCount = candidateAdvertisementCount,
+        suppressedReadCount = suppressedReadCount,
+        lastAcceptedReceivedElapsedMs = lastAcceptedReceivedElapsedMs,
+        lastAcceptedDeliveredElapsedMs = lastAcceptedDeliveredElapsedMs,
+        expiresElapsedMs = candidateExpiry(),
+        lastExpiredElapsedMs = lastExpiredElapsedMs,
+        lastExpiryDelayMs = lastExpiryDelayMs,
+    )
+
+    val expiresElapsedMs: Long?
+        get() = candidateExpiry()
+
+    /** 조회 예산과 별개인 현재 소스 만료. 무기한 CDM/BT·로컬 GATT 봉인 중에는 기한 없음. */
+    private fun candidateExpiry(): Long? {
+        if (config.authenticatedReadOnly && currentAttempt != null) return null
+        if (!accepting || !present || !mergeSources ||
+            !config.authenticatedReadOnly && (cdmPresent || externalBtConnected) ||
+            btWithdrawn && localGattActive
+        ) return null
+        var expiry = maxOf(scanFreshUntil ?: 0L, departureGraceUntil ?: 0L)
+        if (btWithdrawn) expiry = maxOf(expiry, localRecentUntil ?: 0L)
+        return expiry
+    }
+
+    private fun observeAdvertisement(received: Long, delivered: Long) {
+        // 관측 범위만 제한한다. 비인증 모드의 기존 광고 판정/TTL 정책은 변경하지 않는다.
+        if (received < 0 || received > delivered || delivered - received > READ_START_FRESH_MS ||
+            lastAcceptedReceivedElapsedMs?.let { received <= it } == true
+        ) return
+        acceptedAdvertisementCount++
+        candidateAdvertisementCount = if (present) candidateAdvertisementCount + 1 else 1
+        if (candidateAttempts > 0 && waitingForDeparture) suppressedReadCount++
+        lastAcceptedReceivedElapsedMs = received
+        lastAcceptedDeliveredElapsedMs = delivered
+    }
 
     val waitingForDeparture: Boolean
         get() = accepting && present && currentAttempt == null && retryAt == null && !config.observationOnly
@@ -51,8 +108,11 @@ internal class BleFieldTrialPolicy(
     val nextWakeAt: Long?
         get() {
             if (!accepting) return null
-            var next = retryAt
-            if (present && mergeSources && !cdmPresent && !externalBtConnected) {
+            var next = if (config.authenticatedReadOnly) {
+                if (currentAttempt != null && !attemptCancelRequested) attemptDeadline else null
+            } else retryAt
+            if (present && mergeSources && (!config.authenticatedReadOnly || currentAttempt == null) &&
+                (config.authenticatedReadOnly || !cdmPresent && !externalBtConnected)) {
                 var expiry = maxOf(scanFreshUntil ?: 0L, departureGraceUntil ?: 0L)
                 if (btWithdrawn) {
                     if (localGattActive) return next
@@ -72,6 +132,23 @@ internal class BleFieldTrialPolicy(
         if (receivedElapsedMs > timestamp || timestamp - receivedElapsedMs > SIGNAL_FRESH_MS) {
             emit(BleEvidenceKind.SIGNAL_SHADOWED, signal, BleEvidenceGate.STALE, receivedElapsedMs)
             return Decision.NONE
+        }
+        if (config.authenticatedReadOnly && signal != BleEvidenceSignal.FILTERED_SCAN) {
+            emit(BleEvidenceKind.SIGNAL_SHADOWED, signal, received = receivedElapsedMs)
+            return Decision.NONE
+        }
+        if (config.authenticatedReadOnly &&
+            (receivedElapsedMs < 0 || receivedElapsedMs <= lastScanAt ||
+                receivedElapsedMs <= lastFinishedAt || timestamp - receivedElapsedMs > READ_START_FRESH_MS)
+        ) {
+            emit(BleEvidenceKind.SIGNAL_SHADOWED, signal, BleEvidenceGate.STALE, receivedElapsedMs)
+            return Decision.NONE
+        }
+        if (config.authenticatedReadOnly) {
+            lastScanAt = receivedElapsedMs
+            // 새 광고만 만료된 접근을 철회/재무장할 수 있다. 완료 callback/timer는 조회를 시작하지 않는다.
+            if (present && currentAttempt == null && timestamp >=
+                maxOf(scanFreshUntil ?: 0L, departureGraceUntil ?: 0L)) expire()
         }
         val bt = signal == BleEvidenceSignal.BT_CONNECTED || signal == BleEvidenceSignal.BT_DISCONNECTED
         val recent = localRecentUntil?.let { timestamp < it } == true
@@ -128,10 +205,19 @@ internal class BleFieldTrialPolicy(
             }
             BleEvidenceSignal.FILTERED_SCAN -> {
                 if (!config.supplementalScan) return Decision.NONE
-                scanFreshUntil = maxOf(scanFreshUntil ?: 0L, receivedElapsedMs + SIGNAL_FRESH_MS)
+                val freshness = if (config.authenticatedReadOnly) READ_START_FRESH_MS else SIGNAL_FRESH_MS
+                scanFreshUntil = maxOf(scanFreshUntil ?: 0L, receivedElapsedMs + freshness)
+                if (!present) candidateAdvertisementCount = 0
+                observeAdvertisement(receivedElapsedMs, timestamp)
             }
         }
         if (present) {
+            if (config.authenticatedReadOnly && currentAttempt == null &&
+                retryAt?.let { timestamp >= it } == true) {
+                retryAt = null
+                if (candidateAttempts < MAX_ATTEMPTS && hasRetryBudget(timestamp)) return begin()
+                emit(BleEvidenceKind.RETRY_SUPPRESSED, gate = BleEvidenceGate.BUDGET)
+            }
             // 패킷마다 증거 행을 만들지 않는다. 스캔 소비자는 최초 수신/새 후보만 계측한다.
             if (signal != BleEvidenceSignal.FILTERED_SCAN) {
                 emit(BleEvidenceKind.CANDIDATE_MERGED, signal, BleEvidenceGate.DUPLICATE, receivedElapsedMs)
@@ -140,6 +226,7 @@ internal class BleFieldTrialPolicy(
         }
         present = true
         candidateCount++
+        if (signal != BleEvidenceSignal.FILTERED_SCAN) candidateAdvertisementCount = 0
         candidateAttempts = 0
         candidateDeadline = null
         retryAt = null
@@ -151,12 +238,20 @@ internal class BleFieldTrialPolicy(
     fun tick(): Decision {
         if (!accepting) return Decision.NONE
         val timestamp = now()
+        if (config.authenticatedReadOnly && currentAttempt != null && !attemptCancelRequested &&
+            timestamp >= (attemptDeadline ?: Long.MAX_VALUE)
+        ) {
+            attemptCancelRequested = true
+            return Decision(cancelAttempt = currentAttempt)
+        }
         val freshScan = scanFreshUntil?.let { timestamp < it } == true
         val departureReady = timestamp >= (departureGraceUntil ?: 0L) &&
             (!btWithdrawn || (!localGattActive && timestamp >= (localRecentUntil ?: 0L)))
-        if (present && mergeSources && !cdmPresent && !externalBtConnected && !freshScan && departureReady) {
+        if (present && mergeSources && (!config.authenticatedReadOnly || currentAttempt == null) &&
+            (config.authenticatedReadOnly || !cdmPresent && !externalBtConnected) && !freshScan && departureReady) {
             return expire()
         }
+        if (config.authenticatedReadOnly) return Decision.NONE
         val due = retryAt ?: return Decision.NONE
         if (timestamp < due || currentAttempt != null) return Decision.NONE
         retryAt = null
@@ -175,7 +270,8 @@ internal class BleFieldTrialPolicy(
     /** Probe의 실제 close와 예약 반환 후에만 호출한다. 늦은 완료는 새 회차에 영향을 주지 않는다. */
     fun finished(attempt: Long, state: BleProbeState, leaseReleased: Boolean): Decision {
         if (currentAttempt != attempt || leaseRetained) return Decision.NONE
-        if (!leaseReleased || state.status == BleProbeStatus.CLEANUP_FAILED) {
+        if (!leaseReleased || state.status == BleProbeStatus.CLEANUP_FAILED ||
+            config.authenticatedReadOnly && !state.localClosed) {
             leaseRetained = true
             stop()
             emit(BleEvidenceKind.RETRY_SUPPRESSED, gate = BleEvidenceGate.CLEANUP_FAILED)
@@ -184,23 +280,29 @@ internal class BleFieldTrialPolicy(
         currentAttempt = null
         localGattActive = false
         localRecentUntil = now() + LOCAL_GATT_RECENT_MS
+        if (config.authenticatedReadOnly) {
+            lastFinishedAt = now()
+            departureGraceUntil = now() + READ_START_FRESH_MS
+        }
         completedCount++
         if (!accepting) return Decision.NONE
         val expiry = tick()
         if (expiry.cancelAttempt != null || !present) return expiry
         if (attemptCandidate != candidateCount) {
-            return if (!config.observationOnly) begin() else Decision.NONE
+            return if (!config.observationOnly && !config.authenticatedReadOnly) begin() else Decision.NONE
         }
-        if (config.retryEnabled && retryable(state) && candidateAttempts < MAX_ATTEMPTS &&
-            hasSource(now()) && hasRetryBudget(now() + RETRY_DELAY_MS)
+        val retryEnabled = config.retryEnabled || config.authenticatedReadOnly
+        val delay = if (config.authenticatedReadOnly) AUTHENTICATED_RETRY_DELAY_MS else RETRY_DELAY_MS
+        if (retryEnabled && retryable(state) && candidateAttempts < MAX_ATTEMPTS &&
+            (config.authenticatedReadOnly || hasSource(now())) && hasRetryBudget(now() + delay)
         ) {
-            retryAt = now() + RETRY_DELAY_MS
+            retryAt = now() + delay
             emit(BleEvidenceKind.RETRY_SCHEDULED, gate = BleEvidenceGate.COOLDOWN)
-        } else if (config.retryEnabled) {
+        } else if (retryEnabled) {
             val gate = when {
                 state.status == BleProbeStatus.COMPLETE -> BleEvidenceGate.SUCCESS
                 state.status == BleProbeStatus.BLOCKED -> BleEvidenceGate.BLOCKED
-                !hasRetryBudget(now() + RETRY_DELAY_MS) -> BleEvidenceGate.BUDGET
+                !hasRetryBudget(now() + delay) -> BleEvidenceGate.BUDGET
                 else -> BleEvidenceGate.UNAVAILABLE
             }
             emit(BleEvidenceKind.RETRY_SUPPRESSED, gate = gate)
@@ -218,6 +320,10 @@ internal class BleFieldTrialPolicy(
 
     private fun expire(signal: BleEvidenceSignal? = null, received: Long? = null): Decision {
         if (!present) return Decision.NONE
+        val timestamp = now()
+        val deadline = candidateExpiry()
+        lastExpiredElapsedMs = timestamp
+        lastExpiryDelayMs = deadline?.let { (timestamp - it).coerceAtLeast(0) }
         present = false
         retryAt = null
         scanFreshUntil = null
@@ -232,6 +338,7 @@ internal class BleFieldTrialPolicy(
         val timestamp = now()
         if (candidateDeadline == null) candidateDeadline = timestamp + CANDIDATE_BUDGET_MS
         candidateAttempts++
+        attemptCancelRequested = false
         attemptCandidate = candidateCount
         attemptDeadline = candidateDeadline
         localGattActive = true // connectGatt 발급 이전부터 봉인한다.
@@ -247,8 +354,11 @@ internal class BleFieldTrialPolicy(
         cdmPresent || externalBtConnected || scanFreshUntil?.let { timestamp < it } == true
 
     private fun retryable(state: BleProbeState): Boolean = when (state.status) {
-        BleProbeStatus.FAILED -> state.reason in RETRY_FAILURES
-        BleProbeStatus.TIMED_OUT -> state.reason in RETRY_TIMEOUTS
+        BleProbeStatus.FAILED -> state.reason in
+            if (config.authenticatedReadOnly) AUTHENTICATED_RETRY_FAILURES else RETRY_FAILURES
+        BleProbeStatus.TIMED_OUT -> if (config.authenticatedReadOnly) {
+            state.reason == "DEADLINE_EXPIRED"
+        } else state.reason in RETRY_TIMEOUTS
         else -> false
     }
 
@@ -268,10 +378,16 @@ internal class BleFieldTrialPolicy(
 
     companion object {
         const val DEPARTURE_GRACE_MS = 30_000L
-        const val SIGNAL_FRESH_MS = 180_000L
+        const val SIGNAL_FRESH_MS = 60_000L
         const val LOCAL_GATT_RECENT_MS = 15_000L
         const val CANDIDATE_BUDGET_MS = 40_000L
+        const val READ_START_FRESH_MS = 10_000L
         const val RETRY_DELAY_MS = 2_000L
+        const val AUTHENTICATED_RETRY_DELAY_MS = 3_500L
+        private val AUTHENTICATED_RETRY_FAILURES = setOf(
+            "GATT_CONNECT_FAILED", "GATT_CONNECTION_LOST", "GATT_DISCOVERY_FAILED",
+            "GATT_MTU_FAILED", "GATT_SUBSCRIPTION_FAILED", "GATT_WRITE_FAILED",
+        )
         const val MAX_ATTEMPTS = 2
         private val RETRY_FAILURES = setOf("CONNECTION_FAILED", "CONNECTION_LOST", "CONNECT_REQUEST_FAILED",
             "DISCOVERY_FAILED", "SUBSCRIPTION_FAILED")

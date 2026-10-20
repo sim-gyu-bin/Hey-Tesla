@@ -47,10 +47,10 @@ class BleNameDetectionUiDeviceTest {
             }
             assertFalse(clickableParent(awaitText("등록 VIN 변경")).isEnabled)
             assertFalse(clickableParent(awaitText(startLabel)).isEnabled)
-            listOf(presetLabel, "기준 방식 · 등록 주소", "개선 방식 · 등록 주소", "감지만 · GATT 없음", "BT 연결 신호 보조", "보조 스캔", "제한 재시도", "백그라운드 연결 비교").forEach {
+            listOf("접근 시 인증·상태 조회", presetLabel, "기준 방식 · 등록 주소", "개선 방식 · 등록 주소", "감지만 · GATT 없음", "BT 연결 신호 보조", "보조 스캔", "제한 재시도", "백그라운드 연결 비교").forEach {
                 assertFalse("$it: 실행 중 조건은 변경할 수 없어야 합니다", clickableParent(awaitText(it)).isEnabled)
             }
-            clickText("주말 BLE 시험 중지")
+            clickText("감지 끄기 · 자동 복원 해제")
             assertEquals(0, host.startCount)
             instrumentation.runOnMainSync { state.value = state.value.copy(bleFieldTrialStarting = false) }
             assertNoRadioOrAudioStart()
@@ -86,6 +86,45 @@ class BleNameDetectionUiDeviceTest {
             host.close()
         }
     }
+    @Test
+    fun authenticatedReadKeepsControlsSealedAndDoesNotUpgradeBodyOnlyResult() {
+        val host = VehicleVinUiTestHost()
+        host.launch()
+        try {
+            host.seedRegisteredVin()
+            instrumentation.runOnMainSync {
+                host.state.value = host.state.value.copy(
+                    bleFieldConfig = BleFieldConfig.VEHICLE_NAME_AUTHENTICATED_READ,
+                    bleFieldTrialActive = true,
+                    teslaApproachRead = TeslaApproachReadSummary(
+                        candidate = 1, attempt = 1, stage = "FAILED", query = "DRIVE_STATE",
+                        bodyVerified = true, driveVerified = false, localClosed = true,
+                    ),
+                )
+            }
+            openBle()
+            assertFalse(clickableParent(awaitText("접근 인증·상태 조회 시작")).isEnabled)
+            assertFalse(clickableParent(awaitText("등록 VIN 변경")).isEnabled)
+            assertFalse(clickableParent(awaitText(presetLabel)).isEnabled)
+            assertTrue(clickableParent(awaitText("감지 끄기 · 자동 복원 해제")).isEnabled)
+            awaitText("부분 조회 · 전체 완료 아님")
+            assertEquals(null, findNode { it.text?.toString() == "BODY·DRIVE 응답 검증 · 로컬 연결 종료" })
+            instrumentation.runOnMainSync {
+                host.state.value = host.state.value.copy(teslaApproachRead =
+                    host.state.value.teslaApproachRead?.copy(stage = "CLEANUP_FAILED", leaseRetained = true))
+            }
+            awaitText("정리 불명 · 예약 유지 · 재시작 필요")
+            assertFalse(clickableParent(awaitText("접근 인증·상태 조회 시작")).isEnabled)
+            assertNoRadioOrAudioStart()
+        } finally {
+            instrumentation.runOnMainSync {
+                host.state.value = host.state.value.copy(bleFieldTrialActive = false)
+            }
+            host.close()
+        }
+    }
+
+
 
 
     private fun assertNoRadioOrAudioStart() {
@@ -124,6 +163,7 @@ class BleNameDetectionUiDeviceTest {
         repeat(12) {
             if (findNode { it.isScrollable }?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) != true) return
             instrumentation.waitForIdleSync()
+            SystemClock.sleep(50)
         }
     }
 
@@ -134,6 +174,8 @@ class BleNameDetectionUiDeviceTest {
     }
 
     private fun awaitNode(predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo {
+        instrumentation.waitForIdleSync()
+        findNode(predicate)?.let { return it }
         scrollToTop()
         val deadline = SystemClock.elapsedRealtime() + 5_000
         while (SystemClock.elapsedRealtime() < deadline) {

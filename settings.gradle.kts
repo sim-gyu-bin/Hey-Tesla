@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "HeyTesla"
-include(":app")
+include(":app", ":altbeacon")

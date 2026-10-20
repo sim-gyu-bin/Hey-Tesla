@@ -56,7 +56,7 @@ internal class BleScanTarget private constructor(
     }
 }
 
-/** 새 FGS의 소유권과 association을 확인한 한 번의 handoff만 허용한다. 영속 복원은 없다. */
+/** 요청의 소유권과 association을 확인한 한 번의 RAM handoff만 허용한다. */
 internal class BlePendingAdvertisedName {
     private var request: String? = null
     private var name: String? = null

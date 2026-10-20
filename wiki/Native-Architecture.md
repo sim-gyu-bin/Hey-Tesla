@@ -36,9 +36,9 @@ React Native나 JavaScript 브리지는 사용하지 않는다. UI, 권한, Andr
 | `MicrophoneService.kt` | microphone FGS, 16 kHz PCM 입력의 개수·RMS 요약, silenced·만료·종료 처리. 오디오 저장·STT 없음 |
 | `SessionPolicy.kt` | 캡처 단일 세션·만료·실제 이탈·cooldown과 관찰 요청 토큰 정책. 이전 START·STOP이 새 관찰 소유권을 변경하지 못하게 함 |
 | `BleConnectionProbe.kt` / `BleGattSession.kt` / `BleCccdSubscription.kt` | 서비스 소유 등록 차량 GATT 연결·Tesla 서비스/TX/RX 확인·RX 구독·짧은 관찰과 bounded 정리. 주소는 RAM에서 바이트 배열 API로 해석하며 TX 쓰기·인증·명령은 없음. CCCD 해제는 성공한 정확한 `[0, 0]` readback만 증거로 인정 |
-| `BleFieldConfig.kt` / `BleFieldTrialPolicy.kt` / `BleGattOwnership.kt` | 기준/개선 및 v23 광고명 감지의 불변 실행 조건. 이름 모드는 감지 전용·스캔만으로 runtime에서 강제하고 GATT·BT·연결 재시도를 거부. 기존 병합/만료·자기 GATT 억제·close/예약 반환 경계 유지 |
-| `BleSupplementalScanner.kt` / `BleScanReceiver.kt` / `BleScanTarget.kt` / `TeslaBleAdvertisement.kt` | 주소 또는 공식 VIN 기반 광고명 exact 필터. 비공개 receiver·창별 PendingIntent identity·LOW_POWER/offload·5초 배치·40초/120초 예약. 실제 광고명 재검증·최신 일치 batch·세대 봉인. RAM 타깃과 고아 정리 전용 영속 token 분리 |
-| `BleEventEvidence.kt` / `BleTrialSummary.kt` / `FieldEventLog.kt` | JSONL v7: 기존 typed 감지/GATT 근거와 비민감 이름 필터 Boolean. VIN·광고명/hash·주소·RX bytes는 기록하지 않으며 미수신 값은 null. 분석기는 v1–v7 하위호환 유지 |
+| `BleFieldConfig.kt` / `BleFieldTrialPolicy.kt` / `BleGattOwnership.kt` | 기존 감지만 및 등록 주소 비교와 별도 인증 읽기 preset. 인증 모드는 신선한 광고만 접근당 1회·CDM/BT shadow·재시도 없음. native pause/close/lease·후보 만료·구 세대 봉인 유지 |
+| `BleSupplementalScanner.kt` / `BleScanReceiver.kt` / `BleScanTarget.kt` / `TeslaBleAdvertisement.kt` | AltBeacon 2.21.2 location FGS·기본 기간과 정확한 OS 이름/주소 필터. 원 ScanResult timestamp·최신 batch·세대 봉인. receiver는 이전 PendingIntent 고아 정리만 담당 |
+| `BleEventEvidence.kt` / `BleTrialSummary.kt` / `TeslaApproachReadSummary.kt` / `FieldEventLog.kt` | JSONL v9: 기존 BLE 근거와 접근별 BODY/DRIVE 검증·부분 결과·원본/수신 시각·정리 분리. 식별자/키/RX 원문 없음·미관측 null. 분석기 v1–v9 호환 |
 | `UnsupportedRecognitionService.kt` | Android 비서 등록에 필수인 인식 서비스. 인식·지원 검사에는 명시적 비지원 오류를 반환하고 캡처·모델 다운로드·외부 인식을 시작하지 않음 |
 | `SessionPolicyTest.kt` | 정책 경계 8개 회귀 테스트. 감지 기준 초기화 시 대기 세션 폐기·실제 이탈 및 cooldown 유지 포함. 실제 OS·차량 접근 시험의 대체물이 아님 |
 | `ObservationLifecycleTest.kt` | 관찰 시작 중 OFF, 낡은 START·STOP·서비스 종료, 중복 ON, 종료 후 명시적 재시작, 새 프로세스의 이전 intent 거부 경계 6개 |
@@ -49,7 +49,9 @@ React Native나 JavaScript 브리지는 사용하지 않는다. UI, 권한, Andr
 | `res/raw/speech_trial_ko.wav` | 설치된 macOS Yuna로 생성한 고정 비개인 시험 문장. 음성 모델·개인 녹음이 아닌 재현용 합성 데이터 |
 | `TeslaBleKeyStore.kt` | 우리 앱 UID의 고정 alias에서 P-256 키 생성·재사용. 개인키는 AndroidKeyStore 밖으로 추출하지 않고 제공자 ECDH를 사용한다. TEE/StrongBox의 생성 키·`PURPOSE_AGREE_KEY`만 허용하며 손상·소프트웨어/imported 키를 삭제/교체하거나 fallback하지 않음 |
 | `TeslaBleProtocol.kt` | 설정 등록과 읽기 진단이 공유하는 `TeslaBleConversation`. Driver/android_device `PRESENT_KEY`, 새 VCSEC handshake·HMAC·personalized AES-GCM `GET_STATUS`, 응답 무결성·request hash·counter 검증. 제어 명령·자동 재전송·세션 캐시 없음 |
-| `TeslaBleKeyProbe.kt` | 수동 BLE 작업·GATT·기한·전역 예약과 화면/잠금/권한/대상 상실 시 전송 봉인·로컬 정리. 등록 보고와 검증된 읽기 상태를 분리하며 close 불명은 예약을 유지 |
+| `TeslaBleKeyProbe.kt` | 수동 등록/읽기·접근 읽기의 직접 Android GATT, 단계/쓰기 기한·기존 프로토콜·전역 예약. 화면/잠금/권한/대상 상실 시 전송 봉인·로컬 정리. 등록 보고와 검증된 상태를 분리하며 close 불명은 예약 유지 |
+| `TeslaNativeGattOwner.kt` / `TeslaNativeGattConnection.kt` | 시도별 native handle 소유권·할당 불명·취소·단계별 단일 pending 요청·이전 handle/요청 거절·Service Changed 봉인. 실제 SDK 생성·disconnect/close 호출 경계 |
+| `TeslaGattWritePump.kt` / `TeslaGattWriteObservation.kt` | callback 밖 단일 쓰기 예약·접수/완료 분리·분할 진행과 마지막 실제 쓰기 관측 보존. 로컬 순번은 native 요청 ID가 아님 |
 
 `0.5.0-probe`에서 UI 책임을 위와 같이 분리했다. 음성 probe는 화면 재구성마다 만들지 않고 Activity가 소유한다. `onPause`/`onDestroy` 정리를 보존하며 같은 Activity의 진단 이탈은 `leaveDiagnostics()`로 지원 조회·STT·수동 마이크를 정리한다. `0.13.0-probe`의 BLE 시험은 별도로 서비스가 소유하여 화면 이탈·HOME·Activity 재생성에도 유지한다. v24는 VIN을 암호화 설정으로 보존하지만 편집 중 원문은 `remember` RAM에만 두고 제출·이탈·배경 전환 때 비운다. VIN 복원은 진단 자동 재시작이 아니며 원문을 saved UI state·Intent·로그에 옮기지 않는다. 화면 실측 범위는 [실측 기록](Device-Validation.md)을 따른다.
 
@@ -67,9 +69,11 @@ React Native나 JavaScript 브리지는 사용하지 않는다. UI, 권한, Andr
 
 `noBackupFilesDir/ble_pending_scan_token`은 무작위 token만 가진 정리용 메타데이터다. scan 등록 전에 동기 저장하고 동일 PendingIntent의 stopScan 정상 반환 뒤에만 비운다. VIN·광고명·MAC·키는 저장하지 않는다. Application 시작과 소유자 없는 receiver 전달은 고아 등록만 정리하며 실행을 복원하지 않는다. 정리 실패는 process-wide 진단 입장 차단으로 남는다. 이 전환은 스캔 주기 증가나 배터리 절감 입증이 아니며 실제 잠금/주머니 광고 수신과 전력 비용은 별도 측정한다.
 
+v26은 같은 readiness 점검에서 scanner의 elapsed 기한을 조정한다. CPU를 새로 깨우지 않으며, 이미 실행 기회가 생겼을 때 밀린 uptime 예약을 기다리지 않고 만료 등록을 정리한다. 스캔 SDK 오류 2/3/5만 정상 stop 이후 최대 2회·120초/240초 cooldown으로 복구하며 기존 최소 시작 간격을 지킨다. 정상 창/수신으로 예산을 되돌리지 않고 권한·정리·비지원·불명 오류는 중단한다. 무광고에 대한 watchdog 복구는 없고 GATT 연결 재시도와도 별개다. JSONL v8은 예약 지연·복구·광고 전달 처리 시점 잠금을 분리하며 패킷별 로그·식별자 필드는 추가하지 않는다.
+
 실행의 비민감 미정상 marker는 시작 전에 동기 `commit()`으로 기록하고 최종 회차·중지 행의 `fd.sync`와 pending 0 확인 후에만 정상 종료로 지운다. 새 실행은 이전 비동기 완료가 새 marker를 지우지 못하도록 봉인한다. close/로그 실패는 marker를 유지한다. 다음 프로세스는 이전 미정상 실행을 원인 불명으로 남길 뿐 실행을 자동 복원하지 않는다. JSONL v6의 `bleTrial`과 `bleEvidence`는 해당 증거 행에만 있으며 시작/heartbeat는 attempt 0·IDLE·단계시간 null로 이전 회차를 재사용하지 않는다. 기존 v1~v5 바이트는 유지한다.
 
-현재 앱은 프로세스 재생성 시 실행 OFF다. 저장된 선호를 표시하되 자동으로 마이크나 접근 관찰을 복원하지 않는다. 이는 검증 앱의 현재 제한이며 최종 무터치 운영 요구를 충족했다는 뜻이 아니다. `0.1.0-probe`에서 수동 10초 만료·즉시 종료·화면 이탈과 미등록 차량 차단을 확인했고, 후속 지원 조회와 STT·PCM 진단은 아래에 별도로 구분한다.
+v27은 명시적 광고명 감지 ON 설정만 복원한다. 이전 후보·GATT·명령·마이크는 재생하지 않으며 다른 진단 모드는 자동 재시작하지 않는다. 백그라운드 location FGS 시작 제한과 사용자 종료를 존중한다. 위 v25/v26 스케줄·로그 실패 종료·복원 금지 설명은 해당 버전의 이력이며 현재 스캔 경로는 아래 v27 계약으로 대체한다.
 
 `0.2.0-probe`의 한국어 지원 진단은 `UnsupportedRecognitionService`의 인식 제공 기능과 별개다. 전자는 OS의 온디바이스 서비스에 지원 정보만 묻고, 후자는 우리 앱에 들어온 인식 요청을 계속 비지원 오류로 거절한다. 지원 조회는 기존 오디오 세션의 소유권이나 종료 사유를 바꾸지 않는다. 완료·오류·시간 초과·취소마다 인식 객체를 해제하고, 완료된 메타데이터는 화면 이탈만으로 지우지 않는다. Activity 재생성 시에는 미조회 상태로 시작한다.
 
@@ -77,7 +81,127 @@ VIN 광고명 계산은 [공식 Tesla BLE 코드의 `VehicleLocalName`](https://
 
 설정의 앱 키 등록과 개발자 진단의 읽기 전용 조회는 같은 프로토콜을 사용하되, 주말 BLE 관찰·음성 dry-run과는 별도 경로다. 사용자 NFC 키카드 접촉·차량 UI 승인은 앱이 대행하지 않는다. 공식 Tesla 앱의 폰키·사설 키·세션을 가져오거나 우리 앱 개인키를 서버로 옮기지 않는다. [공식 등록 계약](https://github.com/teslamotors/vehicle-command/blob/main/pkg/vehicle/security.go)은 P-256 `PRESENT_KEY`를 BLE로 보내며 정상 반환도 전송만 보장한다. 등록/infotainment 동기화 확인용 `DomainInfotainment SessionInfo` 안내와 현재 VCSEC 읽기 진단은 구분한다.
 
-현재 로컬 소스·S23 설치는 `versionCode=25` / `0.25.0-probe`다. v21 초기의 등록 보고 뒤 인증 오류와 실차 검증 0회 기록은 당시 결과이며, 이후 [두 방문의 인증·재연결 조회](Device-Validation.md#실차-앱-키-인증재연결-조회-통과)에서 `STATUS_VERIFIED`·`COMPLETE`·`LOCAL_CLOSED`를 확인했다. v24 후속 실차 로그에는 `DRIVE_STATE_VERIFIED`와 정상 종료가 있고 남아 있는 앱 UI에서 지난 P 관측을 확인했다. 공통 VIN의 재실행 후 마스킹 표시도 유지됐다. 차량 광고명 match·잠금/주머니 재접근·프렁크·UWB 거리·물리 재부팅 뒤 차량 키 사용은 별도 미확인이다. v25는 BLE 전달 경로 전환이며 새 키 등록이나 차량 조회를 자동 실행하지 않는다.
+현재 소스·기기 설치는 `versionCode=42` / `0.42.0-probe`다. 화면 표시 음성 프렁크 경로·S23 기기31개 검증·실제 화면 조작을 확인했다. 실차 시험을 위해 감지는 정상 중지했으며 실제 차량 전송·개방은 아직 미검증이다. [실제 검증·실차 절차](Device-Validation.md#0420-probe--화면-표시-음성-프렁크-실차-시험)를 따른다.
+
+### v42 화면 표시 음성 프렁크
+
+- 기존 `SpeechRecognitionProbe`·`VehicleGateway`는 차량 미전송 dry-run으로 유지한다. 별도 `FrunkVoiceProbe`는 온디바이스 DIRECT_MIC만 사용한다. RAM 동의·설치된 ko-KR·foreground/잠금 해제·감지 정상 중지·단일 예약을 확인한다. 명령10초/확인8초·최종 단일 후보·신뢰도0.85 이상·정확한 “헤이 테슬라 프렁크 열어줘”와 “확인”을 요구한다. 확인 차례는 화면 안내이며 TTS/상시 호출어 탐지가 아니다.
+- `FrunkVoicePolicy`의 승인 ticket은 한 번만 소비한다. recognizer cancel/destroy 정상 반환→speech 예약 반환→차량 작업 입장을 같은 Main 직렬 경계에서 수행한다. VIN/association snapshot·화면·권한·동의/작업 기한을 재검사한다. HOME·잠금·진단 이탈·회전은 신규 전송을 취소하며 화면 복귀/프로세스 복원은 승인 재생 사건이 아니다.
+- `TeslaFrunkSequence`는 단일 GATT에서 fresh DRIVE P→새 VCSEC actuator 대화→새 BODY 상태 조회를 수행한다. `TeslaBlePurpose.FRUNK_OPEN`만 공개 `ClosureMoveRequest.frontTrunk=MOVE(1)`를 생성한다. 기존 등록키만 사용하고 domain/route/UUID/HMAC/AEAD/response counter 검증을 유지한다.
+- 확인부터40초, P 수신 monotonic5초·원 wall10초를 제한으로 사용한다. 주말 실측의 차량/폰 wall 시계차 약1.1초를 고려해 원 wall 미래차만2초 허용한다. 원 시각은 보정하지 않으며 monotonic 미래·역행에는 이 허용치를 적용하지 않는다. 승인 검사와 실제 actuator SDK 발급 직전에 P·기한·취소를 다시 검사한다.
+- `TeslaFrunkPolicy`는 offset별 미접수201만 기존 펌프로 복구한다. SDK0 이후 동일 offset·전체 명령 재전송은 금지한다. SDK 예외/반환 불명은 전송 가능성을 남긴다. 명령 frame 완료·AEAD 검증 ACK·명시 거절·후속 BODY의 명시 OPEN을 구분하며 ACK와 OPEN 모두 있어야 전체 완료다. 응답 불명 뒤 허용하는 것은 남은 기한 안의 BODY 조회1회뿐이며 명령은 재발급하지 않는다.
+- 로그v21은 요청·SDK 접수·차량 응답·열림 관측·정리 Boolean과 고정 이벤트만 보존한다. `COMMAND_SENT`는 첫 actuator 조각 SDK0이며 전체 frame·차량 승인·물리 개방 완료가 아니다. 분석기의 `frunkEvents`는 BLE 시험 ID 없는 수동 회차도 비민감 값으로 제공한다. 원문 발화·음성·키·VIN·주소·payload는 기록하지 않는다.
+
+### v41 쓰기 BUSY 제한 복구·BODY 절전 관측
+
+- `TeslaGattWritePump`는 SDK 반환201만 BUSY_WAIT로 분리해100ms 후 최대2회 추가 발급한다. 다른 SDK 오류·예외·SDK0 뒤 callback 오류/timeout은 동일 쓰기를 재전송하지 않는다. 예약 세대·중복 큐·권한/OFF/owner·취소·원 쓰기5초/단계/회차 기한을 검사하며 기존 조각 buffer를 재사용한다.100ms는 우리 제한값이지 Tesla APK에서 확인한 수치가 아니다.
+- `TeslaNativeGattOwner`는 미접수 WRITE201의 pending 토큰만 해제하고 새 발급은 새 Request를 사용한다. 이전 토큰을 캡처해 게시된 callback은 거절한다. Android에는 native 쓰기 요청ID가 없으므로 새 발급 이후 진입한 callback의 실제 RF 요청까지 식별한다고 주장하지 않는다.
+- `writeBusyRetryCount`는 실제 SDK 추가 발급 직전에만0→1→2로 증가하고 다음 조각/쓰기는0부터 시작한다. 예약 취소는 마지막 SDK 결과를 지우지 않는다.201만으로 차량 전송·키 등록·차량 인증이 성립하지 않는다.
+- `TeslaBleConversation.receiveBodyStatus`는 매칭·AEAD 검증 뒤 원 `vehicleSleepStatusValue`를 `TeslaReadOnlyStatus.bodyVehicleSleepStatus`에 전달한다. sequence는 BODY 수신 elapsed와 함께 보존하고 DRIVE timeout에도 지우지 않되 새 회차에 재사용하지 않는다.0=UNKNOWN,1=AWAKE,2=ASLEEP, 미래 nonnegative 값은 미지원 코드다. 당시 BODY 상태이며 이후 Infotainment 준비나 현재 상태를 보증하지 않는다.
+- 로그v20·분석기·진단 상세는 이 두 관측을 전달한다. BODY 검증/수신 시각 없는 절전 값과 범위 밖 재발급 횟수는 null이다. 구버전은 새 필드를 관측한 것으로 해석하지 않는다. BODY/DRIVE 세션 분리·domain/route/UUID/HMAC·응답 암호 검증·제어 금지를 유지한다. 자동 wake/bond·HELLO 반복·timeout 연장은 추가하지 않는다.
+
+### v40 Tesla 연결 모드·기존 GATT 재접속
+
+- `TeslaNativeGattOwner.connectNative`는 지원 OS가 모두 SDK36 이상이므로 Tesla APK의 SDK34+ 조건에 맞춰 `autoConnect=true`를 실제 SDK에 전달한다. 불필요한 버전 분기·별도 라이브러리·무기한 복원은 추가하지 않는다.
+- 접근 인증의 전송 전 초기133만 원래 NativeTransport·owner·handle을 유지한 채2초 뒤 `BluetoothGatt.connect()`를1회 호출한다. SDK false/예외·handle 없음/불명·연결 진전·기한/권한/BT/OFF 상실에는 새 handle fallback 없이 기존 종료 경로로 정리한다. 상위 v39의 새 광고/3.5초/최대2회 읽기 복구와는 별도 한도다.
+- 연결 콜백 진입에서 generation을 캡처하고 MainHandler 처리에서 검증한다. 대기 중 중복133은 기존 예약을 유지하고 CONNECTED0은 예약 취소·초기화1회로 처리한다. 연결 재발급 이후 native callback에 새로 진입한 이벤트의 원래 RF 시도는 SDK 요청ID가 없어 구별할 수 없다.
+- 최종 종료는 disconnect+close·예약 반환/보존을 유지한다. 최초500ms 준비·원 광고10초·단계/전체40초 기한·키/암호·쓰기/부분결과 경계를 늘리거나 완화하지 않는다.
+- 로그v19의 `gattConnectAction=CREATE/RECONNECT`와 `gattConnectAccepted`는 실제 SDK 호출/Boolean 관측이다. `gattAutoConnect`는 해당 handle 생성 인자이며 인자가 없는 `connect()`의 별도 설정값이 아니다. SDK 접수·콜백 연결·차량 인증을 분리하고 구버전 미관측은 null로 유지한다.
+
+### v39 60초 이탈 대기 제거·제한 재조회
+
+- 인증 읽기는 `READ_START_FRESH_MS=10초`를 광고 최신성·부재 기준으로 사용하며60초 이탈을 재조회 전제로 삼지 않는다. GATT/정리 중에는 후보 만료 대신 원래40초 조회 기한만 적용하고, 실제 정리 후10초 재관측 유예로 스캔 중단을 이탈로 오인하지 않는다. 비인증 모드의60초 후보 TTL은 변경하지 않는다.
+- 일시 GATT 실패·단계/쓰기 타임아웃만 localClosed·예약 반환 확인 후3.5초 대기한다. 완료 이후 실제 수신한 신선한 새 ScanResult에서만 같은 후보의 다음 회차를 만든다. timer·이전 세대·미래/역순/중복·완료 이전 수신 결과는 조회를 시작하지 않는다.
+- 후보당 최대2회·첫 시작의40초 기한·최소 연결/정리 잔여 예산을 유지한다. COMPLETE·BLOCKED·CANCELED·보안/프로토콜 오류·OFF·close 불명은 자동 반복하지 않는다. 초기133 내부1회 재접속과 전체 조회 재시도는 별도 한도이며, 차량 제어 명령의 재전송 정책이 아니다.
+- 로그v18은 기존 후보·회차·`RETRY_SCHEDULED/COOLDOWN`으로 복구를 구분한다. 분석기는 v18의 두 회차·clean 실패·대기/예산/예약 근거를 확인할 때만 복구로 분류하며 v1~v17의 반복 조회 위반 판정은 유지한다. 복구 관측·SDK0·구독은 인증 성공이 아니다.
+
+### v38 직접 GATT 전환
+
+- `connectGatt(autoConnect=false, TRANSPORT_LE, PHY_LE_1M, MainHandler)`의 반환 handle을 시도별로 보유한다. 연결 status0/state2→서비스/TX/RX 속성·CCCD 확인→MTU callback의 실제값→로컬 notification 설정·CCCD SDK 접수/성공 callback→기존 프로토콜 순서다. 같은 단계의 중복 callback이 초기화를 재실행하지 않는다.
+- SDK callback 진입에서 시각·pending identity를 캡처하고 항상 MainHandler에 post한다. 이것은 앱이 실제 SDK callback을 실행한 시각이지 RF/controller 발생 시각이 아니다. 현재 op/handle/요청·권한·기한·단계를 다시 확인하며 Service Changed는 `GATT_SERVICES_INVALIDATED`로 봉인·정리한다.
+- API33+ `writeCharacteristic(characteristic, value, WRITE_TYPE_DEFAULT)`를 사용한다. 요청 관측 후 SDK 직전 취소를 재검사하고 이때까지는 queued로 남긴다. 실제 SDK 호출 직전만 마지막 제출로 바꾸고 SDK 원 Int/고정 예외 분류/반환 시각을 RESULT에 기록한다. 접수0만으로 offset을 진행하지 않으며 올바른 TX callback 성공 뒤에만 다음 MTU-3 조각/RX 처리를 진행한다.
+- 종료는 먼저 op·큐·settle·retry·callback을 봉인한다. 할당 중 취소는 실제 반환 handle 부착 후 정리하며, 할당 불명/close 예외는 예약을 유지한다. 준비/할당 대기가 끝난 뒤 cleanup을 한 번만 시작해 null 반환/예외의 stop+finally가 종료 통지를 중복하지 않는다. close 정상 반환은 로컬 호출 완료 관측이며 원격 disconnect·플랫폼 내부 자원 회수 ACK가 아니다.
+- 기존500ms 준비·초기 native133에만 close 확인→1초→새 handle1회·총40초·원 광고10초·후보60초·인증/암호·키/VIN·부분 결과 경계는 유지한다. Nordic 기본 discovery 대기/내부 retry와 package-private bridge는 남기지 않는다. Tesla의 legacy write API·1초 device-info 지연을 HELLO 정책으로 복사하지 않았다.
+- 로그v17은 `gattTransport=NATIVE`와 SDK 발급/반환·callback·RX 시각을 기록하고 library 전용 필드는 생산 writer/UI에서 제거한다. 분석기는 보존된 v14~v16 행의 원 library 관측만 계속 읽으며 native 관측으로 변환하지 않는다. 개인키·VIN·주소·원시 payload·예외 원문은 기록하지 않는다.
+
+
+### v27 AltBeacon 배포 소스 전환
+
+- [AltBeacon 2.21.2 Maven 배포본](https://repo.maven.apache.org/maven2/org/altbeacon/android-beacon-library/2.21.2/)을 `:altbeacon`으로 고정했다. sources SHA-256 `5973dadd84879d6eb6e8b2e8c72e8b3ba0e49e8ab291ac75712a4fadcb8f79c3`, AAR SHA-256 `da1ff7986f672b56c902775a7c2659e7ea78bb1ac3f11c8515d2e2860e8804b5`. Apache LICENSE/NOTICE와 AAR의 거리 모델 리소스를 보존한다. Tesla RSSI를 정확한 거리로 변환하는 기능을 추가한 것은 아니다.
+- `BeaconManager.java`의 exclusive `setRawScanFilters`/`setRawScanCallback`, `CycledLeScannerForLollipop.java`의 native ScanResult/세대/시작·정지·오류 전달, 신규 `RawScanCallback.java`만 Tesla 입력 어댑터다. `PermissionsInspector.kt`는 compileSdk 36 nullable 필드를 처리하는 호환 수정이다. 이후 버전 갱신 때 이 네 파일과 OS 필터·timestamp 경로를 대조한다. stock 공개 API라고 설명하지 않는다.
+- `NonBeaconLeScanCallback`의 콜백 도착 시각을 원 수신 시각으로 위장하지 않는다. native OS 필터를 비콘 manufacturer/service-data 필터 대신 정확한 Tesla 이름/선택 주소로 대체한다. 가짜 parser·무필터 OR fallback·MAC 고정·GATT UUID 광고 포함 가정은 없다.
+- `ForegroundServiceScanStrategy`가 `BeaconService`의 location FGS·알림 102·스캐너를 소유한다. 보조 스캔 중 `ObservationService`는 bound-only CDM/정책/GATT 소유자다. `MainActivity`가 foreground/background를 알리고 기본 스캔 기간 1,100ms·30,000ms 및 무선 모드·`longScanForcingEnabled=false`를 유지한다. `Settings.ScanPeriods`의 두 betweenScanPeriod는 명시적으로 0ms다. `IntentScanStrategy`와 병행하지 않는다.
+- binding 수락과 native 스캔 등록은 구분한다. FGS 미실행/fallback을 실패로 드러내고 소비자를 해제한다. GATT pause·최종 stop은 SDK stop 무예외 반환 이후에만 진행하며 이는 RF ACK가 아니다. native callback은 등록 시점 세대로 캡처해 이전 결과로 새 후보를 되살리지 않는다.
+- 신규 로그만 512KiB×4·큐 512로 순환하며 로그 실패는 감지 중지에서 분리한다. 복원은 ON 설정·VIN·권한을 다시 확인하고 새 후보로 시작한다. ApplicationExitInfo의 USER_REQUESTED는 kill-background/force-stop을 공개 사유만으로 세분할 수 없어 자동 복원을 보수적으로 억제한다.
+
+
+### v28 접근 기반 기존 키 읽기
+
+- `TeslaApproachReadRequest`는 현재 광고의 기기·원 시각·owner/token/후보/회차/association·기한을 RAM에서만 묶는다. `TeslaApproachReadSequence`는 기존 프로토콜을 바꾸지 않고 같은 연결에서 BODY→별도 fresh DRIVE conversation을 순차 실행한다. 무결성 검증은 차량 인증서 기반 신원 인증과 다르다.
+- `TeslaBleKeyProbe`가 기존 native 연결/발견/MTU/구독/fragment/정리를 재사용한다. `getExistingReadOnly()`는 기존 하드웨어 P256 alias만 읽는다. 수동 읽기도 새 키를 생성하지 않으며 키 생성은 명시적 등록 경로에만 남는다.
+- runtime은 현재 FGS owner·request 인스턴스·회차·native pause·VIN/association/권한/기한으로 background 예외를 제한한다. Activity의 일반 취소는 수동 목적만 대상으로 한다. 40초에는 pause 대기도 포함되며 Keystore IO는 전송을 봉인한 후 반환까지 소유권을 유지한다.
+- 결과 snapshot은 RAM 및 허용된 v9 scalar 로그로 전달한다. 양쪽 응답 검증과 실제 자원 해제·예약 반환이 모두 있어야 전체완료다. 복원은 감지만이며 조회 목적·후보·결과를 재생하지 않는다.
+
+### v29 쓰기 요청 진단
+
+- `TeslaBleKeyProbe`는 SDK 호출 전 `TESLA_APPROACH_WRITE_REQUESTED`, 반환/고정 예외 뒤 `TESLA_APPROACH_WRITE_RESULT`, 유효 native 완료에서 `TESLA_APPROACH_WRITE_CALLBACK`을 기록한다. SDK nonzero는 `GATT_WRITE_REJECTED`, 예외는 `GATT_WRITE_EXCEPTION`, callback 실패는 `GATT_WRITE_FAILED`다. SDK 반환 0은 차량 인증 성공이 아니다.
+- v10 로그의 nullable 쓰기 관측은 로컬 순번·쓰기 방식·TX 속성·MTU·프레임/조각 길이·offset·pending·요청/반환/콜백 monotonic 시각을 포함한다. 순번은 native request ID가 아니며 예외 원문·주소·키·VIN·패킷은 기록하지 않는다. 마지막 실제 쓰기 관측은 정리/최종 결과까지 유지한다.
+- 기존 TX 이벤트 및 새 REQUESTED 이벤트 이후 owner/권한/기한을 다시 검사해 재진입 취소 뒤 native 호출을 막는다. offset은 SDK 접수가 아닌 유효 성공 callback 이후에만 진행한다. 근거 없는 delay/retry/NO_RESPONSE 전환은 없다.
+
+### v30 DRIVE 응답 진단
+
+- `TESLA_APPROACH_RX_NOTIFICATION`은 현재 op/GATT/RX 소유 경계 뒤의 실제 native callback 관측, `RX_FRAME`은 decoder가 완성한 프레임, `RX_RESPONSE`는 conversation.receive 판정 후의 고정 분류다. 이전 세대·다른 characteristic·취소 입력을 새 회차 통계에 붙이지 않는다. 새 로그 이벤트 뒤에도 allowed를 다시 검사해 취소 후 송신을 막는다.
+- v11의 RX/프레임/protocol count는 query별이 아닌 회차 누적이다. 마지막 RX/프레임 시각은 완성 fragment의 native monotonic 시각을 사용한다. `responseQuery`는 마지막 실제 처리 대상이므로 현재 `query=DRIVE_STATE`라도 마지막 관측이 BODY일 수 있다. count0은 관측 경로에서 미수신이지 차량이 송신하지 않았다는 증명이 아니다.
+- optional protocol observer는 도메인·route·요청 UUID 불일치, ACK 대기, SessionInfo 검증/제외, 상태 검증/미완성을 고정 사유로만 기록한다. 매칭·암호·ACK 기한 판단은 그대로다. raw RX·키·VIN·주소·UUID·route·hash·예외 원문은 저장하지 않는다.
+
+### v31 GATT 단일 쓰기 큐
+
+- `TeslaGattWritePump`는 op당 재사용 runnable 하나를 가진다. descriptor pending·queued·SDK 제출·callback 대기를 구분하고 첫 frame/후속 chunk/새 protocol SEND를 모두 같은 MainHandler 큐에 등록한다. callback 내부에서 native 쓰기를 즉시 제출하지 않는다. 추가 시간 지연은 없다.
+- 등록 전·예약 이벤트 뒤·runnable 실행·SDK 직전에 owner/GATT/권한/기한/봉인과 현재 frame을 검사한다. stop은 runnable 제거와 봉인을 수행해 살아남은 이전 runnable도 제출하지 못하게 한다. SDK nonzero는 재시도 없이 실패·봉인, SDK0은 callback 대기, 성공 callback만 offset을 진행한다.
+- v12는 native 연결 status/state/entry 시각, CCCD SDK 반환/native 완료와 queue/실제 제출 시각을 별도 nullable로 기록한다. 봉인 뒤 disconnect는 최종 결과를 덮지 않는다. 마지막 실제 쓰기와 새 예약을 분리해 예약 취소가 이전 SDK/callback 관측을 지우거나 새 예약에 붙이지 않는다.
+- queue false는 취소·해제를 포함하므로 SDK 접수나 성공 증거가 아니다. 마지막 실제 writeSequence가 마지막 QUEUED보다 작을 수도 있다. 실제 호출/접수/완료는 dispatch 시각·SDK 반환·native callback을 각각 확인한다. 임의 지연·앱 retry·autoConnect 변경·wake lock은 없다.
+
+### v36 초기 GATT 133 제한 재접속
+
+- 접근 읽기의 초기 `ConnectRequest.fail(133)`에 한해 기존 GATT의 `closeConfirmed()` 성공 후 같은 조회 회차에서 한 번 새 manager를 만든다. 대기는 단조 시계 기준 1초이며 원 광고 최신성·OFF·권한·association·CONNECTING/전체 기한을 다시 검사한다. 초기 scan pause 뒤 500ms 대기는 유지한다.
+- 연결 성공·서비스 탐색·프로토콜 전송 이후 오류, 수동 조회·키 등록, 다른 오류에는 적용하지 않는다. 조회/인증 요청 재송신·기한 연장·autoConnect·차량 깨움은 없다. Nordic 내부 retry는 0으로 유지해 첫 native handle만 확보하는 소유권 계약을 우회하지 않는다.
+- 정리 실패는 owner와 lease를 보존하며 재접속을 금지한다. retiring manager의 observer·서비스 무효화·initialize·늦은 callback은 새 manager 상태를 변경하지 못한다. `TeslaGattConnectRetry`의 예약은 취소/봉인 시 제거한다.
+- schema16의 기존 summary로 `TESLA_APPROACH_GATT_RETRY_SCHEDULED/STARTED/CANCELED`를 남긴다. 최초 133을 보존하고 STARTED에서는 이전 연결 시각/status를 비운다. STARTED는 대기 종료이며 실제 새 enqueue·native 연결 성공과 다르다. 분석기는 이를 같은 조회 회차의 단계로 보존한다.
+- 133은 원인명이 아니다. [Nordic 공식 논의](https://github.com/nordicsemi/Android-BLE-Library/issues/170#issuecomment-693442033)와 [2.11.0 재접속 API](https://github.com/nordicsemi/Android-BLE-Library/blob/2.11.0/ble/src/main/java/no/nordicsemi/android/ble/ConnectRequest.java)를 참고했으며 OS·차량 측 문제 해결을 보장하지 않는다. DRIVE 인증·암호 검증은 변경하지 않았다.
+
+### v35 BODY ACK·차량 오류·Nordic 쓰기 실패 관측
+
+- BODY STATUS는 기존 domain→route→UUID·기한 검사를 통과한 명시 status 존재/fault0/operationOK/payload부재/서명부재 ACK만 `ACK_WAITING`으로 처리한다. ACK는 성공·BODY 완료·DRIVE 전환·재송신·counter 소비·기한 연장이 아니다. 기존 request hash·nonce/tag·counter·AEAD를 통과한 실제 암호 BODY가 있어야 진행한다. DRIVE STATUS에는 이번 ACK 정책을 확장하지 않는다.
+- BODY의 fault 또는 WAIT/ERROR/unknown operation 보고는 `RESPONSE_REJECTED`로 관측하고 기존 실패/정리 경로를 유지한다. 오류 header는 비인증 보고이며 인증된 차량 상태·키 미등록 증거로 승격하지 않는다. 공식 VCSEC의 nominal envelope 수용과 앱의 암호 BODY 후속 대기는 구분한다.
+- 로그v16은 `responseSignedStatusPresent`·`responseSignedMessageFault`·`responseOperationStatus`를 기록한다. status 부재는 false/null/null이고 unknown enum은 원 Int를 유지한다. malformed/expired 수신은 이전 값을 재사용하지 않는다. 원문·UUID/route·새 hash·예외는 추가 저장하지 않는다.
+- Nordic write fail의 원 Int는 `libraryWriteFailureCode`, 전달 시각은 `libraryWriteCompletedElapsedMs`다. 음수 library reason을 native GATT status로 바꾸지 않는다. 제출 객체 동일성·op/GATT/봉인 검사를 통해 이전 callback을 차단하고 새 쓰기에는 이전 실패를 붙이지 않는다. 최종 봉인은 queued보다 마지막 실제 쓰기 근거를 우선 보존한다.
+- 공식 근거: 고정 [VCSEC response parser](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/vehicle/vcsec.go), [GetError](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/protocol/error.go), Nordic2.11.0 [FailCallback](https://github.com/NordicSemiconductor/Android-BLE-Library/blob/2.11.0/ble/src/main/java/no/nordicsemi/android/ble/callback/FailCallback.java). AltBeacon·500ms·MTU·기한·같은 후보1회·180초 TTL·retry0/autoConnect=false·차량 제어 경계는 유지한다.
+
+### v34 반복 광고·후보 만료·응답 대응 관측
+
+- `BleFieldTrialPolicy`는 실제 filtered 광고의 원 단조 수신 시각과 앱 적용 시각을 별도로 관측한다. 유효 광고 세대 누계·후보별 광고 수·같은 후보 조회 억제 수는 전체 무선 패킷·실제 방문 수가 아니다. 중복/역순/미래/오래된 입력은 관측값을 갱신하지 않는다. 180초 TTL·실제 expire·같은 후보1회·source 게이트는 유지한다.
+- `BleCandidateDiagnosticsPublisher`는 세대별 재사용 Runnable 하나로 dirty 집계를 최대10초 빈도로 기록한다. 후보/조회/스캔/정지 전이는 강제 flush하며 clean 상태를 계속 polling하지 않는다. 진단 getter/타이머는 후보 만료·조회·스캔 재시작을 실행하지 않고, OFF/이전 세대의 periodic 전달을 봉인한다. 진단 기록 예외도 감지를 정지시키지 않는다.
+- 로그v15의 `candidateDiagnostics`는 `BLE_CANDIDATE_DIAGNOSTICS` 전용 행에만 붙인다. 원 수신/앱 처리·만료 예정·실제 만료/지연을 구분하고 unknown은 null이다. 진단 화면의 다음 접근 상태와 접힌 상세는 같은 RAM snapshot을 사용하며 복원 후보로 재생하지 않는다.
+- 수신 헤더의 `requestUuidPresent`/`requestUuidMatches`/`toRouteMatches`는 RAM의 현재 요청과 비인증 Boolean 비교다. DOMAIN_MISMATCH 조기 반환 전 관측하지만 domain→route→UUID·ACK/HMAC/AEAD 판정은 유지한다. 원 UUID/route·새 hash·payload는 보존하지 않고 미발급/부재는 unknown이다. malformed/expired는 이전 대응 값을 지우며 새 RX 없는 BODY→DRIVE 전환은 마지막 BODY 근거를 재라벨하지 않는다.
+
+### v33 Nordic GATT 이관
+
+- `TeslaBleKeyProbe.NordicTransport`가 회차별 Nordic `BleManager` 하나로 수동 등록·수동 읽기·FGS 접근 읽기의 연결/탐색/MTU/CCCD/with-response 쓰기/notify를 맡는다. 앱의 직접 connectGatt·descriptor/characteristic write 경로는 제거했다. 기존 프레임·쓰기 pump·BODY→DRIVE·ACK/HMAC/AEAD/domain/route/UUID 검증은 유지한다. Nordic ready는 Tesla 인증·전체 조회 완료가 아니다.
+- `TeslaGattConnectSettle`은 elapsed 기준 최소500ms, 조기 wake의 잔여 대기·깊은 절전 후 기한 검사·취소/관측 재진입·이전 회차 봉인을 처리한다. 상시 wake lock·Thread.sleep은 추가하지 않았다. Nordic retry0·autoConnect=false·PHY1M, 기존 MTU247 요청/5초 기한·40초 접근 총기한·같은 후보1회는 유지한다. 서비스 탐색 전 Nordic 기본 대기는 non-bonded300ms/bonded1600ms이며 스캔 정지 후 대기와 다른 단계다.
+- `TeslaNordicConnection`은 첫 enqueue 직후 실제 handle을 보유하고 cleanup에서 명시 close 반환을 확인한 다음 manager 자원을 정리한다. Nordic 내부 close가 예외를 삼키므로 manager.close 반환만으로 lease를 풀지 않는다. 생성된 handle의 close가 불명이면 기존 예약 유지·재입장 차단을 적용한다.
+- 작은 `NordicGattAccess.java`는 같은 upstream package에서 2.11.0의 package-private `requestHandler.bluetoothGatt`만 읽는다. 공개 API가 아니며 reflection·대규모 fork도 아니다. 초기 서비스 검색 전 실패에서 실제 정리 증거를 확보하기 위한 최소 내부 접근이다. 버전 업그레이드에는 필드 접근·빈 큐 첫 enqueue 동기 실행·같은 Handler callback·초기 fail 게시 순서를 다시 검증해야 한다.
+- 초기 실패 observer의 mapped reason은 native status가 아니다. 뒤따르는 ConnectRequest.fail의 양수 원 status만 연결 실패 코드로 관측한다. 라이브러리 전달/완료 시각은 v14 `library*ElapsedMs`, 실제 대기는 `connectSettle*ElapsedMs`로 구분한다. 미제공 SDK 반환·native 발급/진입 시각은 null이며 enqueue를 대입하지 않는다. 원 광고 timestamp는 AltBeacon raw ScanResult 경로를 유지한다.
+- raw logger를 no-op으로 두고 Log.ASSERT 최소 우선순위로 payload 문자열 생성을 억제한다. 앱 소유 세션 재료·프레임·수신 큐는 지운다. Nordic 성공 쓰기의 공개 packet/Data는 지우지만 실패·취소의 private WriteRequest 복사본까지 즉시 zeroize한다는 보장은 없다. 비추출 개인키·차량 키/VIN 저장·허용 로그 정책은 유지한다.
+
+### v32 수신 header·연결 시작 관측
+
+- optional observer를 작은 immutable `TeslaBleResponseObservation`으로 전환했다. 기존 String callback shim은 없으며 Sequence·fixture를 이동했다. parsing 뒤 받은 header의 from/to 존재·형식, 실제 DOMAIN의 raw value, payload case와 기대 domain을 관측한다. `DOMAIN_MISMATCH` 조건은 그대로이며 `FROM_MISSING`/`FROM_NOT_DOMAIN`/`DOMAIN_DIFFERENT`로만 세분한다.
+- receive마다 비민감 scalar 관측을 초기화하고 callback 직전에 immutable 값 하나를 만든다. observer가 없으면 관측 객체를 만들지 않는다. malformed·만료 입력에 이전 header를 재사용하지 않으며 새 RX가 없으면 이전 BODY 관측을 DRIVE로 재라벨하지 않는다. 0은 실제 DOMAIN 값일 때만 관측하며 필드 부재·비DOMAIN은 null이다.
+- 실제 `ScanResult.isConnectable`을 RAM 요청에 전달한다. `TeslaBleKeyProbe.connect`는 Main의 `connectGatt` 호출 직전/반환 또는 예외 시각과 원 광고 elapsed 기준 age를 기록한다. 이는 앱 API 경계이며 RF/controller 완료 시각이 아니다. `TESLA_APPROACH_GATT_CONNECT_RESULT`는 정상 API 반환의 관측이고, 예외 경로도 최종 summary에 시각을 보존한다.
+- connectable은 관측만 하며 광고 필터·후보 소비·연결 허가·133 원인을 대신하지 않는다. 같은 후보1회, 원기기·freshness·scan stop·실제 FGS owner·기존 키·단일 lease와 ACK/HMAC/AEAD/domain/route/UUID 조건은 유지한다. raw header는 인증 전 관측이며 주소·route·UUID·packet·키·VIN·hash를 보존하지 않는다.
+
+
+
 
 
 ## 서비스와 UI의 수명

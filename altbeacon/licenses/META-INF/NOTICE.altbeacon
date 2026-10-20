@@ -1,0 +1,9 @@
+Android Beacon Library
+Copyright 2014-2021 Radius Networks
+Copyright 2019-2021 Young Consulting
+
+This product includes software developed at
+Radius Networks (http://www.radiusnetworks.com/).
+Young Consulting (http://davidgyoungtech.com).
+
+Hey Tesla 지역 수정: Maven 2.21.2 소스의 exact OS filter / raw 단조 timestamp 및 scan 등록·정리 공개 hook.

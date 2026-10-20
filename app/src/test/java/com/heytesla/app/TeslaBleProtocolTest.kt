@@ -27,6 +27,803 @@ import javax.crypto.spec.SecretKeySpec
 
 /** 소스만 추가. 테스트 키는 실행 시 JVM JCA로만 생성하며 저장/출력/차량 등록하지 않는다. */
 class TeslaBleProtocolTest {
+    @Test fun frunkUsesFreshDriveThenPublicClosureContractAndSeparateFreshBody() {
+        FrunkFixture().use { h ->
+            val action = h.action()
+            assertEquals(UniversalMessage.Domain.DOMAIN_VEHICLE_SECURITY, action.toDestination.domain)
+            val payload = h.wire.decryptRequest(action)
+            assertEquals(Vcsec.UnsignedMessage.SubMessageCase.CLOSUREMOVEREQUEST, payload.subMessageCase)
+            assertEquals(Vcsec.ClosureMoveType_E.CLOSURE_MOVE_TYPE_MOVE, payload.closureMoveRequest.frontTrunk)
+            assertEquals(0, payload.closureMoveRequest.rearTrunkValue)
+            h.completeAction(action)
+            assertEquals(TeslaFrunkResult.UNKNOWN, h.policy.result)
+            val bodyHello = parseSend(h.receive(h.wire.encryptResponse(action,
+                Vcsec.FromVCSECMessage.getDefaultInstance(), 8)))
+            assertTrue(bodyHello.hasSessionInfoRequest())
+            assertNotEquals(action.uuid, bodyHello.uuid)
+            assertNotEquals(action.fromDestination.routingAddress, bodyHello.fromDestination.routingAddress)
+            assertTrue(h.policy.commandAcknowledged)
+            assertFalse(h.policy.openObserved)
+            val bodyRequest = parseSend(h.receive(h.wire.handshake(bodyHello)))
+            assertEquals(Vcsec.InformationRequestType.INFORMATION_REQUEST_TYPE_GET_STATUS,
+                h.wire.decryptRequest(bodyRequest).informationRequest.informationRequestType)
+            // 명령 응답의 OPEN을 후속 BODY 응답으로 재사용하지 않는다.
+            assertWaiting(TeslaBlePhase.READING_STATUS, null, h.receive(h.wire.status(action, frontTrunk = 1)))
+            assertFalse(h.policy.openObserved)
+            val complete = h.receive(h.wire.status(bodyRequest, frontTrunk = 1)) as TeslaBleStep.Complete
+            assertEquals(1, complete.status.frontTrunkState)
+            assertTrue(h.policy.openObserved)
+            assertEquals(TeslaFrunkResult.OPEN_OBSERVED, h.policy.result)
+            assertFailed(h.sequence.start())
+            assertNotNull(h.policy.beginWrite(0, action.serializedSize + 2))
+        }
+    }
+
+    @Test fun frunkNeverPromotesSdkOrUnsignedAckOrUnknownBodyToOpenSuccess() {
+        for (authenticatedAck in listOf(false, true)) {
+            for (closure in listOf(null, 0, 1, 2, 3, 5, 99)) {
+                FrunkFixture().use { h ->
+                    val action = h.action()
+                    h.completeAction(action)
+                    val response = if (authenticatedAck) h.wire.encryptResponse(action,
+                        Vcsec.FromVCSECMessage.getDefaultInstance(), 8) else h.wire.helloAck(action)
+                    val bodyHello = parseSend(h.receive(response))
+                    assertEquals(authenticatedAck, h.policy.commandAcknowledged)
+                    assertFalse(h.policy.openObserved)
+                    val bodyRequest = parseSend(h.receive(h.wire.handshake(bodyHello)))
+                    val complete = h.receive(h.wire.status(bodyRequest, frontTrunk = closure)) as TeslaBleStep.Complete
+                    assertEquals(closure?.takeIf { it in 0..6 }, complete.status.frontTrunkState)
+                    assertEquals(closure == 1, h.policy.openObserved)
+                    assertEquals(if (authenticatedAck && closure == 1) TeslaFrunkResult.OPEN_OBSERVED
+                        else TeslaFrunkResult.UNKNOWN, h.policy.result)
+                }
+            }
+        }
+    }
+
+    @Test fun frunkRequiresCurrentExplicitDrivePAndOriginalSourceTime() {
+        for (drive in listOf<(FrunkFixture) -> Vehicle.DriveState>(
+            { it.wire.driveState(timestamp = null) },
+            { it.wire.driveState(shift(TeslaGear.UNKNOWN), it.sourceTime()) },
+            { it.wire.driveState(shift(TeslaGear.D), it.sourceTime()) },
+            { it.wire.driveState(timestamp = timestamp((it.wall - 10_001) / 1_000, 0)) },
+            { it.wire.driveState(timestamp = timestamp((it.wall + 3_000) / 1_000, 0)) },
+        )) {
+            FrunkFixture().use { h ->
+                val request = h.driveRequest()
+                assertFailed(h.receive(h.wire.driveResponse(request, drive(h))))
+                assertFalse(h.policy.driveVerified)
+                assertFalse(h.policy.mayHaveSent)
+            }
+        }
+    }
+
+    @Test fun frunkRechecksParkBeforeEncryptingActionAndCapsWireExpiryToOriginalConsent() {
+        FrunkFixture().use { h ->
+            val request = h.driveRequest()
+            val actionHello = parseSend(h.receive(h.wire.driveResponse(request,
+                h.wire.driveState(timestamp = h.sourceTime()))))
+            h.wire.clock += 5_001
+            assertFailed(h.receive(h.wire.handshake(actionHello)))
+            assertFalse(h.policy.commandSent)
+        }
+        FrunkFixture().use { h ->
+            h.wire.clock += 37_000
+            val action = h.action()
+            val ttl = action.signatureData.getAESGCMPersonalizedData().expiresAt.toLong() - 100L
+            assertTrue(ttl > 0)
+            assertTrue(ttl * 1_000 <= h.policy.deadline - h.wire.clock)
+        }
+    }
+
+    @Test fun frunkCommandStatusOkAndWaitAreNotTerminalAckAndErrorIsExplicitRejection() {
+        FrunkFixture().use { h ->
+            val action = h.action()
+            h.completeAction(action)
+            for ((index, operation) in listOf(Vcsec.OperationStatus_E.OPERATIONSTATUS_OK,
+                Vcsec.OperationStatus_E.OPERATIONSTATUS_WAIT).withIndex()) {
+                assertWaiting(TeslaBlePhase.READING_STATUS, null, h.receive(h.wire.encryptResponse(action,
+                    genericRegistrationStatus(operation), 8 + index)))
+                assertFalse(h.policy.commandAcknowledged)
+                assertFalse(h.policy.openObserved)
+            }
+            assertFailed(h.receive(h.wire.encryptResponse(action,
+                genericRegistrationStatus(Vcsec.OperationStatus_E.OPERATIONSTATUS_ERROR), 10)))
+            assertTrue(h.policy.commandRejected)
+            assertEquals(TeslaFrunkResult.REJECTED, h.policy.result)
+            assertNotNull(h.policy.beginWrite(0, 100))
+        }
+    }
+
+    @Test fun frunkWrongCorrelationCannotAcknowledgeAndInvalidAeadOnlyStartsReadObservation() {
+        for (invalidCase in 0..3) {
+            FrunkFixture().use { h ->
+                val action = h.action()
+                h.completeAction(action)
+                val ack = h.wire.encryptResponse(action, Vcsec.FromVCSECMessage.getDefaultInstance(), 8)
+                val invalid = ack.toBuilder().apply {
+                    when (invalidCase) {
+                        0 -> setFromDestination(UniversalMessage.Destination.newBuilder()
+                            .setDomain(UniversalMessage.Domain.DOMAIN_INFOTAINMENT))
+                        1 -> setToDestination(UniversalMessage.Destination.newBuilder()
+                            .setRoutingAddress(ByteString.copyFrom(ByteArray(16))))
+                        2 -> setRequestUuid(ByteString.copyFrom(ByteArray(16)))
+                        3 -> setSignatureData(ack.signatureData.toBuilder().setAESGCMResponseData(
+                            ack.signatureData.getAESGCMResponseData().toBuilder().setTag(ByteString.copyFrom(ByteArray(16)))))
+                    }
+                }.build()
+                val step = h.receive(invalid)
+                if (invalidCase == 3) {
+                    assertTrue(parseSend(step).hasSessionInfoRequest())
+                    assertTrue(h.sequence.responseUnknown)
+                } else assertWaiting(TeslaBlePhase.READING_STATUS, null, step)
+                assertFalse(h.policy.commandAcknowledged)
+                assertFalse(h.policy.openObserved)
+                assertEquals(TeslaFrunkResult.UNKNOWN, h.policy.result)
+                assertNotNull(h.policy.beginWrite(0, action.serializedSize + 2))
+            }
+        }
+    }
+
+    @Test fun frunkMissingActionReplyOnlyStartsOneFreshReadAndCancellationPreventsIt() {
+        FrunkFixture().use { h ->
+            val action = h.action()
+            h.completeAction(action)
+            h.wire.clock += 10_000
+            val bodyHello = parseSend(h.sequence.observeAfterMissingReply())
+            assertTrue(bodyHello.hasSessionInfoRequest())
+            assertFalse(h.policy.commandAcknowledged)
+            assertFailed(h.sequence.observeAfterMissingReply())
+            val body = parseSend(h.receive(h.wire.handshake(bodyHello)))
+            assertTrue(h.receive(h.wire.status(body, frontTrunk = 1)) is TeslaBleStep.Complete)
+            assertTrue(h.policy.openObserved)
+            assertEquals(TeslaFrunkResult.UNKNOWN, h.policy.result)
+        }
+        FrunkFixture().use { h ->
+            val action = h.action()
+            h.completeAction(action)
+            h.policy.cancel()
+            assertFailed(h.sequence.observeAfterMissingReply())
+            assertFailed(h.receive(h.wire.encryptResponse(action, Vcsec.FromVCSECMessage.getDefaultInstance(), 8)))
+            assertEquals(TeslaFrunkResult.UNKNOWN, h.policy.result)
+        }
+    }
+
+    @Test fun bodySleepRequiresAuthenticatedCorrelatedBodyAndPreservesFutureCodes() {
+        for (code in listOf(0, 1, 2, 99, Int.MAX_VALUE)) {
+            for (invalid in 0..4) {
+                VehicleFixture().use { fixture ->
+                    val request = fixture.authenticate()
+                    val body = Vcsec.FromVCSECMessage.newBuilder().setVehicleStatus(
+                        Vcsec.VehicleStatus.newBuilder().setVehicleSleepStatusValue(code)).build()
+                    val response = fixture.encryptResponse(request, body, 8)
+                    val rejected = response.toBuilder()
+                    when (invalid) {
+                        0 -> rejected.clearSignatureData()
+                        1 -> rejected.setFromDestination(UniversalMessage.Destination.newBuilder()
+                            .setDomain(UniversalMessage.Domain.DOMAIN_INFOTAINMENT))
+                        2 -> rejected.setToDestination(UniversalMessage.Destination.newBuilder()
+                            .setRoutingAddress(ByteString.copyFrom(ByteArray(16))))
+                        3 -> rejected.setRequestUuid(ByteString.copyFrom(ByteArray(16)))
+                        4 -> rejected.setProtobufMessageAsBytes(ByteString.copyFrom(byteArrayOf(1)))
+                    }
+                    assertFalse(fixture.conversation.receive(rejected.build().toByteArray()) is TeslaBleStep.Complete)
+                }
+            }
+            VehicleFixture().use { fixture ->
+                val request = fixture.authenticate()
+                val body = Vcsec.FromVCSECMessage.newBuilder().setVehicleStatus(
+                    Vcsec.VehicleStatus.newBuilder().setVehicleSleepStatusValue(code)).build()
+                val result = fixture.conversation.receive(fixture.encryptResponse(request, body, 8).toByteArray())
+                    as TeslaBleStep.Complete
+                assertEquals(code, result.status.bodyVehicleSleepStatus)
+            }
+        }
+    }
+
+    @Test fun sequenceKeepsOnlyCurrentVerifiedBodySleepAcrossDriveTimeout() {
+        VehicleFixture().use { fixture ->
+            val vin = fixture.vin.copyOf()
+            TeslaApproachReadSequence(fixture.client, vin, 1, 1, { fixture.clock }) { _, _ -> }.use { sequence ->
+                assertNull(sequence.summary.bodyVehicleSleepStatus)
+                val hello = parseSend(sequence.start())
+                val request = parseSend(sequence.receive(fixture.handshake(hello).toByteArray(), fixture.clock))
+                val body = Vcsec.FromVCSECMessage.newBuilder().setVehicleStatus(
+                    Vcsec.VehicleStatus.newBuilder().setVehicleSleepStatusValue(2)).build()
+                val receipt = fixture.clock
+                val driveHello = parseSend(sequence.receive(
+                    fixture.encryptResponse(request, body, 8).toByteArray(), receipt))
+                fixture.clock += 15_000
+                assertFailed(sequence.receive(fixture.handshake(driveHello).toByteArray(), fixture.clock))
+                assertEquals(2, sequence.summary.bodyVehicleSleepStatus)
+                assertEquals(receipt, sequence.summary.bodyReceivedElapsedMs)
+                assertFalse(sequence.summary.driveVerified)
+            }
+            TeslaApproachReadSequence(fixture.client, fixture.vin.copyOf(), 2, 1, { fixture.clock }) { _, _ -> }.use { next ->
+                assertNull(next.summary.bodyVehicleSleepStatus)
+                val hello = parseSend(next.start())
+                val request = parseSend(next.receive(fixture.handshake(hello).toByteArray(), fixture.clock))
+                assertFailed(next.receive(fixture.status(request).toBuilder().clearSignatureData().build()
+                    .toByteArray(), fixture.clock))
+                assertNull(next.summary.bodyVehicleSleepStatus)
+                assertNull(next.summary.bodyReceivedElapsedMs)
+            }
+        }
+    }
+
+    @Test fun encryptedBodyAfterAckStillNeedsAeadEvenWhenSignedStatusIsAbsent() {
+        for (tampered in listOf(false, true)) {
+            VehicleFixture().use { fixture ->
+                val request = fixture.authenticate()
+                assertWaiting(TeslaBlePhase.READING_STATUS, null,
+                    fixture.conversation.receive(fixture.helloAck(request).toByteArray()))
+                val response = fixture.status(request).toBuilder().clearSignedMessageStatus().apply {
+                    if (tampered) setFlags(2) // AAD 변경은 status 부재로 면제되지 않는다.
+                }.build()
+                val result = fixture.conversation.receive(response.toByteArray())
+                if (tampered) assertFailed(result) else {
+                    assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0, bodyVehicleSleepStatus = 0)), result)
+                }
+                val observed = fixture.responseObservations.last()
+                assertEquals(false, observed.signedStatusPresent)
+                assertNull(observed.signedMessageFault)
+                assertNull(observed.operationStatus)
+            }
+        }
+    }
+
+    @Test fun nominalBodyAckWaitsWithoutCompletingAndRequiresFollowingEncryptedBody() {
+        for (omitUuid in listOf(false, true)) {
+            VehicleFixture().use { fixture ->
+                val request = fixture.authenticate()
+                val ack = fixture.helloAck(request).toBuilder().apply {
+                    if (omitUuid) clearRequestUuid()
+                }.build()
+                repeat(2) {
+                    fixture.clock += 100
+                    assertWaiting(TeslaBlePhase.READING_STATUS, null,
+                        fixture.conversation.receive(ack.toByteArray()))
+                    val observed = fixture.responseObservations.last()
+                    assertEquals("ACK_WAITING", observed.disposition)
+                    assertEquals(true, observed.signedStatusPresent)
+                    assertEquals(0, observed.signedMessageFault)
+                    assertEquals(0, observed.operationStatus)
+                    assertHeaderCorrelation(observed, !omitUuid, if (omitUuid) null else true, true)
+                }
+                // ACK는 request hash·counter·identity를 바꾸지 않는다.
+                assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0, bodyVehicleSleepStatus = 0)),
+                    fixture.conversation.receive(fixture.status(request).toByteArray()))
+                assertEquals("STATUS_VERIFIED", fixture.responseObservations.last().disposition)
+            }
+        }
+    }
+
+    @Test fun bodyErrorHeadersAreRejectedWithoutClaimingAuthenticatedFailure() {
+        val faults = listOf(
+            UniversalMessage.MessageFault_E.MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID_VALUE,
+            UniversalMessage.MessageFault_E.MESSAGEFAULT_ERROR_INSUFFICIENT_PRIVILEGES_VALUE,
+            777, -1,
+        )
+        val operations = listOf(
+            UniversalMessage.OperationStatus_E.OPERATIONSTATUS_WAIT_VALUE,
+            UniversalMessage.OperationStatus_E.OPERATIONSTATUS_ERROR_VALUE,
+            777, -1,
+        )
+        for ((fault, operation) in faults.map { it to 0 } + operations.map { 0 to it }) {
+            // payload 유무와 관계없이 오류 header는 BODY 완료·정상 ACK가 아니다.
+            for (encrypted in listOf(false, true)) {
+                VehicleFixture().use { fixture ->
+                    val request = fixture.authenticate()
+                    val response = if (encrypted) {
+                        fixture.encryptResponse(request, fixture.vehicleStatus(1, 0), 8, fault = fault)
+                            .toBuilder().setSignedMessageStatus(UniversalMessage.MessageStatus.newBuilder()
+                                .setSignedMessageFaultValue(fault).setOperationStatusValue(operation)).build()
+                    } else fixture.helloAck(request, operation, fault)
+                    val failure = fixture.conversation.receive(response.toByteArray())
+                    assertFailed(failure)
+                    assertNull((failure as TeslaBleStep.Failed).authEvidence)
+                    val observed = fixture.responseObservations.last()
+                    assertEquals("RESPONSE_REJECTED", observed.disposition)
+                    assertEquals(true, observed.signedStatusPresent)
+                    assertEquals(fault, observed.signedMessageFault)
+                    assertEquals(operation, observed.operationStatus)
+                    assertFailed(fixture.conversation.receive(fixture.status(request).toByteArray()))
+                }
+            }
+        }
+    }
+
+    @Test fun bodyAckCannotBypassDomainRouteOrUuidMatching() {
+        VehicleFixture().use { fixture ->
+            val request = fixture.authenticate()
+            val ack = fixture.helloAck(request)
+            val wrongDomain = ack.toBuilder().setFromDestination(UniversalMessage.Destination.newBuilder()
+                .setDomain(UniversalMessage.Domain.DOMAIN_INFOTAINMENT))
+                .setToDestination(UniversalMessage.Destination.newBuilder()
+                    .setRoutingAddress(ByteString.copyFrom(ByteArray(16))))
+                .setRequestUuid(ByteString.copyFrom(ByteArray(16))).build()
+            val wrongRoute = ack.toBuilder().setToDestination(wrongDomain.toDestination)
+                .setRequestUuid(wrongDomain.requestUuid).build()
+            val wrongUuid = ack.toBuilder().setRequestUuid(wrongDomain.requestUuid).build()
+            for ((invalid, disposition) in listOf(
+                wrongDomain to "DOMAIN_MISMATCH", wrongRoute to "ROUTE_MISMATCH",
+                wrongUuid to "REQUEST_UUID_MISMATCH",
+            )) {
+                assertWaiting(TeslaBlePhase.READING_STATUS, null,
+                    fixture.conversation.receive(invalid.toByteArray()))
+                assertEquals(disposition, fixture.responseObservations.last().disposition)
+            }
+            assertWaiting(TeslaBlePhase.READING_STATUS, null,
+                fixture.conversation.receive(ack.toByteArray()))
+            assertEquals("ACK_WAITING", fixture.responseObservations.last().disposition)
+            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0, bodyVehicleSleepStatus = 0)),
+                fixture.conversation.receive(fixture.status(request).toByteArray()))
+        }
+    }
+
+    @Test fun repeatedBodyAcksCannotExtendDeadlineAndInvalidReceiveClearsSignedStatus() {
+        for (expired in listOf(false, true)) {
+            VehicleFixture().use { fixture ->
+                val request = fixture.authenticate()
+                fixture.clock += 10_000
+                assertWaiting(TeslaBlePhase.READING_STATUS, null,
+                    fixture.conversation.receive(fixture.helloAck(request).toByteArray()))
+                fixture.clock += 4_999
+                assertWaiting(TeslaBlePhase.READING_STATUS, null,
+                    fixture.conversation.receive(fixture.helloAck(request).toByteArray()))
+                if (expired) fixture.clock++
+                assertFailed(fixture.conversation.receive(if (expired) fixture.status(request).toByteArray()
+                    else byteArrayOf(0x80.toByte())))
+                assertEquals(TeslaBleResponseObservation("RESPONSE_INVALID", 2),
+                    fixture.responseObservations.last())
+            }
+        }
+    }
+
+    @Test fun absentStatusWrongPayloadAndInvalidSignatureNeverBecomeBodyAckOrSuccess() {
+        for (invalidCase in 0..6) {
+            VehicleFixture().use { fixture ->
+                val request = fixture.authenticate()
+                val ack = fixture.helloAck(request)
+                val encrypted = fixture.status(request)
+                val invalid = when (invalidCase) {
+                    0 -> fixture.baseResponse(request).build()
+                    1 -> ack.toBuilder().setSessionInfo(ByteString.EMPTY).build()
+                    2 -> ack.toBuilder().setProtobufMessageAsBytes(
+                        fixture.vehicleStatus(1, 0).toByteString()).build()
+                    3 -> ack.toBuilder().setSignatureData(Signatures.SignatureData.getDefaultInstance()).build()
+                    4 -> ack.toBuilder().setSignatureData(encrypted.signatureData).build()
+                    5 -> encrypted.toBuilder().setProtobufMessageAsBytes(ByteString.copyFrom(
+                        encrypted.protobufMessageAsBytes.toByteArray().apply {
+                            this[0] = (this[0].toInt() xor 1).toByte()
+                        })).build()
+                    else -> encrypted.toBuilder().setSignatureData(encrypted.signatureData.toBuilder()
+                        .setAESGCMResponseData(encrypted.signatureData.getAESGCMResponseData().toBuilder()
+                            .setNonce(ByteString.copyFrom(ByteArray(11))))).build()
+                }
+                assertWaiting(TeslaBlePhase.READING_STATUS, null,
+                    fixture.conversation.receive(ack.toByteArray()))
+                assertFailed(fixture.conversation.receive(invalid.toByteArray()))
+                assertNotEquals("ACK_WAITING", fixture.responseObservations.last().disposition)
+                if (invalidCase == 0) {
+                    assertEquals(false, fixture.responseObservations.last().signedStatusPresent)
+                    assertNull(fixture.responseObservations.last().signedMessageFault)
+                    assertNull(fixture.responseObservations.last().operationStatus)
+                }
+            }
+        }
+    }
+
+    @Test fun bodyAckDoesNotAdvanceSequenceAndDriveKeepsBodyObservationUntilNewReceive() {
+        VehicleFixture().use { fixture ->
+            val verified = mutableListOf<TeslaApproachReadSummary>()
+            TeslaApproachReadSequence(fixture.client, fixture.vin, 1, 1, { fixture.clock }) { _, summary ->
+                verified += summary
+            }.use { sequence ->
+                val hello = parseSend(sequence.start())
+                val request = parseSend(sequence.receive(fixture.handshake(hello).toByteArray(), fixture.clock))
+                assertWaiting(TeslaBlePhase.READING_STATUS, null,
+                    sequence.receive(fixture.helloAck(request).toByteArray(), fixture.clock))
+                assertEquals(TeslaBleQuery.BODY_STATUS, sequence.query)
+                assertFalse(sequence.summary.bodyVerified)
+                assertNull(sequence.summary.bodyReceivedElapsedMs)
+                assertTrue(verified.isEmpty())
+                val driveHello = parseSend(sequence.receive(fixture.status(request).toByteArray(), fixture.clock))
+                assertEquals(TeslaBleQuery.DRIVE_STATE, sequence.query)
+                assertEquals(1, verified.size)
+                assertEquals("BODY_STATUS", sequence.summary.responseQuery)
+                assertEquals("STATUS_VERIFIED", sequence.summary.responseDisposition)
+                assertEquals(true, sequence.summary.responseSignedStatusPresent)
+                assertEquals(0, sequence.summary.responseSignedMessageFault)
+                assertEquals(0, sequence.summary.responseOperationStatus)
+                assertWaiting(TeslaBlePhase.HANDSHAKING, null,
+                    sequence.receive(fixture.helloAck(request).toByteArray(), fixture.clock))
+                assertEquals("DOMAIN_MISMATCH", sequence.summary.responseDisposition)
+                val driveRequest = parseSend(sequence.receive(fixture.handshake(driveHello).toByteArray(), fixture.clock))
+                assertEquals(false, sequence.summary.responseSignedStatusPresent)
+                assertNull(sequence.summary.responseSignedMessageFault)
+                assertNull(sequence.summary.responseOperationStatus)
+                // DRIVE STATUS에는 BODY ACK 정책을 확장하지 않는다.
+                assertFailed(sequence.receive(fixture.helloAck(driveRequest).toByteArray(), fixture.clock))
+                assertFalse(sequence.summary.driveVerified)
+                assertEquals(1, verified.size)
+            }
+        }
+    }
+
+    @Test fun bodyAckCannotMakeReplayedPayloadValidInFreshConversation() {
+        VehicleFixture().use { fixture ->
+            val original = fixture.authenticate()
+            val replay = fixture.status(original)
+            TeslaBleConversation(fixture.client, fixture.vin) { fixture.clock }.use { replacement ->
+                val hello = parseSend(replacement.start(false))
+                val current = parseSend(replacement.receive(fixture.handshake(hello).toByteArray()))
+                assertWaiting(TeslaBlePhase.READING_STATUS, null,
+                    replacement.receive(fixture.helloAck(current).toByteArray()))
+                assertFailed(replacement.receive(replay.toBuilder().setToDestination(current.fromDestination)
+                    .setRequestUuid(current.uuid).build().toByteArray()))
+            }
+        }
+    }
+
+    @Test fun responseCallbackReentryKeepsOuterObservationAndPropagatesCallbackFailure() {
+        VehicleFixture().use { fixture ->
+            val hello = fixture.start()
+            var outer: TeslaBleResponseObservation? = null
+            fixture.responseObserver = { observed ->
+                fixture.responseObserver = null
+                outer = observed
+                assertFailed(fixture.conversation.receive(byteArrayOf(0x80.toByte())))
+                assertEquals(TeslaBleResponseObservation("RESPONSE_INVALID", 2),
+                    fixture.responseObservations.last())
+                assertEquals("ACK_WAITING", observed.disposition)
+                assertEquals("UNSET", observed.payloadKind)
+                assertHeaderCorrelation(observed, true, true, true)
+            }
+            assertWaiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.ACKNOWLEDGED,
+                fixture.conversation.receive(fixture.helloAck(hello).toByteArray()))
+            assertEquals("ROUTING_ADDRESS", checkNotNull(outer).toKind)
+        }
+        VehicleFixture().use { fixture ->
+            val hello = fixture.start()
+            val failure = IllegalStateException("callback")
+            fixture.responseObserver = { throw failure }
+            val thrown = assertThrows(IllegalStateException::class.java) {
+                fixture.conversation.receive(fixture.handshake(hello).toByteArray())
+            }
+            assertSame(failure, thrown)
+            assertEquals("SESSION_READY", fixture.responseObservations.last().disposition)
+            assertHeaderCorrelation(fixture.responseObservations.last(), true, true, true)
+        }
+    }
+
+    @Test fun domainMismatchDetailsPreserveUntrustedRawHeaderWithoutAdvancingHandshake() {
+        VehicleFixture(TeslaBleQuery.DRIVE_STATE).use { fixture ->
+            val hello = fixture.start()
+            val session = fixture.handshake(hello)
+            val routing = UniversalMessage.Destination.newBuilder()
+                .setRoutingAddress(ByteString.copyFrom(byteArrayOf(1))).build()
+            val cases = listOf(
+                Triple(session.toBuilder().clearFromDestination().build(), "FROM_MISSING", null),
+                Triple(session.toBuilder().setFromDestination(routing).build(), "FROM_NOT_DOMAIN", null),
+                Triple(session.toBuilder().setFromDestination(UniversalMessage.Destination.newBuilder()
+                    .setDomainValue(2)).build(), "DOMAIN_DIFFERENT", 2),
+                Triple(session.toBuilder().setFromDestination(UniversalMessage.Destination.newBuilder()
+                    .setDomainValue(777)).build(), "DOMAIN_DIFFERENT", 777),
+                Triple(session.toBuilder().setFromDestination(UniversalMessage.Destination.newBuilder()
+                    .setDomainValue(0)).build(), "DOMAIN_DIFFERENT", 0),
+                Triple(session.toBuilder().setFromDestination(UniversalMessage.Destination.getDefaultInstance())
+                    .build(), "FROM_NOT_DOMAIN", null),
+            )
+            for ((response, reason, actual) in cases) {
+                assertWaiting(TeslaBlePhase.HANDSHAKING, null,
+                    fixture.conversation.receive(response.toByteArray()))
+                val observed = fixture.responseObservations.last()
+                assertEquals("DOMAIN_MISMATCH", observed.disposition)
+                assertEquals(3, observed.expectedDomain)
+                assertEquals(reason, observed.domainMismatchReason)
+                assertEquals(actual, observed.fromDomain)
+                assertEquals(response.hasFromDestination(), observed.fromPresent)
+                assertEquals(when (reason) {
+                    "FROM_MISSING" -> null
+                    "FROM_NOT_DOMAIN" -> if (response.fromDestination == routing) "ROUTING_ADDRESS" else "UNSET"
+                    else -> "DOMAIN"
+                }, observed.fromKind)
+                assertEquals(true, observed.toPresent)
+                assertEquals("ROUTING_ADDRESS", observed.toKind)
+                assertEquals("SESSION_INFO", observed.payloadKind)
+                assertHeaderCorrelation(observed, true, true, true)
+            }
+            parseSend(fixture.conversation.receive(session.toByteArray()))
+            assertEquals("SESSION_READY", fixture.responseObservations.last().disposition)
+            assertNull(fixture.responseObservations.last().domainMismatchReason)
+            assertHeaderCorrelation(fixture.responseObservations.last(), true, true, true)
+        }
+    }
+
+    @Test fun domainMismatchCorrelationDistinguishesMissingHeadersFromUnequalHeaders() {
+        VehicleFixture(TeslaBleQuery.DRIVE_STATE).use { fixture ->
+            val hello = fixture.start()
+            val response = fixture.handshake(hello).toBuilder()
+                .setFromDestination(UniversalMessage.Destination.newBuilder()
+                    .setDomain(UniversalMessage.Domain.DOMAIN_VEHICLE_SECURITY)).build()
+            val differentUuid = hello.uuid.toByteArray().apply {
+                this[lastIndex] = (this[lastIndex].toInt() xor 1).toByte()
+            }
+            val differentRoute = hello.fromDestination.routingAddress.toByteArray().apply {
+                this[lastIndex] = (this[lastIndex].toInt() xor 1).toByte()
+            }
+            val cases = listOf(
+                response.toBuilder().clearRequestUuid().build() to Triple(false, null, true),
+                response.toBuilder().setRequestUuid(ByteString.copyFrom(differentUuid)).build() to
+                    Triple(true, false, true),
+                response.toBuilder().setRequestUuid(ByteString.copyFrom(byteArrayOf(1))).build() to
+                    Triple(true, false, true),
+                response.toBuilder().clearToDestination().build() to Triple(true, true, null),
+                response.toBuilder().setToDestination(UniversalMessage.Destination.newBuilder()
+                    .setDomain(UniversalMessage.Domain.DOMAIN_INFOTAINMENT)).build() to Triple(true, true, false),
+                response.toBuilder().setToDestination(UniversalMessage.Destination.getDefaultInstance())
+                    .build() to Triple(true, true, false),
+                response.toBuilder().setToDestination(UniversalMessage.Destination.newBuilder()
+                    .setRoutingAddress(ByteString.copyFrom(differentRoute))).build() to Triple(true, true, false),
+                response.toBuilder().setToDestination(UniversalMessage.Destination.newBuilder()
+                    .setRoutingAddress(ByteString.copyFrom(byteArrayOf(1)))).build() to Triple(true, true, false),
+            )
+            for ((invalid, expected) in cases) {
+                assertWaiting(TeslaBlePhase.HANDSHAKING, null,
+                    fixture.conversation.receive(invalid.toByteArray()))
+                val observed = fixture.responseObservations.last()
+                assertEquals("DOMAIN_MISMATCH", observed.disposition)
+                assertHeaderCorrelation(observed, expected.first, expected.second, expected.third)
+            }
+            parseSend(fixture.conversation.receive(fixture.handshake(hello).toByteArray()))
+            assertHeaderCorrelation(fixture.responseObservations.last(), true, true, true)
+        }
+    }
+
+    @Test fun registrationHeaderCannotClaimCorrelationBeforeRequestIdentityIsIssued() {
+        VehicleFixture().use { fixture ->
+            assertTrue(fixture.conversation.start(true) is TeslaBleStep.Send)
+            val response = UniversalMessage.RoutableMessage.newBuilder()
+                .setFromDestination(UniversalMessage.Destination.newBuilder()
+                    .setDomain(UniversalMessage.Domain.DOMAIN_VEHICLE_SECURITY))
+                .setToDestination(UniversalMessage.Destination.newBuilder()
+                    .setRoutingAddress(ByteString.copyFrom(byteArrayOf(1))))
+                .setRequestUuid(ByteString.copyFrom(byteArrayOf(1)))
+                .setProtobufMessageAsBytes(Vcsec.FromVCSECMessage.getDefaultInstance().toByteString()).build()
+            assertWaiting(TeslaBlePhase.WAITING_FOR_CARD, null,
+                fixture.conversation.receive(response.toByteArray()))
+            assertFalse(fixture.conversation.registrationReported)
+            assertHeaderCorrelation(fixture.responseObservations.last(), true, null, null)
+            val hello = parseSend(fixture.conversation.receive(
+                registrationStatus(Vcsec.OperationStatus_E.OPERATIONSTATUS_OK, 0).toByteArray()))
+            assertWaiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.ACKNOWLEDGED,
+                fixture.conversation.receive(fixture.helloAck(hello).toByteArray()))
+            assertHeaderCorrelation(fixture.responseObservations.last(), true, true, true)
+        }
+    }
+
+    @Test fun malformedAndExpiredReceiveDoNotReusePreviousHeader() {
+        for (expired in listOf(false, true)) {
+            VehicleFixture().use { fixture ->
+                val hello = fixture.start()
+                assertWaiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.ACKNOWLEDGED,
+                    fixture.conversation.receive(fixture.helloAck(hello).toByteArray()))
+                assertEquals("UNSET", fixture.responseObservations.last().payloadKind)
+                assertHeaderCorrelation(fixture.responseObservations.last(), true, true, true)
+                if (expired) fixture.clock += 15_000
+                assertFailed(fixture.conversation.receive(
+                    if (expired) fixture.handshake(hello).toByteArray() else byteArrayOf(0x80.toByte())))
+                assertEquals(TeslaBleResponseObservation("RESPONSE_INVALID", 2),
+                    fixture.responseObservations.last())
+            }
+        }
+    }
+
+    @Test fun approachBodyThenDriveRequiresFreshDomainHandshakeAndKeepsOriginalReceiptTimes() {
+        VehicleFixture().use { fixture ->
+            val observations = mutableListOf<TeslaApproachReadSummary>()
+            TeslaApproachReadSequence(fixture.client, fixture.vin, 1, 1, { fixture.clock }) { _, summary ->
+                observations += summary
+            }.use { sequence ->
+                val bodyHello = parseSend(sequence.start())
+                assertEquals(UniversalMessage.Domain.DOMAIN_VEHICLE_SECURITY, bodyHello.toDestination.domain)
+                val bodyRequest = parseSend(sequence.receive(fixture.handshake(bodyHello).toByteArray(), fixture.clock))
+                assertEquals(Vcsec.InformationRequestType.INFORMATION_REQUEST_TYPE_GET_STATUS,
+                    fixture.decryptRequest(bodyRequest).informationRequest.informationRequestType)
+                fixture.clock += 100
+                val bodyReceived = fixture.clock
+                val driveHello = parseSend(sequence.receive(fixture.status(bodyRequest).toByteArray(), bodyReceived))
+                assertEquals(TeslaBleQuery.DRIVE_STATE, sequence.query)
+                assertEquals(UniversalMessage.Domain.DOMAIN_INFOTAINMENT, driveHello.toDestination.domain)
+                assertTrue(driveHello.hasSessionInfoRequest())
+                assertNotEquals(bodyHello.uuid, driveHello.uuid)
+                assertNotEquals(bodyHello.fromDestination.routingAddress, driveHello.fromDestination.routingAddress)
+                assertTrue(sequence.summary.bodyVerified)
+                assertFalse(sequence.summary.driveVerified)
+                assertNull(sequence.summary.gear)
+                assertEquals("BODY_STATUS", sequence.summary.responseQuery)
+                assertEquals("STATUS_VERIFIED", sequence.summary.responseDisposition)
+                assertEquals(2, sequence.summary.responseExpectedDomain)
+                assertEquals(true, sequence.summary.responseRequestUuidPresent)
+                assertEquals(true, sequence.summary.responseRequestUuidMatches)
+                assertEquals(true, sequence.summary.responseToRouteMatches)
+                assertEquals(2L, sequence.summary.rxProtocolCount)
+                // 현재 DRIVE identity가 맞아도 from domain2이면 비인증 관측만 하고 계속 대기한다.
+                val currentDriveWrongDomain = fixture.handshake(driveHello).toBuilder()
+                    .setFromDestination(bodyHello.toDestination).build()
+                assertWaiting(TeslaBlePhase.HANDSHAKING, null,
+                    sequence.receive(currentDriveWrongDomain.toByteArray(), fixture.clock))
+                assertEquals("DOMAIN_MISMATCH", sequence.summary.responseDisposition)
+                assertEquals("DRIVE_STATE", sequence.summary.responseQuery)
+                assertEquals(3, sequence.summary.responseExpectedDomain)
+                assertEquals(2, sequence.summary.responseFromDomain)
+                assertEquals(true, sequence.summary.responseRequestUuidPresent)
+                assertEquals(true, sequence.summary.responseRequestUuidMatches)
+                assertEquals(true, sequence.summary.responseToRouteMatches)
+                assertFalse(sequence.summary.driveVerified)
+                // 같은 연결에서 늦은 BODY 응답/세션 응답을 DRIVE 성공으로 재생할 수 없다.
+                assertWaiting(TeslaBlePhase.HANDSHAKING, null,
+                    sequence.receive(fixture.handshake(bodyHello).toByteArray(), fixture.clock))
+                assertEquals("DOMAIN_MISMATCH", sequence.summary.responseDisposition)
+                assertEquals("DRIVE_STATE", sequence.summary.responseQuery)
+                assertEquals(3, sequence.summary.responseExpectedDomain)
+                assertEquals(2, sequence.summary.responseFromDomain)
+                assertEquals("DOMAIN_DIFFERENT", sequence.summary.responseDomainMismatchReason)
+                assertEquals(true, sequence.summary.responseRequestUuidPresent)
+                assertEquals(false, sequence.summary.responseRequestUuidMatches)
+                assertEquals(false, sequence.summary.responseToRouteMatches)
+                assertWaiting(TeslaBlePhase.HANDSHAKING, null,
+                    sequence.receive(fixture.status(bodyRequest).toByteArray(), fixture.clock))
+                assertEquals("DOMAIN_MISMATCH", sequence.summary.responseDisposition)
+                assertEquals(false, sequence.summary.responseRequestUuidMatches)
+                assertEquals(false, sequence.summary.responseToRouteMatches)
+                val driveRequest = parseSend(sequence.receive(fixture.handshake(driveHello).toByteArray(), fixture.clock))
+                assertEquals("SESSION_READY", sequence.summary.responseDisposition)
+                assertEquals("DRIVE_STATE", sequence.summary.responseQuery)
+                assertEquals(CarServer.Action.newBuilder().setVehicleAction(
+                    CarServer.VehicleAction.newBuilder().setGetVehicleData(
+                        CarServer.GetVehicleData.newBuilder().setGetDriveState(CarServer.GetDriveState.getDefaultInstance()),
+                    ),
+                ).build(), fixture.decryptDriveRequest(driveRequest))
+                fixture.clock += 70
+                val driveReceived = fixture.clock
+                val response = fixture.driveResponse(driveRequest,
+                    fixture.driveState(shift(TeslaGear.R), timestamp(1_791_356_400, 987_000_000)))
+                fixture.clock += 300
+                assertTrue(sequence.receive(response.toByteArray(), driveReceived) is TeslaBleStep.Complete)
+                assertTrue(sequence.summary.bodyVerified)
+                assertTrue(sequence.summary.driveVerified)
+                assertEquals(bodyReceived, sequence.summary.bodyReceivedElapsedMs)
+                assertEquals(driveReceived, sequence.summary.driveReceivedElapsedMs)
+                assertEquals(1_791_356_400_987L, sequence.summary.driveSourceWallMs)
+                assertEquals("R", sequence.summary.gear)
+                assertEquals("STATUS_VERIFIED", sequence.summary.responseDisposition)
+                assertEquals(7L, sequence.summary.rxProtocolCount)
+                assertEquals(2, observations.size)
+            }
+        }
+    }
+
+    @Test fun fragmentedRxAndDelayedProtocolKeepReceiptEvidenceThroughDriveNoResponseAndCleanup() {
+        VehicleFixture().use { fixture ->
+            TeslaApproachReadSequence(fixture.client, fixture.vin, 1, 1, { fixture.clock }) { _, _ -> }.use { sequence ->
+                val hello = parseSend(sequence.start())
+                val decoder = TeslaBleFrameDecoder()
+                val handshake = framed(fixture.handshake(hello).toByteArray())
+                sequence.recordRxNotification(fixture.clock)
+                assertTrue(decoder.append(handshake.copyOfRange(0, handshake.size - 1)).isEmpty())
+                assertEquals(1L, sequence.summary.rxNotificationCount)
+                assertEquals(0L, sequence.summary.rxFrameCount)
+                assertEquals(0L, sequence.summary.rxProtocolCount)
+                assertNull(sequence.summary.lastFrameElapsedMs)
+                assertNull(sequence.summary.responseDisposition)
+                fixture.clock += 3
+                val handshakeReceivedAt = fixture.clock
+                sequence.recordRxNotification(handshakeReceivedAt)
+                val handshakeFrame = decoder.append(handshake.copyOfRange(handshake.size - 1, handshake.size)).single()
+                sequence.recordRxFrame(handshakeReceivedAt)
+                fixture.clock += 150
+                val bodyRequest = parseSend(sequence.receive(handshakeFrame, handshakeReceivedAt))
+                assertEquals("SESSION_READY", sequence.summary.responseDisposition)
+                assertEquals(handshakeReceivedAt, sequence.summary.lastRxElapsedMs)
+                assertEquals(handshakeReceivedAt, sequence.summary.lastFrameElapsedMs)
+                assertEquals(1L, sequence.summary.rxProtocolCount)
+                val bodyReceivedAt = fixture.clock
+                sequence.recordRxNotification(bodyReceivedAt)
+                val bodyFrame = decoder.append(framed(fixture.status(bodyRequest, lock = 1, frontTrunk = null).toByteArray())).single()
+                sequence.recordRxFrame(bodyReceivedAt)
+                fixture.clock += 200
+                val driveHello = parseSend(sequence.receive(bodyFrame, bodyReceivedAt))
+                assertEquals(UniversalMessage.Domain.DOMAIN_INFOTAINMENT, driveHello.toDestination.domain)
+                sequence.close()
+                val final = sequence.snapshot("TIMED_OUT", "PARTIAL", "DEADLINE_EXPIRED", localClosed = true,
+                    leaseRetained = false).withWriteObservation(TeslaApproachReadSummary(
+                    writeSequence = 3L, writeRequestStatus = 0, writeCallbackStatus = 0,
+                ))
+                assertEquals("DRIVE_STATE", final.query)
+                assertEquals("BODY_STATUS", final.responseQuery)
+                assertEquals("STATUS_VERIFIED", final.responseDisposition)
+                assertEquals(2, final.responseExpectedDomain)
+                assertEquals(true, final.responseRequestUuidPresent)
+                assertEquals(true, final.responseRequestUuidMatches)
+                assertEquals(true, final.responseToRouteMatches)
+                assertEquals(3L, final.rxNotificationCount)
+                assertEquals(2L, final.rxFrameCount)
+                assertEquals(2L, final.rxProtocolCount)
+                assertEquals(bodyReceivedAt, final.lastRxElapsedMs)
+                assertEquals(bodyReceivedAt, final.lastFrameElapsedMs)
+                assertEquals(bodyReceivedAt, final.bodyReceivedElapsedMs)
+                assertEquals(1, final.lockState)
+                assertNull(final.frontTrunkState)
+                assertFalse(final.driveVerified)
+                assertNull(final.gear)
+                assertTrue(final.localClosed)
+                assertFalse(final.leaseRetained)
+                assertEquals(0, final.writeRequestStatus)
+                assertEquals(0, final.writeCallbackStatus)
+            }
+        }
+    }
+
+    @Test fun approachMalformedOrExpiredDriveReceiveClearsCorrelationWithoutDiscardingBody() {
+        for (expired in listOf(false, true)) {
+            VehicleFixture().use { fixture ->
+                TeslaApproachReadSequence(fixture.client, fixture.vin, 1, 1, { fixture.clock }) { _, _ -> }.use { sequence ->
+                    val bodyHello = parseSend(sequence.start())
+                    val bodyRequest = parseSend(sequence.receive(
+                        fixture.handshake(bodyHello).toByteArray(), fixture.clock))
+                    val driveHello = parseSend(sequence.receive(
+                        fixture.status(bodyRequest).toByteArray(), fixture.clock))
+                    assertWaiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.ACKNOWLEDGED,
+                        sequence.receive(fixture.helloAck(driveHello).toByteArray(), fixture.clock))
+                    assertEquals(true, sequence.summary.responseRequestUuidPresent)
+                    assertEquals(true, sequence.summary.responseRequestUuidMatches)
+                    assertEquals(true, sequence.summary.responseToRouteMatches)
+                    if (expired) fixture.clock += 15_000
+                    assertFailed(sequence.receive(
+                        if (expired) fixture.handshake(driveHello).toByteArray() else byteArrayOf(0x80.toByte()),
+                        fixture.clock))
+                    assertEquals("RESPONSE_INVALID", sequence.summary.responseDisposition)
+                    assertEquals("DRIVE_STATE", sequence.summary.responseQuery)
+                    assertEquals(3, sequence.summary.responseExpectedDomain)
+                    assertNull(sequence.summary.responseFromPresent)
+                    assertNull(sequence.summary.responseToPresent)
+                    assertNull(sequence.summary.responseRequestUuidPresent)
+                    assertNull(sequence.summary.responseRequestUuidMatches)
+                    assertNull(sequence.summary.responseToRouteMatches)
+                    assertTrue(sequence.summary.bodyVerified)
+                    assertFalse(sequence.summary.driveVerified)
+                    assertNull(sequence.summary.gear)
+                }
+            }
+        }
+    }
+
+    @Test fun approachDriveFailureAndClosePreserveBodyWithoutInventingGearOrSourceTime() {
+        VehicleFixture().use { fixture ->
+            val sequence = TeslaApproachReadSequence(fixture.client, fixture.vin, 1, 1, { fixture.clock }) { _, _ -> }
+            try {
+                val bodyHello = parseSend(sequence.start())
+                val bodyRequest = parseSend(sequence.receive(fixture.handshake(bodyHello).toByteArray(), fixture.clock))
+                val driveHello = parseSend(sequence.receive(fixture.status(bodyRequest, lock = 1, frontTrunk = null).toByteArray(), fixture.clock))
+                val driveRequest = parseSend(sequence.receive(fixture.handshake(driveHello).toByteArray(), fixture.clock))
+                assertFailed(sequence.receive(fixture.encryptResponse(driveRequest,
+                    fixture.carResponse(result = 1), 8).toByteArray(), fixture.clock))
+                assertTrue(sequence.summary.bodyVerified)
+                assertFalse(sequence.summary.driveVerified)
+                assertEquals(1, sequence.summary.lockState)
+                assertNull(sequence.summary.frontTrunkState)
+                assertNull(sequence.summary.gear)
+                assertNull(sequence.summary.driveReceivedElapsedMs)
+                assertNull(sequence.summary.driveSourceWallMs)
+                sequence.close()
+                assertTrue(sequence.summary.bodyVerified)
+                assertThrows(IllegalStateException::class.java) { sequence.receive(fixture.driveResponse(driveRequest).toByteArray(), fixture.clock) }
+            } finally { sequence.close() }
+        }
+    }
+
     @Test fun registrationReportThenInvalidTagDoesNotDiscardFollowingAuthenticatedStatus() {
         VehicleFixture().use { fixture ->
             fixture.conversation.start(true)
@@ -40,7 +837,7 @@ class TeslaBleProtocolTest {
             val request = parseSend(fixture.conversation.receive(fixture.handshake(hello).toByteArray()))
             assertEquals(Vcsec.InformationRequestType.INFORMATION_REQUEST_TYPE_GET_STATUS,
                 fixture.decryptRequest(request).informationRequest.informationRequestType)
-            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0)),
+            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0, bodyVehicleSleepStatus = 0)),
                 fixture.conversation.receive(fixture.status(request).toByteArray()))
         }
     }
@@ -56,7 +853,7 @@ class TeslaBleProtocolTest {
             assertTrue((signature.counter.toLong() and 0xffff_ffffL) > 6L)
             assertTrue(signature.expiresAt in 101..130)
             val result = fixture.conversation.receive(fixture.status(request, lock = 1, frontTrunk = 0).toByteArray())
-            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0)), result)
+            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0, bodyVehicleSleepStatus = 0)), result)
         }
     }
 
@@ -195,17 +992,31 @@ class TeslaBleProtocolTest {
                 session.toBuilder().clearRequestUuid().build(),
                 session.toBuilder().setRequestUuid(ByteString.copyFrom(ByteArray(16))).build(),
                 session.toBuilder().setRequestUuid(ByteString.copyFrom(byteArrayOf(1))).build(),
-            )) assertEquals(TeslaBleStep.Waiting(TeslaBlePhase.HANDSHAKING),
-                fixture.conversation.receive(invalid.toByteArray()))
+            )) {
+                assertEquals(TeslaBleStep.Waiting(TeslaBlePhase.HANDSHAKING),
+                    fixture.conversation.receive(invalid.toByteArray()))
+                assertEquals("REQUEST_UUID_MISMATCH", fixture.responseObservations.last().disposition)
+                assertHeaderCorrelation(fixture.responseObservations.last(), !invalid.requestUuid.isEmpty,
+                    if (invalid.requestUuid.isEmpty) null else false, true)
+            }
             val request = parseSend(fixture.conversation.receive(session.toByteArray()))
+            assertEquals("SESSION_READY", fixture.responseObservations.last().disposition)
+            assertHeaderCorrelation(fixture.responseObservations.last(), true, true, true)
             val authentic = fixture.driveResponse(request)
             for (invalid in listOf(
                 authentic.toBuilder().clearRequestUuid().build(),
                 authentic.toBuilder().setRequestUuid(ByteString.copyFrom(ByteArray(16))).build(),
                 authentic.toBuilder().setRequestUuid(hello.uuid).build(),
-            )) assertEquals(TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS),
-                fixture.conversation.receive(invalid.toByteArray()))
+            )) {
+                assertEquals(TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS),
+                    fixture.conversation.receive(invalid.toByteArray()))
+                assertEquals("REQUEST_UUID_MISMATCH", fixture.responseObservations.last().disposition)
+                assertHeaderCorrelation(fixture.responseObservations.last(), !invalid.requestUuid.isEmpty,
+                    if (invalid.requestUuid.isEmpty) null else false, true)
+            }
             assertTrue(fixture.conversation.receive(authentic.toByteArray()) is TeslaBleStep.Complete)
+            assertEquals("STATUS_VERIFIED", fixture.responseObservations.last().disposition)
+            assertHeaderCorrelation(fixture.responseObservations.last(), true, true, true)
         }
     }
 
@@ -217,19 +1028,27 @@ class TeslaBleProtocolTest {
                 .setDomain(UniversalMessage.Domain.DOMAIN_VEHICLE_SECURITY)
             val wrongRoute = UniversalMessage.Destination.newBuilder()
                 .setRoutingAddress(ByteString.copyFrom(ByteArray(16)))
-            for (invalid in listOf(
-                session.toBuilder().setFromDestination(wrongSource).build(),
-                session.toBuilder().setToDestination(wrongRoute).build(),
-            )) assertEquals(TeslaBleStep.Waiting(TeslaBlePhase.HANDSHAKING),
-                fixture.conversation.receive(invalid.toByteArray()))
+            for ((invalid, disposition) in listOf(
+                session.toBuilder().setFromDestination(wrongSource).build() to "DOMAIN_MISMATCH",
+                session.toBuilder().setToDestination(wrongRoute).build() to "ROUTE_MISMATCH",
+            )) {
+                assertEquals(TeslaBleStep.Waiting(TeslaBlePhase.HANDSHAKING),
+                    fixture.conversation.receive(invalid.toByteArray()))
+                assertEquals(disposition, fixture.responseObservations.last().disposition)
+            }
             val request = parseSend(fixture.conversation.receive(session.toByteArray()))
+            assertEquals("SESSION_READY", fixture.responseObservations.last().disposition)
             val authentic = fixture.driveResponse(request)
-            for (invalid in listOf(
-                authentic.toBuilder().setFromDestination(wrongSource).build(),
-                authentic.toBuilder().setToDestination(wrongRoute).build(),
-            )) assertEquals(TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS),
-                fixture.conversation.receive(invalid.toByteArray()))
+            for ((invalid, disposition) in listOf(
+                authentic.toBuilder().setFromDestination(wrongSource).build() to "DOMAIN_MISMATCH",
+                authentic.toBuilder().setToDestination(wrongRoute).build() to "ROUTE_MISMATCH",
+            )) {
+                assertEquals(TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS),
+                    fixture.conversation.receive(invalid.toByteArray()))
+                assertEquals(disposition, fixture.responseObservations.last().disposition)
+            }
             assertTrue(fixture.conversation.receive(authentic.toByteArray()) is TeslaBleStep.Complete)
+            assertEquals("STATUS_VERIFIED", fixture.responseObservations.last().disposition)
         }
     }
 
@@ -240,7 +1059,10 @@ class TeslaBleProtocolTest {
             val tag = fixture.sessionInfoTag(info, hello).apply { this[0] = (this[0].toInt() xor 1).toByte() }
             assertWaiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.HMAC_MISMATCH,
                 fixture.conversation.receive(fixture.sessionInfoResponse(hello, info, tag).toByteArray()))
+            assertEquals("SESSION_INFO_AUTH_REJECTED", fixture.responseObservations.last().disposition)
+            assertHeaderCorrelation(fixture.responseObservations.last(), true, true, true)
             val request = parseSend(fixture.conversation.receive(fixture.handshake(hello).toByteArray()))
+            assertEquals("SESSION_READY", fixture.responseObservations.last().disposition)
             fixture.decryptDriveRequest(request)
         }
     }
@@ -304,6 +1126,7 @@ class TeslaBleProtocolTest {
                     )).build()
                 }
                 assertFailed(fixture.conversation.receive(invalid.toByteArray()))
+                assertHeaderCorrelation(fixture.responseObservations.last(), true, true, true)
             }
         }
     }
@@ -402,7 +1225,7 @@ class TeslaBleProtocolTest {
             assertWaiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.HMAC_MISMATCH,
                 fixture.conversation.receive(authentic.toBuilder().setSessionInfo(info.toByteString()).build().toByteArray()))
             val request = parseSend(fixture.conversation.receive(authentic.toByteArray()))
-            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0)),
+            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0, bodyVehicleSleepStatus = 0)),
                 fixture.conversation.receive(fixture.status(request).toByteArray()))
         }
     }
@@ -437,8 +1260,10 @@ class TeslaBleProtocolTest {
         VehicleFixture().use { fixture ->
             val hello = fixture.start()
             val request = parseSend(fixture.conversation.receive(fixture.handshake(hello).toBuilder().clearRequestUuid().build().toByteArray()))
+            assertHeaderCorrelation(fixture.responseObservations.last(), false, null, true)
             val response = fixture.status(request).toBuilder().clearRequestUuid().build()
-            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0)), fixture.conversation.receive(response.toByteArray()))
+            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0, bodyVehicleSleepStatus = 0)), fixture.conversation.receive(response.toByteArray()))
+            assertHeaderCorrelation(fixture.responseObservations.last(), false, null, true)
         }
     }
 
@@ -454,7 +1279,7 @@ class TeslaBleProtocolTest {
             for (crossed in listOf(otherDomain, otherRoute, otherUuid)) {
                 assertEquals(TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS), fixture.conversation.receive(crossed.toByteArray()))
             }
-            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0)), fixture.conversation.receive(authentic.toByteArray()))
+            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0, bodyVehicleSleepStatus = 0)), fixture.conversation.receive(authentic.toByteArray()))
         }
     }
 
@@ -524,7 +1349,7 @@ class TeslaBleProtocolTest {
             assertEquals(TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS),
                 fixture.conversation.receive(fixture.encryptResponse(request, waitingResponse(), counter = 9).toByteArray()))
             val response = fixture.status(request, counter = 8)
-            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0)), fixture.conversation.receive(response.toByteArray()))
+            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0, bodyVehicleSleepStatus = 0)), fixture.conversation.receive(response.toByteArray()))
             assertFailed(fixture.conversation.receive(response.toByteArray()))
         }
     }
@@ -541,37 +1366,57 @@ class TeslaBleProtocolTest {
     @Test fun nominalHelloAckKeepsWaitingAndStillAcceptsFollowingSignedSessionInfo() {
         VehicleFixture().use { fixture ->
             val hello = fixture.start()
-            assertWaiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.ACKNOWLEDGED,
-                fixture.conversation.receive(fixture.helloAck(hello).toByteArray()))
+            repeat(2) {
+                assertWaiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.ACKNOWLEDGED,
+                    fixture.conversation.receive(fixture.helloAck(hello).toByteArray()))
+                assertEquals("ACK_WAITING", fixture.responseObservations.last().disposition)
+                assertHeaderCorrelation(fixture.responseObservations.last(), true, true, true)
+            }
             // ACK는 route/request_uuid 상관관계 identity를 회전시키지 않는다.
             val request = parseSend(fixture.conversation.receive(fixture.handshake(hello).toByteArray()))
+            assertEquals("SESSION_READY", fixture.responseObservations.last().disposition)
+            assertHeaderCorrelation(fixture.responseObservations.last(), true, true, true)
             val decoded = fixture.decryptRequest(request)
             assertEquals(Vcsec.UnsignedMessage.SubMessageCase.INFORMATIONREQUEST, decoded.subMessageCase)
             assertEquals(Vcsec.InformationRequestType.INFORMATION_REQUEST_TYPE_GET_STATUS,
                 decoded.informationRequest.informationRequestType)
-            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0)),
+            // SESSION_READY의 관측은 HELLO 기준. 새 STATUS identity에서는 지난 ACK/session을 버린다.
+            for (late in listOf(fixture.helloAck(hello), fixture.handshake(hello))) {
+                assertWaiting(TeslaBlePhase.READING_STATUS, null,
+                    fixture.conversation.receive(late.toByteArray()))
+                assertEquals("ROUTE_MISMATCH", fixture.responseObservations.last().disposition)
+                assertHeaderCorrelation(fixture.responseObservations.last(), true, false, false)
+            }
+            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0, bodyVehicleSleepStatus = 0)),
                 fixture.conversation.receive(fixture.status(request).toByteArray()))
+            assertHeaderCorrelation(fixture.responseObservations.last(), true, true, true)
         }
     }
 
     @Test fun repeatedNominalHelloAcksNeverExtendTheHandshakeDeadline() {
-        VehicleFixture().use { fixture ->
-            val hello = fixture.start()
-            fixture.clock += 14_999
-            assertWaiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.ACKNOWLEDGED,
-                fixture.conversation.receive(fixture.helloAck(hello).toByteArray()))
-            // ACK가 phase 시작 시각을 갱신했다면 25_000ms에도 계속 대기했을 것이다.
-            fixture.clock += 1
-            assertFailed(fixture.conversation.receive(fixture.handshake(hello).toByteArray()))
-        }
-        VehicleFixture().use { fixture ->
-            val hello = fixture.start()
-            fixture.clock += 10_000
-            assertWaiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.ACKNOWLEDGED,
-                fixture.conversation.receive(fixture.helloAck(hello).toByteArray()))
-            // 같은 ACK를 반복해도 대기 유예가 갱신되지 않는다.
-            fixture.clock += 10_000
-            assertFailed(fixture.conversation.receive(fixture.helloAck(hello).toByteArray()))
+        for (query in TeslaBleQuery.entries) {
+            VehicleFixture(query).use { fixture ->
+                val hello = fixture.start()
+                fixture.clock += 14_999
+                assertWaiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.ACKNOWLEDGED,
+                    fixture.conversation.receive(fixture.helloAck(hello).toByteArray()))
+                assertEquals("ACK_WAITING", fixture.responseObservations.last().disposition)
+                // ACK가 phase 시작 시각을 갱신했다면 25_000ms에도 계속 대기했을 것이다.
+                fixture.clock += 1
+                assertFailed(fixture.conversation.receive(fixture.handshake(hello).toByteArray()))
+                assertEquals("RESPONSE_INVALID", fixture.responseObservations.last().disposition)
+            }
+            VehicleFixture(query).use { fixture ->
+                val hello = fixture.start()
+                fixture.clock += 10_000
+                assertWaiting(TeslaBlePhase.HANDSHAKING, TeslaBleAuthEvidence.ACKNOWLEDGED,
+                    fixture.conversation.receive(fixture.helloAck(hello).toByteArray()))
+                assertEquals("ACK_WAITING", fixture.responseObservations.last().disposition)
+                // 같은 ACK를 반복해도 대기 유예가 갱신되지 않는다.
+                fixture.clock += 10_000
+                assertFailed(fixture.conversation.receive(fixture.helloAck(hello).toByteArray()))
+                assertEquals("RESPONSE_INVALID", fixture.responseObservations.last().disposition)
+            }
         }
     }
 
@@ -637,6 +1482,9 @@ class TeslaBleProtocolTest {
     }
 
     @Test fun invalidSignedSessionInfoBoundaryNeverSendsStatusRequest() {
+        assertHelloDiscarded(TeslaBleAuthEvidence.SESSION_INFO_INVALID) { fixture, hello ->
+            fixture.baseResponse(hello).setSessionInfo(ByteString.copyFrom(byteArrayOf(0x80.toByte()))).build()
+        }
         assertHelloDiscarded(TeslaBleAuthEvidence.SIGNATURE_MISSING) { fixture, hello ->
             fixture.sessionInfoResponse(hello, fixture.sessionInfo(SESSION_INFO_OK), null)
         }
@@ -681,13 +1529,13 @@ class TeslaBleProtocolTest {
         VehicleFixture().use { fixture ->
             val request = fixture.authenticate()
             val absent = fixture.vehicleStatus(null, null)
-            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(null, null)),
+            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(bodyVehicleSleepStatus = 0)),
                 fixture.conversation.receive(fixture.encryptResponse(request, absent, 8).toByteArray()))
         }
         VehicleFixture().use { fixture ->
             val request = fixture.authenticate()
             val unknown = fixture.vehicleStatus(99, 99)
-            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(null, null)),
+            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(bodyVehicleSleepStatus = 0)),
                 fixture.conversation.receive(fixture.encryptResponse(request, unknown, 8).toByteArray()))
         }
     }
@@ -817,11 +1665,49 @@ class TeslaBleProtocolTest {
             val hello = fixture.start()
             assertWaiting(TeslaBlePhase.HANDSHAKING, expected,
                 fixture.conversation.receive(build(fixture, hello).toByteArray()))
+            assertEquals(when (expected) {
+                TeslaBleAuthEvidence.SESSION_INFO_INVALID, TeslaBleAuthEvidence.PARAMETERS_INVALID -> "SESSION_INFO_INVALID"
+                else -> "SESSION_INFO_AUTH_REJECTED"
+            }, fixture.responseObservations.last().disposition)
             val request = parseSend(fixture.conversation.receive(fixture.handshake(hello).toByteArray()))
+            assertEquals("SESSION_READY", fixture.responseObservations.last().disposition)
             assertEquals(Vcsec.InformationRequestType.INFORMATION_REQUEST_TYPE_GET_STATUS,
                 fixture.decryptRequest(request).informationRequest.informationRequestType)
-            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0)),
+            assertEquals(TeslaBleStep.Complete(TeslaReadOnlyStatus(1, 0, bodyVehicleSleepStatus = 0)),
                 fixture.conversation.receive(fixture.status(request).toByteArray()))
+        }
+    }
+
+    private class FrunkFixture : AutoCloseable {
+        val wire = VehicleFixture()
+        var wall = 1_792_360_988_423L
+        val policy = TeslaFrunkPolicy(wire.clock, { wire.clock }, { wall })
+        val sequence = TeslaFrunkSequence(wire.client, wire.vin.copyOf(), policy) { wire.clock }
+        fun receive(response: UniversalMessage.RoutableMessage): TeslaBleStep =
+            sequence.receive(response.toByteArray(), wire.clock)
+        fun sourceTime(): Timestamp = timestamp(wall / 1_000, (wall % 1_000).toInt() * 1_000_000)
+        fun driveRequest(): UniversalMessage.RoutableMessage {
+            val hello = parseSend(sequence.start())
+            assertEquals(UniversalMessage.Domain.DOMAIN_INFOTAINMENT, hello.toDestination.domain)
+            val request = parseSend(receive(wire.handshake(hello)))
+            assertTrue(wire.decryptDriveRequest(request).vehicleAction.getVehicleData.hasGetDriveState())
+            return request
+        }
+        fun action(): UniversalMessage.RoutableMessage {
+            val drive = driveRequest()
+            val hello = parseSend(receive(wire.driveResponse(drive, wire.driveState(timestamp = sourceTime()))))
+            val step = receive(wire.handshake(hello))
+            assertTrue((step as TeslaBleStep.Send).actuator)
+            return parseSend(step)
+        }
+        fun completeAction(action: UniversalMessage.RoutableMessage) {
+            assertNull(policy.beginWrite(0, action.serializedSize + 2))
+            policy.recordSdkResult(0)
+            assertTrue(policy.recordWriteCallback(0, true))
+        }
+        override fun close() {
+            sequence.close()
+            wire.close()
         }
     }
 
@@ -831,7 +1717,10 @@ class TeslaBleProtocolTest {
         private val vehicle = newPair()
         private val sessionKey = derive(vehicle, client.publicKeyBytes())
         var clock = 10_000L
-        val conversation = TeslaBleConversation(client, vin, query) { clock }
+        val responseObservations = mutableListOf<TeslaBleResponseObservation>()
+        var responseObserver: ((TeslaBleResponseObservation) -> Unit)? = null
+        val conversation = TeslaBleConversation(client, vin, query,
+            onResponseObservation = { responseObservations += it; responseObserver?.invoke(it) }) { clock }
         private val epoch = ByteArray(16) { 7 }
 
         fun start(): UniversalMessage.RoutableMessage = parseSend(conversation.start(false))
@@ -977,6 +1866,12 @@ class TeslaBleProtocolTest {
                 TeslaGear.UNKNOWN -> setSNA(Common.Void.getDefaultInstance())
             }
         }.build()
+        fun assertHeaderCorrelation(observed: TeslaBleResponseObservation, uuidPresent: Boolean?,
+            uuidMatches: Boolean?, routeMatches: Boolean?) {
+            assertEquals(uuidPresent, observed.requestUuidPresent)
+            assertEquals(uuidMatches, observed.requestUuidMatches)
+            assertEquals(routeMatches, observed.toRouteMatches)
+        }
         fun assertFailed(step: TeslaBleStep) { assertTrue(step is TeslaBleStep.Failed) }
         /** typed evidence까지 검사한다. 실패 이유 문구에는 결속하지 않는다. */
         fun assertEvidence(expected: TeslaBleAuthEvidence, step: TeslaBleStep) {
