@@ -1,6 +1,8 @@
 # Android 네이티브 아키텍처
 
-> 제품 전체 설계와 현재 구현을 구분한다. S23의 `0.4.0-probe`에서 고정 TTS 파일의 외부 PCM 주입으로 한국어 시험 문장 일치 2회를 확인했다. 같은 길이의 무음 대조는 `NO_MATCH(7)`였고 취소·해제·재실행도 확인했다. 반환 신뢰도는 `0.0`이다. 실제 사용자 발화·음향 조건·네트워크 차단·자동 호출어·차량 접근·잠금·주머니 합격과 구분하며 상세 근거는 [검증 기록](Device-Validation.md)에 남긴다.
+> **v0.52 추가:** 현재 소스는 **`0.52.0-probe`**(`versionCode=52`)다. 아래 v0.50 경로를 명령 판정에 그대로 쓰고, 음성 인식 진단 화면에만 sherpa-onnx zipformer 한국어 그림자 인식을 더했다(Moonshine 재도입 아님, 명령 판정·실차 음성 시험 미사용). 구조는 [아래 그림자 경로](#android-온디바이스-speechrecognizer-pcm-파이프v050)를 본다.
+>
+> 이 문서는 현재 구현과 과거 이력을 구분한다. v0.50 전환 당시 소스는 **`0.50.0-probe`**(`versionCode=50`)로, v47~v49의 로컬 Moonshine STT(sherpa-onnx)를 제거하고 앱이 캡처한 16 kHz mono PCM을 Android 내장 온디바이스 `SpeechRecognizer`(ko-KR)에 `EXTRA_AUDIO_SOURCE` 파이프·segmented session으로 전달한다. 후보 중 하나라도 정확히 일치하면 수락하고, 점수 미제공(0.0 등)은 신뢰도 게이트를 생략한다. P·HANDOFF·명령 시간·안전 동의 게이트는 그대로이며 STT 일치는 차량 제어 허가가 아니다. v0.50 기기 smoke·사용자 발화 정확도·실차 성공은 미검증이다. 과거 `0.1.0`~`0.4.0-probe`의 한국어 시험 문장 일치 2회·무음 대조 `NO_MATCH(7)`·취소·해제 기록은 당시 **Android 시스템 음성 인식기** 직접 경로의 결과이며 v0.50 PCM 파이프 경로의 인식 성능 근거가 아니다. 실제 사용자 발화·음향 조건·네트워크 차단·자동 호출어·차량 접근·잠금·주머니 합격과 구분하며 상세 근거는 [검증 기록](Device-Validation.md)에 남긴다.
 
 [Wiki 홈](Home.md) · [요구사항](Requirements.md) · [상태 머신](State-Machine.md)
 
@@ -8,7 +10,7 @@
 
 React Native나 JavaScript 브리지는 사용하지 않는다. UI, 권한, Android 서비스 수명, 오디오 캡처, 상태 전이는 Kotlin으로 소유하며 Compose UI, Coroutines와 StateFlow, DataStore, AndroidKeyStore를 사용한다. **현재 유효한 차량 통합 방향은 로컬 BLE 우선**이며 Fleet/OAuth/도메인/서버/결제는 별도 승인하는 선택 인터넷 경로다.
 
-현재 구현은 단일 `app` 모듈이다. 과도한 멀티 모듈화·DI 프레임워크·서버 선행 구현을 피한다. 아래는 제품 전체 책임 구분이며 구현 완료 목록이 아니다. 수동 문장 파서·로컬 dry-run 게이트웨이와 앱 전용 BLE 키 저장·등록·읽기 진단은 구현돼 있다. v22는 별도 Infotainment 기어 읽기까지 추가했지만 실제 차량 수신·제어 직전 신선한 P는 미확인이다. 자동 호출어·실차 제어 게이트웨이·UWB OOB/거리 세션은 아직 구현·검증 전이다.
+현재 구현은 단일 `app` 모듈이다. 과도한 멀티 모듈화·DI 프레임워크·서버 선행 구현을 피한다. 아래는 제품 전체 책임 구분이며 구현 완료 목록이 아니다. 수동 문장 파서·로컬 dry-run 게이트웨이와 앱 전용 BLE 키 저장·등록·읽기 진단은 구현돼 있다. v22는 별도 Infotainment 기어 읽기까지 추가했지만 실제 차량 수신·제어 직전 신선한 P는 미확인이다. 자동 호출어와 UWB OOB/거리 세션은 아직 구현·검증 전이다. 실차 제어 게이트웨이는 구현됐지만 실제 차량 개방은 미검증이다.
 
 | 영역 | 책임 |
 | --- | --- |
@@ -16,7 +18,7 @@ React Native나 JavaScript 브리지는 사용하지 않는다. UI, 권한, Andr
 | platform | `VoiceInteractionService` 후보, 권한, Bluetooth/접근 신호, foreground service, 오디오 포커스 및 Android 수명 경계. |
 | audio | 호출어 탐지, `AudioRecord`, STT 세션, PCM pre-roll, TTS와 자기 재인식 차단. |
 | domain | 명령 파서, 안전 정책, 상태 머신, 만료·취소·중복 규칙. |
-| gateway | 현재 음성 경로의 mock/dry-run과 별도 수동 BLE 등록·읽기 진단. 향후 공유 프로토콜·키 경계를 재사용하는 네이티브 BLE 차량 게이트웨이가 새 인증·상태·안전 게이트·명령 전송을 소유한다. 실차 프렁크 제어는 미구현 |
+| gateway | 현재 음성 경로의 mock/dry-run과 별도 수동 BLE 등록·읽기 진단. 공유 프로토콜·키 경계를 재사용하는 네이티브 BLE 경로가 인증·상태·안전 게이트·명령 전송을 소유하며 프렁크 1회 제어까지 구현됐다. 실제 차량 개방은 미검증이고 v47 음성 경로는 신뢰도 `null`로 전송 전에 차단된다 |
 | settings | DataStore의 비민감 설정과 현재 AndroidKeyStore의 앱 전용 비추출 하드웨어 P-256/ECDH 키. 선택 Fleet 토큰·서버 비밀 보관은 별도 승인·설계 전 |
 
 ### 현재 검증 앱 구현
@@ -42,10 +44,11 @@ React Native나 JavaScript 브리지는 사용하지 않는다. UI, 권한, Andr
 | `UnsupportedRecognitionService.kt` | Android 비서 등록에 필수인 인식 서비스. 인식·지원 검사에는 명시적 비지원 오류를 반환하고 캡처·모델 다운로드·외부 인식을 시작하지 않음 |
 | `SessionPolicyTest.kt` | 정책 경계 8개 회귀 테스트. 감지 기준 초기화 시 대기 세션 폐기·실제 이탈 및 cooldown 유지 포함. 실제 OS·차량 접근 시험의 대체물이 아님 |
 | `ObservationLifecycleTest.kt` | 관찰 시작 중 OFF, 낡은 START·STOP·서비스 종료, 중복 ON, 종료 후 명시적 재시작, 새 프로세스의 이전 intent 거부 경계 6개 |
-| `SpeechSupportProbe.kt` | Activity 소유의 명시적 지원 메타데이터 조회. 온디바이스 API만 사용하고 요청 ID·10초 타임아웃·취소·화면 이탈·destroy를 관리. 녹음·모델 다운로드 없음 |
-| `SpeechSupportPolicy.kt` / `SpeechSupportPolicyTest.kt` | 네 지원 분류와 정확한 `ko-KR`을 구분. 대기·다운로드 가능·온라인 보고의 설치 승격과 일반 한국어 태그 오인을 방어하는 테스트 2개 |
-| `SpeechRecognitionProbe.kt` | Activity 소유 STT. 직접 마이크·캡처 종료 후 RAM PCM·고정 TTS 파일·무음 대조, 최종/분절 결과의 시험문장 일치·신뢰도 요약, 취소·시간 제한·오디오/FD 해제 및 실패 시 재시작 요구 |
-| `SpeechPcmFixture.kt` / `SpeechPcmFixtureTest.kt` | 크기 제한 WAV 디코더와 4개 경계 테스트. PCM16·16 kHz·mono만 허용하며 filler/padding·잘림·초과 데이터·취소 처리 |
+| `SpeechSupportProbe.kt` | Activity 소유의 온디바이스 지원 조회. `createOnDeviceSpeechRecognizer()`의 `checkRecognitionSupport()`로 `ko-KR` 지원 메타데이터를 조회하며 마이크·인식은 시작하지 않음. 조회 결과는 준비 상태이며 인식 성공이 아님 |
+| `SpeechSupportPolicy.kt` / `SpeechSupportPolicyTest.kt` | `KoreanLanguageSupport`·`SpeechSupportMetadata`로 지원 메타데이터를 분류 |
+| `AndroidPcmRecognizer.kt` | 앱 PCM을 `EXTRA_AUDIO_SOURCE` 파이프에 non-blocking으로 쓰고 `EXTRA_SEGMENTED_SESSION`의 `onSegmentResults`를 결합해 n-best 후보·점수를 반환. 타임아웃 운영 15초·재생 테스트 30초. 실패는 부분 세그먼트가 있어도 명령 없음 |
+| `SpeechMicCapture.kt` / `SpeechRecordingStore.kt` | 16 kHz mono PCM 최대 10초(320,000바이트) 캡처와 개발 시험 녹음의 `no_backup/speech-recordings/<id>/` 보관 |
+| `SpeechRecognitionProbe.kt` / `SpeechPcmFixture.kt` / `SpeechPcmFixtureTest.kt` | Activity 소유 시험. 직접 마이크 최대 10초 캡처·고정 파일·무음 대조를 같은 `AndroidPcmRecognizer` 경로로 인식하고, 캡처 종료·취소·자원 정리·재시작 요구를 관리. WAV는 PCM16·16 kHz·mono만 허용 |
 | `res/raw/speech_trial_ko.wav` | 설치된 macOS Yuna로 생성한 고정 비개인 시험 문장. 음성 모델·개인 녹음이 아닌 재현용 합성 데이터 |
 | `TeslaBleKeyStore.kt` | 우리 앱 UID의 고정 alias에서 P-256 키 생성·재사용. 개인키는 AndroidKeyStore 밖으로 추출하지 않고 제공자 ECDH를 사용한다. TEE/StrongBox의 생성 키·`PURPOSE_AGREE_KEY`만 허용하며 손상·소프트웨어/imported 키를 삭제/교체하거나 fallback하지 않음 |
 | `TeslaBleProtocol.kt` | 설정 등록과 읽기 진단이 공유하는 `TeslaBleConversation`. Driver/android_device `PRESENT_KEY`, 새 VCSEC handshake·HMAC·personalized AES-GCM `GET_STATUS`, 응답 무결성·request hash·counter 검증. 제어 명령·자동 재전송·세션 캐시 없음 |
@@ -75,15 +78,17 @@ v26은 같은 readiness 점검에서 scanner의 elapsed 기한을 조정한다. 
 
 v27은 명시적 광고명 감지 ON 설정만 복원한다. 이전 후보·GATT·명령·마이크는 재생하지 않으며 다른 진단 모드는 자동 재시작하지 않는다. 백그라운드 location FGS 시작 제한과 사용자 종료를 존중한다. 위 v25/v26 스케줄·로그 실패 종료·복원 금지 설명은 해당 버전의 이력이며 현재 스캔 경로는 아래 v27 계약으로 대체한다.
 
-`0.2.0-probe`의 한국어 지원 진단은 `UnsupportedRecognitionService`의 인식 제공 기능과 별개다. 전자는 OS의 온디바이스 서비스에 지원 정보만 묻고, 후자는 우리 앱에 들어온 인식 요청을 계속 비지원 오류로 거절한다. 지원 조회는 기존 오디오 세션의 소유권이나 종료 사유를 바꾸지 않는다. 완료·오류·시간 초과·취소마다 인식 객체를 해제하고, 완료된 메타데이터는 화면 이탈만으로 지우지 않는다. Activity 재생성 시에는 미조회 상태로 시작한다.
+v46까지 `0.2.0-probe`의 한국어 지원 진단은 `UnsupportedRecognitionService`의 인식 제공 기능과 별개였다. 전자는 OS의 온디바이스 서비스에 지원 정보만 물었고, 후자는 우리 앱에 들어온 인식 요청을 계속 비지원 오류로 거절한다. 지원 조회는 기존 오디오 세션의 소유권이나 종료 사유를 바꾸지 않았다. 완료·오류·시간 초과·취소마다 인식 객체를 해제하고, 완료된 메타데이터는 화면 이탈만으로 지우지 않았다. Activity 재생성 시에는 미조회 상태로 시작했다. v47은 OS 지원 조회 자체를 제거했으며 `UnsupportedRecognitionService`의 비지원 거절만 남는다.
 
 VIN 광고명 계산은 [공식 Tesla BLE 코드의 `VehicleLocalName`](https://github.com/teslamotors/vehicle-command/blob/main/pkg/connector/ble/ble.go)을 따른다. CDM은 이름 필터로 사용자의 최초 선택을 받은 뒤 association 기반 presence를 요청한다. 광고 노출·주소 회전·장기 관찰 가능성은 미검증이며, 이 식별자는 차량 인증이나 발화자 인증이 아니다.
 
 설정의 앱 키 등록과 개발자 진단의 읽기 전용 조회는 같은 프로토콜을 사용하되, 주말 BLE 관찰·음성 dry-run과는 별도 경로다. 사용자 NFC 키카드 접촉·차량 UI 승인은 앱이 대행하지 않는다. 공식 Tesla 앱의 폰키·사설 키·세션을 가져오거나 우리 앱 개인키를 서버로 옮기지 않는다. [공식 등록 계약](https://github.com/teslamotors/vehicle-command/blob/main/pkg/vehicle/security.go)은 P-256 `PRESENT_KEY`를 BLE로 보내며 정상 반환도 전송만 보장한다. 등록/infotainment 동기화 확인용 `DomainInfotainment SessionInfo` 안내와 현재 VCSEC 읽기 진단은 구분한다.
 
-현재 소스·기기 설치는 `versionCode=42` / `0.42.0-probe`다. 화면 표시 음성 프렁크 경로·S23 기기31개 검증·실제 화면 조작을 확인했다. 실차 시험을 위해 감지는 정상 중지했으며 실제 차량 전송·개방은 아직 미검증이다. [실제 검증·실차 절차](Device-Validation.md#0420-probe--화면-표시-음성-프렁크-실차-시험)를 따른다.
+v42 당시 소스·기기 설치는 `versionCode=42` / `0.42.0-probe`였다. 화면 표시 음성 프렁크 경로·S23 기기31개 검증·실제 화면 조작을 확인했으며, 아래 내용은 그 시점의 시스템 음성 인식기 기록이다. 현재 v0.50은 앱 PCM을 Android 온디바이스 `SpeechRecognizer`에 파이프로 전달하므로 [최신 검증 절차](Device-Validation.md#0500-probe--android-온디바이스-speechrecognizer-전환)를 따른다.
 
 ### v42 화면 표시 음성 프렁크
+
+**이 절은 v42~v46의 Android 시스템 음성 인식기 실차 음성 기록이다.** v47~v49는 Moonshine을 썼고 v0.50은 n-best 정확 일치·점수 미제공 시 신뢰도 게이트 생략으로 바꿨으므로, 아래 “최종 단일 후보·신뢰도 0.85 이상” 조건은 현재 경로에 그대로 적용되지 않는다.
 
 - 기존 `SpeechRecognitionProbe`·`VehicleGateway`는 차량 미전송 dry-run으로 유지한다. 별도 `FrunkVoiceProbe`는 온디바이스 DIRECT_MIC만 사용한다. RAM 동의·설치된 ko-KR·foreground/잠금 해제·감지 정상 중지·단일 예약을 확인한다. 명령10초/확인8초·최종 단일 후보·신뢰도0.85 이상·정확한 “헤이 테슬라 프렁크 열어줘”와 “확인”을 요구한다. 확인 차례는 화면 안내이며 TTS/상시 호출어 탐지가 아니다.
 - `FrunkVoicePolicy`의 승인 ticket은 한 번만 소비한다. recognizer cancel/destroy 정상 반환→speech 예약 반환→차량 작업 입장을 같은 Main 직렬 경계에서 수행한다. VIN/association snapshot·화면·권한·동의/작업 기한을 재검사한다. HOME·잠금·진단 이탈·회전은 신규 전송을 취소하며 화면 복귀/프로세스 복원은 승인 재생 사건이 아니다.
@@ -210,7 +215,7 @@ VIN 광고명 계산은 [공식 Tesla BLE 코드의 `VehicleLocalName`](https://
 
 통화·다른 앱의 마이크 사용·권한 철회로 입력이 제한될 때는 `isClientSilenced()` 등 녹음 구성과 오류를 관찰한다. 정상적인 조용한 환경과 정책에 의한 무음 입력을 구분한다. 오디오 출력 포커스를 얻었다는 사실은 마이크 입력 소유권의 증거가 아니다. TTS 안내와 확인 수집은 분리하고, 안내 중 캡처를 멈추거나 해당 결과를 실행 판단에서 제외하여 자기 재인식을 막는다. 안내 중 확인을 못 들었다면 실행하지 않으며, 동시 발화·취소 지원 수준은 실기기에서 검증한다.
 
-세션은 만료 시각과 식별자를 가진다. 오디오 캡처 경로의 소유자는 하나로 제한하고, 호출어에서 명령으로 넘어갈 때 필요한 동일 세션 버퍼만 인계한다. 세션 종료 시 `AudioRecord`의 stop/release, `SpeechRecognizer`의 cancel/destroy, TTS·포커스·작업·버퍼 해제를 서비스 수명에서 책임진다. 프로세스 복구 때 이전 명령을 복원하거나 자동 재전송하지 않는다. 자세한 규칙은 [상태 머신](State-Machine.md)을 따른다.
+세션은 만료 시각과 식별자를 가진다. 오디오 캡처 경로의 소유자는 하나로 제한하고, 호출어에서 명령으로 넘어갈 때 필요한 동일 세션 버퍼만 인계한다. 세션 종료 시 `AudioRecord`의 stop/release, `AndroidPcmRecognizer`의 파이프 닫기와 `SpeechRecognizer` cancel/destroy·RAM PCM 버퍼 해제, TTS·포커스·작업·버퍼 해제를 세션 소유자가 책임진다. 화면 음성 진단과 실차 동의 probe는 Activity와 `DiagnosticRuntime` 예약이 같은 직렬 경계에서 소유하며, 취소·화면 이탈·오류·시간 초과에서 해제하고 해제 불명은 `RESTART_REQUIRED`와 예약 유지로 새 시험을 막는다. 프로세스 복구 때 이전 명령을 복원하거나 자동 재전송하지 않는다. 자세한 규칙은 [상태 머신](State-Machine.md)을 따른다.
 
 ## 접근·마이크 후보
 
@@ -232,7 +237,7 @@ VIN 광고명 계산은 [공식 Tesla BLE 코드의 `VehicleLocalName`](https://
 
 ## 호출어와 STT
 
-2026-09-22에 다음 후보의 공식 지원·배포 조건을 비교했다. 현재 앱에는 외부 음성 SDK·가중치·AccessKey를 넣지 않았다. **KWS는 호출어 탐지, STT는 문장 전사이며 서로 같은 기능이 아니다.** 한국어 STT 모델이 있다고 한국어 전용 KWS도 준비된 것은 아니다.
+2026-09-22에 다음 후보의 공식 지원·배포 조건을 비교했다. 아래 결정 열은 그 비교 시점의 판단이며, v47~v49는 마지막 Moonshine Tiny Korean 행을 패키지 경로로 썼고 v0.50에서 제거했다. v0.52는 Korean Zipformer 행을 진단 그림자 인식으로 채택했다(명령 판정 미사용). **KWS는 호출어 탐지, STT는 문장 전사이며 서로 같은 기능이 아니다.** 한국어 STT 모델이 있다고 한국어 전용 KWS도 준비된 것은 아니다.
 
 ### 후보와 선택 근거
 
@@ -240,11 +245,12 @@ VIN 광고명 계산은 [공식 Tesla BLE 코드의 `VehicleLocalName`](https://
 | --- | --- | --- | --- |
 | Android 온디바이스 `SpeechRecognizer` | Android 공식 API. 한국어는 서비스와 설치 모델에 따라 다름. 외부 PCM은 선택 기능 | OS 제공 모델을 재배포하지 않는 경로. 일반 인식기는 원격 처리 가능하므로 사용하지 않음 | 추가 SDK·계정 없는 지원 조회 및 **수동 STT·PCM 진단** 채택. S23 NO_MATCH 시험만으로 실제 엔진 채택 확정 안 함 |
 | Porcupine | 공식 한국어 `.pv`, Android custom `.ppn`, mono PCM16 low-level API | 공개 저장소 Apache-2.0과 별개로 모델·SDK 서비스 약관 적용. 계정·비밀 AccessKey 필요. Android 문서는 키 검증용 `INTERNET` 요구 | 한국어 KWS 후보지만 **승인 전 도입 보류**. “헤이 테슬라” 모델 생성·배포권·가격·오프라인 키 검증 조건 미확인 |
-| sherpa-onnx + Korean Zipformer | Android·직접 PCM 가능. 한국어 ASR 모델 제공. 조사한 공식 KWS 목록은 중국어/영어이며 한국어 KWS를 확인하지 못함 | 런타임 Apache-2.0. `sherpa-onnx-zipformer-korean-2024-06-24`의 원본 가중치 카드도 별도로 Apache-2.0 표기 | 직접 PCM STT 대안 후보. 가중치 포함 승인·기기 성능·연속 발화·신뢰도 검증 전 보류 |
+| sherpa-onnx + Korean Zipformer | Android·직접 PCM 가능. 한국어 ASR 모델 제공. 조사한 공식 KWS 목록은 중국어/영어이며 한국어 KWS를 확인하지 못함 | 런타임 Apache-2.0(AAR 내 ONNX Runtime MIT). `sherpa-onnx-zipformer-korean-2024-06-24`의 원본 가중치 카드도 별도로 Apache-2.0 표기. 학습 데이터 KsponSpeech 조건은 별도일 수 있음 | 당시 보류. **v0.52 진단 그림자로 채택(명령 판정 미사용)**. 사용자 승인 후 1.13.8·int8·핫워드로 패키지. 기기 성능·연속 발화·신뢰도는 미검증 |
 | sherpa-onnx + SenseVoice | 한국어 포함 다국어 ASR, Android 경로 제공. KWS는 아님 | 런타임 Apache-2.0과 달리 원본 `SenseVoiceSmall`은 **별도 FunASR 모델 라이선스** | 런타임 라이선스만 보고 채택하지 않음. 모델 재배포 조건과 기기 실측 검토 후 결정 |
 | whisper.cpp + multilingual Whisper | Android 예제·PCM 처리 가능. `.en`이 아닌 다국어 모델에 한국어 포함. 전용 KWS는 아님 | whisper.cpp MIT, OpenAI Whisper 코드·가중치 MIT. 로컬 추론은 OpenAI API 사용과 다름 | 계정 없는 동일 발화 STT 대안 후보. 모델·APK 크기·메모리·지연·배터리 검증 전 보류 |
 | Vosk | Android 오프라인 STT, PCM 입력, `vosk-model-small-ko-0.22` 82 MB 제공. 전용 KWS는 아님 | 런타임과 해당 한국어 모델 Apache-2.0. 다른 Vosk 모델은 라이선스가 다를 수 있음 | 소규모 모델 대안. 차량 소음·연속 문장·명령 오인식 실측 없이 주 경로로 확정하지 않음 |
 | openWakeWord | 공식 사전학습 호출어 모델은 영어만 지원. 한국어 모델을 직접 준비해야 함 | 코드 Apache-2.0과 모델별 라이선스는 별도. 한국어 데이터·학습·Android 통합 필요 | 이번 한국어 즉시 도입 후보에서 제외 |
+| sherpa-onnx + Moonshine Tiny Korean | Android·직접 PCM. 비스트리밍 단일 발화 추론 | 런타임 Apache-2.0, AAR 내 ONNX Runtime MIT, 한국어 모델은 **Moonshine AI Community License**(MIT 아님) | **v47~v49 채택, v0.50 제거**. 빈 결과·“브렁크” 오인식과 신뢰도 미제공으로 Android 온디바이스 `SpeechRecognizer`로 전환 |
 
 Porcupine의 [현재 요금 페이지](https://picovoice.ai/pricing/)는 Free Trial과 영업 문의를 안내하며, 무료 영구 사용 조건을 확인해 주지 않는다. [이용 약관](https://picovoice.ai/docs/terms-of-use/)에는 제한된 trial·적용 요금·연결 시 usage data 전송 가능성이 명시돼 있다. 오디오가 로컬 처리된다는 설명을 “통신 없음·배포 제한 없음”으로 확대하지 않는다. 계정 생성·키 발급·요금·약관 동의·외부 SDK 도입은 사전 승인 대상이다.
 
@@ -258,9 +264,9 @@ Porcupine의 [현재 요금 페이지](https://picovoice.ai/pricing/)는 Free Tr
 - Whisper [공식 코드·가중치 라이선스](https://github.com/openai/whisper#license), whisper.cpp [Android 예제](https://github.com/ggml-org/whisper.cpp/tree/master/examples/whisper.android), [런타임 라이선스](https://github.com/ggml-org/whisper.cpp/blob/master/LICENSE).
 - Vosk [Android](https://alphacephei.com/vosk/android), [모델별 언어·크기·라이선스](https://alphacephei.com/vosk/models), [런타임](https://github.com/alphacep/vosk-api). openWakeWord [지원 언어와 라이선스](https://github.com/dscripka/openWakeWord).
 
-### 지금 구현한 플랫폼 지원 진단
+### 과거 플랫폼 지원 진단(v0.2~v46)
 
-**이번에 채택한 것은 최종 인식 엔진이 아니라 Android 플랫폼 지원 진단 경로**다. `createOnDeviceSpeechRecognizer()`만 사용해 `ko-KR` 요청의 `checkRecognitionSupport()` 결과를 조회한다. 일반 `createSpeechRecognizer()`나 음성 인식 Activity를 열지 않는다. `EXTRA_PREFER_OFFLINE`만으로 오프라인을 보장할 수 없으므로 그것을 대체 경로로 삼지 않는다.
+**이 절은 v46까지의 Android 시스템 음성 인식기 진단 기록이며 v47에서 제거됐다.** 당시 채택한 것은 최종 인식 엔진이 아니라 Android 플랫폼 지원 진단 경로였다. `createOnDeviceSpeechRecognizer()`만 사용해 `ko-KR` 요청의 `checkRecognitionSupport()` 결과를 조회했다. 일반 `createSpeechRecognizer()`나 음성 인식 Activity를 열지 않았다. `EXTRA_PREFER_OFFLINE`만으로 오프라인을 보장할 수 없으므로 그것을 대체 경로로 삼지 않았다. v0.50은 같은 지원 조회를 `SpeechSupportProbe`로 다시 쓰며 현재 인식 경로는 아래 PCM 파이프다.
 
 지원 조회의 네 목록은 서로 다른 뜻이다.
 
@@ -275,11 +281,26 @@ Porcupine의 [현재 요금 페이지](https://picovoice.ai/pricing/)는 Free Tr
 
 지원 조회는 오디오를 열지 않는다. `startListening()`·`triggerModelDownload()`를 호출하지 않으며 외부 SDK·모델을 추가하지 않는다. 모델 설치나 설정 변경은 자동으로 수행하지 않는다.
 
-S23 Ultra의 `0.2.0-probe` 실측: 온디바이스 서비스 있음, 정확한 `ko-KR` 설치 보고, 대기·다운로드 가능·온라인 보고 없음. 두 번의 지원 조회와 완료 후 화면 이탈·재진입을 확인했고 이 조회에서는 새 마이크 사용이 관측되지 않았다. 이를 근거로 아래 수동 STT·PCM 적합성 진단을 구현했지만, 외부 엔진으로 자동 전환하거나 지원 메타데이터만으로 최종 채택을 확정하지 않는다.
+S23 Ultra의 `0.2.0-probe` 당시 실측: 온디바이스 서비스 있음, 정확한 `ko-KR` 설치 보고, 대기·다운로드 가능·온라인 보고 없음. 두 번의 지원 조회와 완료 후 화면 이탈·재진입을 확인했고 이 조회에서는 새 마이크 사용이 관측되지 않았다. 그 결과로 수동 STT·PCM 적합성 진단을 구현했지만, 당시에도 외부 엔진 자동 전환은 하지 않았고 지원 메타데이터만으로 최종 채택을 확정하지 않았다. v47~v49는 이 시스템 지원 경로를 쓰지 않았고 v0.50에서 다시 사용한다.
 
-### STT와 RAM PCM·무음 파일 진단
+### Android 온디바이스 SpeechRecognizer PCM 파이프(v0.50)
 
-`0.3.0-probe`에서 시작한 `SpeechRecognitionProbe`는 지원 조회와 별도다. `0.4.0-probe`는 여기에 고정 파일·무음 대조 입력을 추가한다. `createOnDeviceSpeechRecognizer()`와 `ko-KR`만 사용하며, 기본 비서용 `UnsupportedRecognitionService`는 계속 일반 요청을 거절한다. 지원 조회를 성공했다고 자동으로 음성 입력을 시작하지 않는다.
+`0.50.0-probe`는 v47~v49의 Moonshine 경로(`MoonshineRecognizer.kt`, sherpa AAR, 모델 자산, `assets/licenses`, `tools/prepare_moonshine.py`)를 제거했다. `.local-models/`는 보존하되 쓰지 않는다. API 키·계정을 쓰지 않는다.
+
+- 데이터 흐름: `SpeechMicCapture`가 16 kHz·mono·PCM16을 최대 10초(320,000바이트) 캡처 → `AndroidPcmRecognizer`가 같은 PCM을 `EXTRA_AUDIO_SOURCE` 파이프에 non-blocking으로 씀 → `EXTRA_SEGMENTED_SESSION`의 `onSegmentResults`를 결합해 최종 후보 목록 생성. 비segmented 모드는 S23에서 결과가 null이었고 `EXTRA_BIASING_STRINGS`는 효과가 없었다. 타임아웃은 운영 15초, 재생 테스트 30초다.
+- 입력 모드: 진단 UI는 직접 마이크·녹음 후 PCM·고정 합성 파일·무음 대조 네 모드를 제공하며 모두 같은 인식 경로를 쓴다. 파일·무음은 스피커나 앱 마이크를 열지 않고 무음만 0으로 채운다. 병렬 캡처를 금지한다.
+- 결과 계약(`FrunkVoicePolicy`): S23 Google 인식 서비스는 `MAX_RESULTS`와 무관하게 2~3개 후보를 주고 confidence는 항상 0.0이었다. 후보 중 하나라도 정규화 후 `헤이테슬라프렁크열어줘`와 정확히 일치하면 수락하고, 하나라도 `취소`/`열지마`를 포함하면 차단한다. 점수 0.0·−1·null·비유한값은 “점수 미제공”으로 기록하고 신뢰도 게이트를 생략하며, 실제 점수는 0.85 이상이어야 한다. 발음 변형(페이/해이/해의 테슬라, 브렁크/프랑크)은 수락하지 않는다. 인식기 실패는 부분 세그먼트가 있어도 명령 없음이다.
+- 실차 동의 회차: `FrunkVoiceProbe`도 같은 경로를 쓴다. P·HANDOFF 5초·명령 10초·안전 동의 게이트는 그대로이며 STT 일치는 차량 제어 허가가 아니다. 실차 성공은 미검증이다.
+- 보존·정리: 일반 로그에는 원문을 남기지 않으며 마스킹 어휘에 “열어”, “줘”, “해이”, “페이”, “브렁크”, “프랑크”를 추가했다. v49부터 사용자가 직접 시작한 개발용 마이크 시험은 `no_backup/speech-recordings/<UUID>/`에 16 kHz mono PCM16 WAV·캡처 메타데이터·최종 원문 결과를 기본 보관한다. 별도 저장 동의 체크 없이 시작 버튼 근처에 안내하며 화면 진입·복원·복귀만으로 녹음하지 않는다. 실차 프렁크 1회 안전 동의는 유지하고 합성·무음 파일 시험은 자동 저장하지 않는다. 자동 업로드·백업·삭제는 하지 않는다. `tools/speech_recordings.py`로 ADB 회수·휴대폰 온디바이스 재인식이 가능하며 재인식은 마이크·차량 경로를 호출하지 않는다. 취소·화면 이탈·오류·시간 초과에서 캡처·파이프·recognizer·RAM·예약을 정리하고, 해제 불명은 `RESTART_REQUIRED`와 예약 유지로 새 시험을 막으며 성공으로 숨기지 않는다.
+- 화면 후보(v0.51): `SttTranscript`(앞 3개 후보·전체 개수)를 `FrunkVoiceState.transcript`(판정·차단 사유 포함)와 `SpeechTrialState.transcript`에만 둔다. 사용자 취소 회차에는 붙이지 않고, 다음 같은 시험 시작은 새 상태로 교체하며 프로세스 종료 시 사라진다. 일반 로그·RAM 이벤트·`SpeechTrialSummary`·필드 스냅샷·새 파일로 내보내지 않는다. 기존 개발용 마이크 시험의 녹음 결과 파일 보관은 v49 정책 그대로다.
+- 그림자 인식(v0.52): `SpeechRecognitionProbe`에서만 같은 PCM을 sherpa-onnx 오프라인 zipformer(`modified_beam_search`, 핫워드 "헤이 테슬라"·"프렁크 열어줘")로 한 번 더 인식한다. 실행 조건은 Android 결과를 받은 뒤, 시험이 취소되지 않았고 화면이 보이며 세션 마감 전일 때다. 인식기는 시험마다 로드하고 `finally`에서 해제한다. asset이 없으면 native 쪽 `exit`을 피하려고 로드 전에 asset 존재를 먼저 확인한다. 실패는 `SHADOW_MODEL_MISSING`/`SHADOW_LOAD_FAILED`/`SHADOW_DECODE_FAILED`로 표시한다. 결과는 `FrunkVoicePolicy`·`recognitionOutcome`·`FrunkVoiceProbe`에 넣지 않으며, 원문은 v0.51 후보와 같이 RAM 화면 상태에만 두고 로그·이벤트·요약·녹음 저장소에 쓰지 않는다.
+- 재생: `SpeechRecordingReplayDeviceTest`의 `replaySavedRecording`(인자 `recordingId`)은 저장 녹음을 재인식해 `runs/`에 추가하고, `replayAll`은 fixture와 모든 저장 녹음을 `HTSTT` 로그로만 남긴다.
+
+v47~v49 Moonshine 경로의 구현·라이선스·빌드 기록은 [기기 검증 0.47.0-probe](Device-Validation.md#0470-probe--moonshine-tiny-korean-stt-전환)에 과거 기록으로 남는다.
+
+### 과거 시스템 STT·PCM 진단(v0.3~v46)
+
+`0.3.0-probe`에서 시작한 `SpeechRecognitionProbe`는 당시 지원 조회와 별도였고, `0.4.0-probe`는 여기에 고정 파일·무음 대조 입력을 추가했다. `createOnDeviceSpeechRecognizer()`와 `ko-KR`만 사용하며, 기본 비서용 `UnsupportedRecognitionService`는 계속 일반 요청을 거절한다. 아래는 v46까지의 기록이며 v47~v49에는 Moonshine 경로로 대체됐다가 v0.50에서 Android 온디바이스 인식기(PCM 파이프)로 돌아왔다.
 
 - 직접 경로는 시스템 인식기만 마이크를 소유한다. PCM 경로는 Activity가 16 kHz·mono·PCM16을 최대 10초·320,000바이트 RAM에 모은 뒤 `AudioRecord.stop/release`를 끝내고 인식기를 시작한다. 두 캡처를 병렬 실행하지 않는다.
 - 파일 경로는 `AudioRecord`나 스피커를 시작하지 않고 WAV의 PCM 부분만 읽는다. 파일과 무음 대조는 같은 35,549샘플을 사용하며 대조만 0으로 채운다. 기존 PCM 전송·취소·정리 경로를 공유한다. 디코더는 기존 320,000바이트 PCM 버퍼와 최대 8 KiB 헤더 예산 안에서 포맷·경계·EOF를 검증한다.
@@ -288,6 +309,10 @@ S23 Ultra의 `0.2.0-probe` 실측: 온디바이스 서비스 있음, 정확한 `
 - 화면 이탈·취소는 콜백을 먼저 무효화한다. worker 종료, 인식 객체·FD 해제, RAM 덮어쓰기를 확인한다. `0.11.0-probe`부터는 입력 정리 뒤 같은 예약으로 오프라인 음성 안내를 수행하고, 출력·포커스 정리까지 끝난 뒤 예약을 해제한다. 실제 해제 불명은 `RESTART_REQUIRED`와 예약 유지로 새 입력을 막으며 성공으로 숨기지 않는다.
 - 일반 최종 결과 또는 최종 분절별 첫 후보를 고정 시험 문장과 비교한다. 공백·구두점 차이만 무시한다. 분절 사이에는 일치 여부·정규화 문자 수와 함께, 상한(128자)을 넘지 않는 동안만 정규화된 누적 문자열을 RAM에 유지한다. 누적 문자열은 회차 정리에서 비우며 state·로그·파일로 나가지 않고, 인식 원문·후보 목록도 어디에도 남기지 않는다. 분절 하나는 유효한 첫 신뢰도를 표시하되 여러 분절의 점수를 문장 신뢰도로 합성하지 않는다. 누락·음수·범위 밖·낮은 점수를 성공 값으로 보충하지 않으며 문장 일치도 명령 실행 허가가 아니다. 호출어·명령 판정은 `SpeechCommandDecision` 이름으로만 남기고 원문은 담지 않는다.
 
+### 명령 판정·로컬 응답(v47에서도 유지)
+
+`SpeechCommandParser`, `DiagnosticCommandPolicy`, `DryRunVehicleGateway`, `SpeechResponse` 경계는 v47도 그대로 쓴다. 바뀐 것은 입력 엔진과 신뢰도 `null`뿐이며, 아래 v0.10~v0.11 기록의 판정·응답 계약은 현재도 유효하다.
+
 `0.10.0-probe`는 사용자 선택에 따라 진단 버튼 시작 방식을 유지하며, 최종 한 문장에 `SpeechCommandParser`를 적용한다. 문장 시작 정확한 “헤이 테슬라” 뒤 “프렁크 열어줘” 하나만 `FRUNK_OPEN_CANDIDATE`, 호출어 없음·명령 없음·허용 외·취소/부정은 별도 enum이다. 신뢰도는 이번 진단 판정에서 제외하고 원래 값을 기록한다. 이 흐름은 이미 시작한 STT 결과의 문장 판별이며 저전력 KWS가 깨운 별도 STT 세션이나 차량 명령 실행이 아니다. 부분 결과로 후보를 확정하지 않고 취소·실패·정리 실패에는 후보를 남기지 않는다.
 
 `0.11.0-probe`는 `SessionPolicy.startDiagnostic()`의 같은 ID·40초 monotonic 소유권 안에서 최종 판정→`DiagnosticCommandPolicy`→`DryRunVehicleGateway`→입력 해제→`SpeechResponse`→출력 해제를 연결한다. gateway는 로컬 진단 계약만 갖고 계정·키·네트워크·차량 전송 API를 받지 않는다. 후보만 한 번 처리하며 결과 불명은 재시도하지 않는다. 처리 뒤 취소는 이미 관측한 로컬 결과를 보존한다.
@@ -295,15 +320,17 @@ S23 Ultra의 `0.2.0-probe` 실측: 온디바이스 서비스 있음, 정확한 `
 `SpeechResponse`는 Android `TextToSpeech`의 한국어 지원·설치된 비네트워크 voice를 확인한다. 초기화 5초·재생 10초 제한, utterance ID별 완료/오류, 취소·포커스 손실, `stop/shutdown`과 포커스 반납을 관리한다. 입력 해제 미확인 시 시작하지 않으며 실패·해제 불명은 성공 안내로 대체하지 않는다. 진단 UI·v4 파일에는 로컬 결과, 안내 상태와 입력·출력·포커스 해제 여부만 추가하고 원문·PCM은 저장하지 않는다. 실측에서는 오프라인 voice 선택·완료 콜백·해제를 확인했으며 물리 스피커 음질·가청성 평가는 하지 않았다.
 
 
-`0.3.0-probe`의 스피커 재생 시험에서는 두 마이크 경로가 `NO_MATCH(7)`였고 진행 중 이탈 취소·해제를 확인했다. `0.4.0-probe`의 무음 파일 시험에서는 처음 일반 최종 콜백만 사용했을 때 결과가 없었으나, 위 분절 계약 적용 뒤 고정 문장 일치를 두 번 확인했다. 같은 길이의 무음 입력은 `NO_MATCH(7)`, 즉시 HOME은 `USER_CANCELED`였으며 그 뒤 재실행도 성공했다. 새 앱 마이크 사용은 관측되지 않았다. 반환 신뢰도 `0.0`, 실제 발음·마이크·주변 소음·네트워크 차단·연속 문장 등은 최종 채택 전 별도 검증 항목이다.
+`0.3.0-probe`의 스피커 재생 시험에서는 두 마이크 경로가 `NO_MATCH(7)`였고 진행 중 이탈 취소·해제를 확인했다. `0.4.0-probe`의 무음 파일 시험에서는 처음 일반 최종 콜백만 사용했을 때 결과가 없었으나, 위 분절 계약 적용 뒤 고정 문장 일치를 두 번 확인했다. 같은 길이의 무음 입력은 `NO_MATCH(7)`, 즉시 HOME은 `USER_CANCELED`였으며 그 뒤 재실행도 성공했다. 새 앱 마이크 사용은 관측되지 않았다. 당시 반환 신뢰도는 `0.0`이었고 이 결과는 Android 시스템 인식기 기준이다. v47 Moonshine은 신뢰도 `null`이며, 실제 발음·마이크·주변 소음·네트워크 차단·연속 문장 등은 여전히 별도 검증 항목이다.
 
-### 외부 PCM과 한 문장 보존의 별도 게이트
+### 과거 외부 PCM 인계 검토와 신뢰도 원칙(v0.3~v46, 은퇴)
 
-호출어 끝과 STT 시작 사이의 잘림을 줄이려면 동일 접근 세션 안에서만 짧은 RAM 내 PCM 버퍼를 인계하는 방식을 검토한다. [EXTRA_AUDIO_SOURCE 공식 계약](https://developer.android.com/reference/android/speech/RecognizerIntent#EXTRA_AUDIO_SOURCE)에 따르면 이 옵션이 없거나 인식기가 지원하지 않으면 **인식기가 자체 마이크를 연다**. 플래그를 넣었다는 사실이나 언어 지원 조회 성공만으로 기존 `AudioRecord`를 소비한다고 보장할 수 없다.
+v47~v49는 시스템 STT와 `EXTRA_AUDIO_SOURCE`를 쓰지 않고 앱이 소유한 Moonshine에 PCM을 넘겼다. v0.50은 다시 앱이 캡처한 PCM을 `EXTRA_AUDIO_SOURCE` 파이프(segmented session)로 Android 온디바이스 인식기에 넘기므로, 아래 인계 위험은 현재 경로에도 적용된다. 아래 본문은 v46까지의 검토 기록이다.
 
-고정 합성 파일의 외부 PCM 인식은 이제 실측했지만, 호출어와 연결한 캡처 스트림의 첫 음절 보존·단일 오디오 소유권까지 입증한 것은 아니다. 이 조건을 확인하기 전에는 접근 마이크와 시스템 STT를 병렬로 실행하지 않는다. 원거리 버퍼 수집은 금지다. 인계가 불가능하면 사용자가 두 번 말해야 하는 흐름으로 합격 처리하지 않고 동일 스트림을 처리할 온디바이스 대안을 검토한다.
+호출어 끝과 STT 시작 사이의 잘림을 줄이려면 동일 접근 세션 안에서만 짧은 RAM 내 PCM 버퍼를 인계하는 방식을 검토했다. [EXTRA_AUDIO_SOURCE 공식 계약](https://developer.android.com/reference/android/speech/RecognizerIntent#EXTRA_AUDIO_SOURCE)에 따르면 이 옵션이 없거나 인식기가 지원하지 않으면 **인식기가 자체 마이크를 연다**. 플래그를 넣었다는 사실이나 언어 지원 조회 성공만으로 기존 `AudioRecord`를 소비한다고 보장할 수 없다.
 
-`CONFIDENCE_SCORES`는 선택 사항이며 `-1`은 미제공 값이다. 점수가 없거나 낮은 결과에 임의의 높은 신뢰도를 부여하지 않는다. 호출어 감지는 발화자 인증이 아니고 지원 메타데이터는 명령 실행 권한이 아니다.
+고정 합성 파일의 외부 PCM 인식은 당시 실측했지만, 호출어와 연결한 캡처 스트림의 첫 음절 보존·단일 오디오 소유권까지 입증한 것은 아니다. 이 조건을 확인하기 전에는 접근 마이크와 시스템 STT를 병렬로 실행하지 않는다. 원거리 버퍼 수집은 금지다. 인계가 불가능하면 사용자가 두 번 말해야 하는 흐름으로 합격 처리하지 않고 동일 스트림을 처리할 온디바이스 대안을 검토한다. v47~v49의 패키지 Moonshine 경로가 그 대안이었으나 v0.50에서 제거했으며, 어느 경로도 동일 PCM을 외부 서비스로 보내지 않는다.
+
+당시 시스템 인식기의 `CONFIDENCE_SCORES`는 선택 사항이며 `-1`은 미제공 값이었다. 점수가 없거나 낮은 결과에 임의의 높은 신뢰도를 부여하지 않는다. v0.50은 사용자 결정에 따라 0.0·−1·null·비유한 점수를 "점수 미제공"으로 기록하고 신뢰도 게이트를 생략하되, n-best 후보의 정확 문장 일치와 나머지 안전 게이트는 그대로 요구한다. 실제 점수가 오면 0.85 이상이어야 한다. 호출어 감지는 발화자 인증이 아니고 지원 메타데이터는 명령 실행 권한이 아니다.
 
 ## 차량 게이트웨이 경계
 

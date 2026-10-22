@@ -14,9 +14,13 @@ android {
         applicationId = "com.heytesla.app"
         minSdk = 36
         targetSdk = 36
-        versionCode = 46
-        versionName = "0.46.0-probe"
+        versionCode = 52
+        versionName = "0.52.0-probe"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // sherpa-onnx AAR은 4개 ABI를 담는다. 대상 기기(arm64)만 포함해 APK 증가를 줄인다.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     buildFeatures {
@@ -29,6 +33,12 @@ android {
     }
 
     sourceSets["main"].resources.srcDir("src/main/proto/licenses")
+    // gitignore된 로컬 모델. tools/prepare_sherpa_ko.py로 준비한다.
+    sourceSets["main"].assets.srcDir("../.local-models/sherpa-assets")
+
+    androidResources {
+        noCompress += "onnx"
+    }
 }
 
 kotlin {
@@ -71,6 +81,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.datastore:datastore-preferences:1.2.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation(files("../.local-models/sherpa-onnx-1.13.8.aar"))
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.7.0")

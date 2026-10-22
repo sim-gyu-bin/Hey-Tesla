@@ -4,9 +4,9 @@
 
 ## 문서 상태와 대상
 
-제품 검증 계획과 실제 실행 결과를 구분한다. 2026-09-22에 S23 Ultra에서 `0.1.0-probe` 수동 마이크, `0.2.0-probe` 지원 조회, `0.3.0-probe` 수동 STT·RAM PCM에 이어 **`0.4.0-probe` TTS 파일 무음 인식**을 실행했다. 고정 한국어 문장 일치 2회·무음 대조 NO_MATCH·취소·재실행·해제를 확인했다. 사용자 발화·스피커 재생 없이 실행했고 새 앱 마이크 사용은 관측되지 않았다. 신뢰도 `0.0`으로 명령 실행 합격은 아니다. 실제 발화·음향·네트워크 차단·차량 association·접근·잠금·주머니는 별도다.
+제품 검증 계획과 실제 실행 결과를 구분한다. 2026-09-22에 S23 Ultra에서 `0.1.0-probe` 수동 마이크, `0.2.0-probe` 지원 조회, `0.3.0-probe` 수동 STT·RAM PCM에 이어 **`0.4.0-probe` TTS 파일 무음 인식**을 실행했다. 고정 한국어 문장 일치 2회·무음 대조 NO_MATCH·취소·재실행·해제를 확인했다. 사용자 발화·스피커 재생 없이 실행했고 새 앱 마이크 사용은 관측되지 않았다. 신뢰도 `0.0`으로 명령 실행 합격은 아니다. **이 0.1~0.4 기록은 당시 Android 시스템 음성 인식기 경로이며 v0.50 PCM 파이프(segmented session) 경로의 인식 성능 근거가 아니다.** 실제 발화·음향·네트워크 차단·차량 association·접근·잠금·주머니는 별도다.
 
-현재 소스와 기기 설치는 **`0.46.0-probe`**다. 실제 단계 기반 진행 표시를 추가하고 빌드·JVM338개·Lint·연결 S23의 진행 표면/입장 안전 경계 계측2개·데이터 보존 설치·앱 실행을 확인했다. 감지는 OFF·앱 서비스 없음이다. [현재 사용자 실차 시나리오](#현재-사용자-실차-시나리오v46)를 따른다. 진행 표면 검증은 합성 RAM 상태이며 실제 발화·차량 개방·픽셀 검증은 미실행이다. 과거 실차 실패를 새 버전의 성공으로 바꾸지 않는다.
+현재 소스·S23 설치본은 **`0.52.0-probe`**(`versionCode=52`)다. v0.51의 Android 온디바이스 `SpeechRecognizer` 명령 판정·n-best RAM 표시를 유지하고, 음성 인식 진단 화면에만 sherpa-onnx zipformer 한국어 그림자 인식 결과를 추가한다(명령 판정·실차 음성 시험 미사용). v0.52는 `adb install -r`로 데이터를 보존해 설치했고 기기 녹음 replay·합성 dry-run 화면까지 확인했다. 사용자 실사용 발화·실차는 미검증이다. 직전 설치본 `0.51.0-probe`(`versionCode=51`) 기록: v0.50의 앱 PCM → Android 내장 온디바이스 `SpeechRecognizer`(ko-KR) 파이프를 유지하고, 사용자가 직접 시작한 시험의 n-best 인식 후보(최대 3개·점수·판정)를 진단 화면에 RAM 전용으로 표시한다. v47~v49의 로컬 Moonshine STT는 v0.50에서 제거했다. 녹음 기본 저장(v49)과 실차 1회 안전 동의는 유지한다. 사용자 발화 정확도와 실차 성공은 미검증이다.
 
 초기 대상은 개인 사용자 1인·1차 조합이다.
 
@@ -14,10 +14,157 @@
 |---|---|---|
 |휴대전화|Galaxy S23 Ultra|Android 16/API 36 확인, One UI 속성 `80500`; 설정 화면의 버전 표기는 미확인|
 |차량|Model Y 주니퍼 AWD Long Range|차량 펌웨어·옵션·동작 미확인|
-|앱|Android 네이티브: Kotlin, Compose, Coroutines/StateFlow, DataStore|`com.heytesla.app`; 소스·설치 `0.46.0-probe`(`versionCode=46`). compile/min/target SDK36. VIN/설정/XML 지문·기존 현장 로그 보존 확인. 새 실차 시험 전|
-|음성 경로 후보|사용자 기본 `VoiceInteractionService` + CDM/CDS 실제 BLE 출현 + microphone FGS/`AudioRecord`|자동 경로 미검증. 독립된 화면 전용 수동 STT 진단과 혼동하지 않음|
+|앱|Android 네이티브: Kotlin, Compose, Coroutines/StateFlow, DataStore|`com.heytesla.app`; S23 설치 `0.52.0-probe`(`versionCode=52`, `adb install -r`, `firstInstallTime` 유지로 데이터 보존 확인). 직전 설치 `0.51.0-probe`(`versionCode=51`, `adb install -r` 데이터 보존). compile/min/target SDK36. v0.51 설치 전후 로그·VIN 저장 파일·DataStore 해시 동일, 녹음 파일 30개 보존 확인(v0.52 설치 전후 해시 비교는 미실행)|
+| 음성 경로 후보 | 사용자 기본 `VoiceInteractionService` + CDM/CDS 실제 BLE 출현 + microphone FGS/`AudioRecord` | 자동 경로 미검증. 화면 전용 수동 진단과 혼동하지 않음 |
+| 앱 내 STT(v0.50~) | 앱 `SpeechMicCapture` 16 kHz mono PCM → `AndroidPcmRecognizer` → Android 온디바이스 `SpeechRecognizer`(ko-KR, `EXTRA_AUDIO_SOURCE` + `EXTRA_SEGMENTED_SESSION`) | 재생 근거: S23 Google 인식 서비스가 n-best 2~3개·confidence 0.0·변형 인식을 반환. v0.51 합성 시험에서 화면 후보 2개·점수 미제공 표시를 UI 계층으로 확인. 사용자 발화 정확도·실차 성공은 미검증. v47~v49 Moonshine 경로는 제거됨 |
+| 진단 그림자 STT(v0.52~) | 같은 진단 PCM → sherpa-onnx 1.13.8 오프라인 zipformer(`sherpa-onnx-zipformer-korean-2024-06-24`, `modified_beam_search`, 핫워드) | S23 기기 replay: 실녹음 10개(무관 발화 1 포함) 중 명령 후보 4개(Android STT 1개), PC와 같은 4개, 무관 발화 미수용, 실패 0. 합성 TTS 3개는 Android 3/3·그림자 0/3(호출어 없음). 모델 로드 1.1–1.5 s·인식 0.13–0.55 s. 사용자 실사용·실차 미검증. 명령 판정·`FrunkVoiceProbe` 미적용 |
 
 `CDM`만으로 microphone FGS 예외가 성립한다고 보지 않는다. 기본 비서로 지정됐다고 DSP 또는 상시 호출어 감지가 가능하다고 보지도 않는다. 플랫폼 지원 여부와 제조사 동작은 실제 기기에서 각각 검증한다. 호출어 대기 시간을 90초로 둘 경우 이는 시험값일 뿐, 배터리·지연 시간의 측정값이 아니다.
+
+## 0.52.0-probe — sherpa-onnx zipformer 진단 그림자 인식
+
+### 변경점
+
+- 사용자가 승인한 추가: sherpa-onnx 1.13.8 AAR(Apache-2.0, 내부 ONNX Runtime MIT)과 `sherpa-onnx-zipformer-korean-2024-06-24`(icefall KsponSpeech zipformer transducer, int8, Apache-2.0)를 **음성 인식 진단(`SpeechRecognitionProbe`)의 그림자 인식기**로만 붙였다. **v47~v49 Moonshine의 재도입이 아니다.** `.local-models/assets/moonshine-ko/`는 사용하지 않고 보존한다.
+- 명령 판정(`FrunkVoicePolicy`, `recognitionOutcome`)은 Android 내장 `SpeechRecognizer` 결과로만 내린다. 실차 음성 시험(`FrunkVoiceProbe`)에는 붙이지 않는다.
+- 인식 설정: `modified_beam_search`, `maxActivePaths=16`, 핫워드 "헤이 테슬라"·"프렁크 열어줘"(`hotwordsScore=3.0`, `modelingUnit="bpe"`, `bpe.vocab`), `numThreads=2`, 16 kHz·80-dim.
+- 화면: 음성 진단 결과 아래 RAM 전용 행 "실험용 로컬 인식"(값 "sherpa-onnx · 명령 판정·차량 제어에 사용 안 함"), "로컬 인식 원문"(실패 시 "결과 없음 · 실패 코드" — `SHADOW_MODEL_MISSING`/`SHADOW_LOAD_FAILED`/`SHADOW_DECODE_FAILED`), "로컬 시험 문장 일치"(예/아니오/미판정), "로컬 호출어·명령 판정", "로컬 처리 시간"("모델 로드 N ms · 인식 N ms")과 안내 "로컬 인식 원문도 화면에만 표시합니다 · RAM 전용 · 위 판정·dry-run·저장 녹음 결과에 반영 안 함".
+- 개인정보: 네트워크 권한·클라우드 전송 없음. 그림자 원문은 v0.51 n-best와 같은 규칙으로 RAM에만 두고 다음 시험 시작·프로세스 종료 시 사라지며, 사용자 취소 시험에는 표시하지 않고 로그·이벤트·요약·녹음 저장소에 쓰지 않는다.
+- 빌드: `.local-models/`는 Git 제외이므로 새 클론은 `python3 tools/prepare_sherpa_ko.py --download`가 먼저 필요하다. APK는 arm64-v8a만 포함(native 약 32 MB), 모델 asset 약 76 MB(onnx 무압축), 디버그 APK 146,245,204 B. 라이선스 고지 3개를 `app/src/main/proto/licenses/`에 두어 APK 루트에 동봉한다.
+
+### PC·기기 replay 근거(표본 작음)
+
+- 화자 1명의 S23 직접 마이크 녹음 10개(무관 발화 1개 포함)와 합성 TTS 3개. PC sherpa(`p16_s3.0`)와 S23 기기 replay가 같은 4개 녹음(`2115129e`·`5a2278cf`·`b003d0aa`·`e820f353`)을 명령 후보로 판정했다. 같은 실녹음에서 Android STT 수락은 `b003d0aa` 1개다.
+- 핫워드 없는 PC greedy·beam은 명령 후보 0개였다. 무관 발화 1개는 두 엔진 모두 미수용. PC 핫워드 점수 2.5–4.0 구간에서 결과가 안정적이었다.
+- `62565728`·`6f4677a9`는 Android 오류 7, 기기 그림자 빈 결과(PC 그림자는 호출어 없음)다.
+- 합성 TTS 3개는 Android 3/3 수락, 그림자 0/3(호출어 부분 오인식). 그림자는 합성 음성에서 호출어에 약하다.
+- 한계: 화자 1명·소표본이라 일반화 근거가 아니다. 저장 녹음 재생이며 사용자 실사용 발화·실차 환경이 아니다.
+
+### 검증 체크리스트
+
+- [x] 빌드: `:app:assembleDebug`·`:app:testDebugUnitTest`(JVM 357, 실패·오류·건너뜀 0)·`:app:lintDebug`(오류 0, 경고 16 — v0.51 대비 +1 `ChromeOsAbiSupport`, arm64 전용의 의도된 결과)·`:app:assembleDebugAndroidTest` 성공
+- [x] APK 내용: `assets/zipformer-ko/` encoder 70,784,728 B·decoder 2,844,692 B·joiner 2,581,421 B 무압축(Stored), `tokens.txt`·`bpe.vocab` 포함, `lib/arm64-v8a/`만 포함, 라이선스 3개 동봉, `INTERNET` 권한 없음
+- [x] 기기 replay(`SpeechRecordingReplayDeviceTest#replayAll`, 데이터 보존 설치본): 실패 0, 명령 후보 4개가 PC와 같음
+- [x] 원문 미기록(합성 dry-run·replay 범위): 시험 이후 전체 logcat 시험 문장 키워드 0건, 앱 sherpa 로그는 native 라이브러리 로드 1줄, `events-v2.jsonl`의 v0.52 이벤트 11줄에 한글·shadow 필드 없음, replay `HTSTT` 그림자 13줄 한글 0. 마이크 시험 녹음 `runs/`·RAM 이벤트 직접 관측은 미실행. replay 테스트의 Android n-best 원문 `HTSTT` 출력은 v0.52 이전부터 있던 테스트 프로세스 한정 동작이다
+- [x] UI dry-run(합성 한국어 파일 PCM, 2026-10-22 14:30): Android 시험 문장 일치 "예"·"호출어 확인 · 명령 후보 (전송 안 함)", 그림자 시험 문장 일치 "아니오"·"호출어 없음", "모델 로드 773 ms · 인식 89 ms", "차량 전송 안 함". `FLAG_SECURE`로 화면 캡처 대신 접근성 트리로만 확인. 실차 음성 시험·동의 체크는 누르지 않음
+- [ ] asset 누락 시 크래시 없이 `SHADOW_MODEL_MISSING` 표시 — 미확인
+
+### 사용자 실사용·실차 근처 시험 절차
+
+1. 설정 → 개발자 진단 → 음성 → "차량 미전송 · dry-run 입력 선택"에서 **직접 마이크** 또는 **녹음 후 PCM**을 고른다. 실차 음성 시험·동의 체크는 건드리지 않는다.
+2. "선택한 입력으로 진단 시작"을 누르고 "헤이 테슬라 프렁크 열어줘"를 말한 뒤 "입력 종료"가 보이면 누른다. 휴대폰은 입에서 20–30 cm 떨어뜨리고(클리핑 방지) "헤이" 뒤에 짧게 쉰다. 마이크 시험은 기존 v49 동작대로 녹음·1순위 결과를 전용 파일에 보관한다.
+3. 결과에서 Android 후보(`후보 N`)·판정과 "로컬 인식 원문"·"로컬 시험 문장 일치"·"로컬 호출어·명령 판정"·"로컬 처리 시간"을 비교한다. 그림자 결과는 차량 실행 허가가 아니다.
+4. 여러 번 반복한 뒤 USB를 연결해 로그 분석을 요청한다.
+
+### 한계
+
+- 화자 1명·소표본 근거뿐이다. 실차 음성 시험 경로에는 적용하지 않았고 명령 판정에 반영하지 않는다. 그림자는 시험마다 모델을 로드해 결과 표시가 약 1–2 s 늦어진다. 합성 음성 호출어에 약하다. 배터리·연속 발화·다른 화자 정확도는 미검증이다.
+
+## 0.51.0-probe — 시험 인식 후보 화면 표시
+
+### 변경점
+
+- 사용자가 승인한 정책 변경: 사용자가 직접 시작한 시험의 n-best 인식 후보 원문을 진단 화면에 표시한다. RAM 상태에만 두며 다음 같은 시험 시작이나 프로세스 종료 때 사라진다. 파일·일반 로그·RAM 이벤트·`SpeechTrialSummary`·필드 스냅샷에는 넣지 않는다.
+- `SttTranscript`(앞 3개 후보와 전체 개수)를 `FrunkVoiceState.transcript`(`transcriptAccepted`·`transcriptReason` 포함)와 `SpeechTrialState.transcript`에만 둔다.
+- 진단 → 음성: 실차 음성 시험 영역에 `인식 판정`(수락 또는 차단 사유)과 `후보 N` 행(따옴표 원문 · 점수)을 표시한다. 0.0 등 미제공 점수는 `점수 미제공(원값 …)`으로 보인다. 후보가 3개를 넘으면 `표시 후보: 전체 N개 중 3개`, 없으면 `후보 없음`과 RAM 전용 안내를 표시한다. 일반 STT 시험은 합성·무음을 포함한 모든 모드에서 같은 행을 보이며, 사용자가 취소한 회차는 표시하지 않는다.
+- 판정 정책·로그 마스킹(`[마스킹]`, 최대 3후보·160자)·안전 게이트는 v0.50과 같다. 녹음 run 결과 JSON의 인식 원문 저장은 v49 이후 기존 동작이며 v0.51은 새 파일 출력을 추가하지 않는다. **표시된 후보나 문장 일치는 차량 제어 허가가 아니다.**
+
+### 검증 상태
+
+- 호스트: JDK21 `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug :app:assembleDebugAndroidTest` 성공. JVM 357개 실패 0, Lint 오류 0·경고 15(v0.50과 동일). 배선 확인에 그치는 단위 테스트는 추가하지 않았다.
+- S23(SM-S918N, Android 16): v0.50 위에 앱 APK를 `adb install -r`로 설치해 `versionCode=51`/`0.51.0-probe`(`lastUpdateTime=2026-10-22 12:57:55`)를 확인했다. 설치 전후 로그·VIN 저장 파일·DataStore 해시가 같았고, 녹음 8개 폴더·파일 30개의 최신 수정 시각이 설치 시각보다 앞섰다.
+- 일반 STT 합성 시험 1회(UI 계층): `후보 1 "헤이 테슬라 프렁크 열어 줘" · 점수 미제공(원값 0.0)`, `후보 2 "헤이 테슬라 프렁크 열어줘" · 점수 미제공(원값 0.0)`, RAM 전용 안내, `최종 결과 수신`·`시험 문장 일치` 예. 실차 음성 시험 영역은 대기 상태였고 동의 체크박스는 체크하지 않았으며 실차 음성 시험은 시작하지 않았다.
+- 앱 프로세스 logcat에서 `프렁크|열어 ?줘|테슬라` 일치 0건. `HTSTT` 원문 행은 계측 테스트 `SpeechRecordingReplayDeviceTest` 프로세스에서만 나왔다. `fieldSnapshot()`은 명시적 키 목록이라 후보가 포함되지 않음을 코드로 확인했다.
+- 미검증: 실차 음성 시험의 후보·판정 표시(컴파일 수준), 두 번째 시험 시작 때 이전 후보 제거(코드상 시작 시 새 상태로 교체), 3개 초과 후보 표시, 사용자 발화 정확도·실차 성공. `FLAG_SECURE`로 **픽셀 기반 시각 검증 미완료**. 감지 상태는 OFF다.
+
+## 0.50.0-probe — Android 온디바이스 SpeechRecognizer 전환
+
+### 근본 원인
+
+1. 기존 인식 경로가 `EXTRA_MAX_RESULTS 1`과 `firstOrNull`/`singleOrNull`로 첫 후보만 봤다.
+2. 기존 `FrunkVoiceProbe`가 `onSegmentResults`를 `FRUNK_VOICE_FINAL_REQUIRED`로 처리했다.
+3. S23 Google 인식 서비스의 confidence가 항상 0.0이라 0.85 게이트를 통과할 수 없었다.
+4. 음향 변형 인식이 나왔다: 페이/해이/해의/a 테슬라, 브렁크/프랑크.
+5. Moonshine(v47~v49)은 빈 결과나 “브렁크”를 반환했다.
+6. 일부 저장 녹음은 무음·주변 대화만 담겨 error 7(`NO_MATCH`)이었다.
+7. 마스킹 어휘에 “열어”·“줘”가 없었다.
+
+### 변경점
+
+- `MoonshineRecognizer.kt`, `tools/prepare_moonshine.py`, `app/src/main/assets/licenses/`, sherpa AAR 의존성, `.local-models/assets` srcDir, `noCompress`를 제거했다. `.local-models/` 폴더와 gitignore 항목은 보존하되 쓰지 않는다.
+- `SpeechMicCapture`가 16 kHz mono PCM을 최대 10초/320,000 bytes 캡처하고, `SpeechRecordingStore`가 개발 시험 녹음을 `no_backup/speech-recordings/<id>/`에 보관한다(정책 불변).
+- `AndroidPcmRecognizer`가 같은 PCM을 `EXTRA_AUDIO_SOURCE` 파이프에 non-blocking으로 쓰고 `EXTRA_SEGMENTED_SESSION`의 `onSegmentResults`를 결합한다. 비segmented 모드는 S23에서 결과가 null이었고 `EXTRA_BIASING_STRINGS`는 효과가 없었다. 타임아웃은 운영 15초, 재생 테스트 30초다.
+- `FrunkVoicePolicy`: 후보 중 하나라도 정규화 후 `헤이테슬라프렁크열어줘`와 정확히 일치하면 수락, 하나라도 `취소`/`열지마`를 포함하면 차단한다. 점수 0.0·−1·null·비유한값은 “점수 미제공”으로 기록하고 신뢰도 게이트를 생략하며, 실제 점수는 0.85 이상이어야 한다. 발음 변형 문자열은 수락하지 않는다. 인식기 실패는 부분 세그먼트가 있어도 명령 없음이다.
+- P·HANDOFF 5초·명령 10초·안전 동의 게이트는 그대로다. **STT 일치는 차량 제어 허가가 아니다.**
+- 마스킹 어휘에 “열어”, “줘”, “해이”, “페이”, “브렁크”, “프랑크”를 추가했다.
+
+### 재생 절차
+
+- `connectedAndroidTest`는 앱을 제거·재설치해 저장 녹음을 지울 수 있으므로 쓰지 않는다. 앱·계측 APK는 `adb install -r`로 데이터 보존 설치한다.
+- `python3 -B tools/speech_recordings.py --serial DEVICE_SERIAL replay --id RECORDING_UUID`는 `SpeechRecordingReplayDeviceTest#replaySavedRecording`(`-e recordingId`)으로 저장 녹음을 온디바이스 STT로 재인식하고 결과를 해당 녹음의 `runs/`에 추가한다.
+- `replayAll`은 fixture와 모든 저장 녹음을 정책에 통과시켜 `HTSTT` 태그 로그만 남기고 저장하지 않는다. `adb logcat -d -s HTSTT:I`로 확인한다.
+
+### 검증 상태
+
+- 호스트: JDK21 `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug :app:assembleDebugAndroidTest` 성공. JVM 357개(실패·오류·skip 0), Lint 오류 0·경고 15, `tools` 단위 테스트 141개 통과. 디버그 APK에 sherpa/onnx/Moonshine 항목 없음.
+- S23(SM-S918N, Android 16): v0.49 위에 앱·계측 APK를 `adb install -r`로 설치해 `versionCode=50`/`0.50.0-probe`를 확인했다. 설치 전후 순환 로그 4개·`registered.enc`·DataStore 해시, 녹음 파일 27개, 현재 로그 앞부분 해시가 같았다.
+- `replayAll` 1개 통과. 결과(점수는 모두 0.0, 인식기 판정 기준):
+
+  |입력|상위 후보|결과|
+  |---|---|---|
+  |fixture(합성)|헤이 테슬라 프렁크 열어 줘|수락|
+  |`a77cf896`|헤이 테슬라 프렁크 열어 줘|수락|
+  |`2115129e`|헤이/해이 테슬라 브렁크 열어 줘|문법 차단|
+  |`5a2278cf`|해의 테슬라 브렁크 열어 줘|문법 차단|
+  |`c722ad73`|해의/a 테슬라 프렁크 열어 줘|문법 차단|
+  |`ca38f7fa`|주변 대화(원문 생략)|문법 차단|
+  |`62565728`, `6f4677a9`|없음|error 7|
+
+  fixture는 이전 실행에서 “페이 테슬라 …”였으므로, 같은 PCM이라도 실행마다 후보가 달라질 수 있다.
+- `savedSyntheticSpeechDecodesIdentically` 1개 통과.
+- 진단 → 음성 탭은 UI 계층으로만 확인했다. 새 문구가 표시되고, 동의 체크박스가 활성이며 차단 사유 문구가 없었다. `FLAG_SECURE`로 픽셀 기반 시각 검증은 하지 못했다. 감지 상태는 OFF(`PROCESS_START_OFF`)다.
+- **실차 미검증.** 실시간 마이크 캡처 → 인식 경로와 사용자 발화 결과는 실차 시험 후 기록한다.
+
+## 0.49.0-probe — 녹음 기본 저장·체크 단계 제거
+
+### 실제 검증
+
+- JDK21로 `:app:assembleDebug`, `:app:assembleDebugAndroidTest`, `:app:testDebugUnitTest`, `:app:lintDebug` 성공. JVM 345개 실패·오류 없음.
+- 루트 `lintDebug`는 별도 `altbeacon` 모듈의 기존 권한 등 36개 오류로 실패했다. JDK17에서는 lint 내부 `List.removeLast()` 오류도 발생했으며 앱 범위 검증은 Android Studio JDK21로 실행했다. 전체 저장소 lint 통과 주장이 아니다.
+- S23 데이터 보존 설치 후 v49 확인. 기존 XML 설정 22개 동일·기존 로그 5개 접두부 보존.
+- 실제 UI 계층에서 저장 체크 제거·기본 저장 안내·실차 1회 안전 동의 유지를 확인했다. 직접 마이크 선택만으로 저장 회차가 늘지 않았다.
+- 저장 체크 없이 시작 버튼만 눌러 마이크 시험을 연속 2회 실행했다. WAV 310,444바이트·316,204바이트와 각 최종 빈 인식 결과 파일이 저장됐다. 주변음 smoke이며 사용자 발화 정확도 검증이 아니다.
+- 종료 후 앱 서비스 없음·설정 지문 동일. 화면 캡처 차단은 유지하며 픽셀 기반 시각 검증은 미완료다. 차량 명령은 실행하지 않았다.
+
+### 차량 없는 발화 수집
+
+1. 설정 → 개발자 진단 → 마이크 → `차량 미전송 · dry-run 입력 선택`에서 **직접 마이크** 선택.
+2. 별도 체크 없이 **선택한 입력으로 진단 시작**을 누른다.
+3. 녹음 중 “헤이 테슬라 프렁크 열어줘” 발화 후 결과까지 기다린다. 반복 시험도 시작 버튼만 누른다.
+4. USB 연결 후 분석을 요청한다. 녹음·최종 원문은 기본 보관되며 ADB 회수·휴대폰 재인식이 가능하다.
+
+화면 진입·복원·복귀만으로 녹음하지 않는다. 실차 1회 안전 동의는 별개이며 현재 신뢰도 미제공으로 프렁크 전송은 차단된다. 자동 업로드·백업·삭제는 하지 않는다.
+
+## 0.48.0-probe — 시험 녹음 저장·USB 회수·휴대폰 재인식
+
+### 실제 검증
+
+- `assembleDebug`, `assembleDebugAndroidTest`, `testDebugUnitTest`, `lintDebug` 성공. JVM 345개·호스트 도구 141개 테스트 실패 없음.
+- S23 데이터 보존 교체 설치 후 `versionCode=48`·`0.48.0-probe` 확인. 기존 XML 설정 22개와 로그 5개를 설치 전후 비교했다. 앱 실행 후 변경된 설정은 Android 프레임워크의 `android.app.ActivityThread.IDS.xml` 내 `IDSCount`뿐이다.
+- `SpeechRecordingReplayDeviceTest#savedSyntheticSpeechDecodesIdentically` 기기 시험 통과. 저장 전후 PCM 및 native 인식 결과 동일. 합성 문장의 “브렁크” 오인식은 그대로이며 정확도 합격이 아니다.
+- 실제 진단 UI에서 `직접 마이크` → 이번 시험 저장 동의 → 시작을 실행했다. WAV 311,084바이트와 최종 빈 인식 결과를 저장·회수했다. 별도 발화를 요청하지 않은 주변음 smoke이며 사용자 명령 인식 시험이 아니다.
+- 시작 후 저장 동의가 해제됨을 UI 계층으로 확인했다. 동의하지 않은 다음 직접 마이크 시험도 종료됐으며 저장 회차가 추가되지 않았다.
+- 합성 음성과 실제 마이크 녹음 각각 `tools/speech_recordings.py`의 `list`·`fetch`·`replay`·재회수를 실행했다. 재인식은 휴대폰 Moonshine에서 수행됐고 기존 WAV·메타데이터·결과 파일은 동일하게 보존되며 새 결과만 추가됐다.
+- 종료 로그에서 감지 OFF·세션 비활성, `dumpsys activity services com.heytesla.app`에서 서비스 없음을 확인했다. 일반 로그의 원문 마스킹과 신뢰도 `null`·0.85 안전 조건을 유지한다. `FLAG_SECURE`를 유지했으며 픽셀 기반 시각 검증은 미완료다.
+
+### 당시 차량 없는 발화 수집(v48, v49에서 저장 체크 제거)
+
+1. 설정 → 개발자 진단 → 마이크 → 아래 `차량 미전송 · dry-run 입력 선택`에서 **직접 마이크** 선택.
+2. **이번 시험 녹음과 인식 원문 저장 동의** 체크 → **선택한 입력으로 진단 시작**.
+3. 녹음 중 “헤이 테슬라 프렁크 열어줘” 발화 후 결과까지 대기. 회차마다 저장 동의를 다시 체크한다.
+4. USB 연결 후 분석을 요청한다. 개발자가 ADB로 녹음·결과를 Git 제외 `.local-recordings/`로 회수하고 같은 녹음을 휴대폰에서 재시험한다. 사용자가 PC 도구를 직접 실행할 필요는 없다.
+
+녹음은 앱 내부 백업 제외 전용 영역에 저장하며 자동 업로드·자동 삭제하지 않는다. 저장 녹음 재시험은 마이크를 열거나 차량 명령을 보내지 않는다. 이번 버전은 발화가 맞아도 신뢰도 미제공으로 프렁크 전송이 차단되며, 차량 개방 시험과 구분한다.
 
 ## 2026-09-22 기존 0.1.0-probe 실기기 결과
 
@@ -930,6 +1077,41 @@ adb -d exec-out run-as com.heytesla.app cat no_backup/field-diagnostics/events.j
 3. USB 재연결 후 native 연결 status/state, CCCD SDK·완료, queued→dispatch→SDK→callback, RX/BODY/DRIVE, 정리/scan재개를 함께 분석한다. 이전 쓰기 결과와 취소된 새 예약을 섞지 않는다.
 4. 앱 프로세스가 재시작됐다면 감지만 복원되므로 설정→개발자 진단→BLE 연결→접근 시 인증·상태 조회→시작을 다시 선택한다. 구현→검증/설치→사용자시험→로그분석 순서를 유지한다.
 
+## 0.47.0-probe — Moonshine Tiny Korean STT 전환
+
+> **제거됨(v0.50):** 이 Moonshine/sherpa-onnx 경로는 `0.50.0-probe`에서 제거됐다. 아래는 과거 기록이며 현재 구현이 아니다.
+
+### 구현 계약
+
+- Android `SpeechRecognizer`의 지원 조회·설치/다운로드 승격·재시도·10초 타임아웃 게이트를 제거했다. 진단 음성은 앱에 포함한 sherpa-onnx 1.13.8 Kotlin AAR과 `assets/moonshine-ko`의 `encoder_model.ort`·`decoder_model_merged.ort`·`tokens.txt`를 쓰는 비스트리밍 추론이다. 모델은 `sherpa-onnx-moonshine-tiny-ko-quantized-2026-02-27`이며 **파일 3개 존재는 준비 상태일 뿐 인식 성공이 아니다.**
+- 직접 마이크는 `AudioRecord` 16 kHz·mono·PCM16을 최대 10초 RAM에 모은 뒤 stop/release를 끝내고 native 추론한다. 파일·무음 대조도 같은 엔진과 같은 PCM 경로를 쓰며 스피커나 별도 인식기를 시작하지 않는다. 파일과 무음은 같은 샘플 수를 쓰고 무음만 0으로 채운다.
+- 추론 결과는 최종 단일 후보·문장 일치·명령 판정을 표시하되 일반 진단에서는 원문을 영구 기록하지 않는다. Moonshine은 신뢰도를 제공하지 않으므로 `confidence=null`이고 기존 0.85 안전 조건은 완화하지 않는다. 따라서 정답 문장이 인식돼도 **실차 프렁크 전송은 차단**되며, 현재 비교할 수 있는 것은 마스킹 인식 로그와 차단 사유다.
+- 취소·화면 이탈·오류·시간 초과에서 캡처·추론 객체·RAM·오디오 예약을 정리한다. 해제 불명은 `RESTART_REQUIRED`로 새 시험을 막고 성공으로 숨기지 않는다. **PCM은 파일로 저장하거나 전송하지 않는다.**
+
+### 빌드 준비와 라이선스
+
+- Python 3.11 이상에서 `python3 -B tools/prepare_moonshine.py`를 먼저 실행한다. `.local-models`는 Git 제외이며 스크립트는 AAR upstream 배포물과 모델 archive의 고정 SHA-256을 검증하고 기존 다른 파일을 덮어쓰지 않는다. 모델 archive SHA는 이 저장소의 실측 pin이며 **공식 서명 검증 주장이 아니다.**
+- 모델 자산 수십 MB가 APK에 포함되어 debug APK가 그만큼 커진다. 모델 파일 누락·빌드 실패를 모델 로딩 성공으로 해석하지 않는다.
+- UI에는 "Powered by Moonshine AI"를 표시한다. 한국어 모델은 **Moonshine AI Community License**(개인 평가 무료, 상업 등록 및 연 매출 합산 USD 1,000,000 초과 시 별도 조건)이며 MIT·Apache-2.0으로 표기하지 않는다. 런타임 sherpa-onnx는 Apache-2.0, ONNX Runtime은 MIT이고 `app/src/main/assets/licenses/`의 LICENSE·NOTICE를 함께 배포한다.
+
+### 검증 상태
+
+- 앱·계측 APK 빌드, JVM337개(실패/오류/skip0), Lint 오류0/경고14, Python 분석기94개를 통과했다. 모델 준비 스크립트의 고정 SHA 검증·자산 준비를 실제 실행했다. debug APK는238,276,380바이트이며 모델3개 비압축·JNI4개 ABI·라이선스5개 동봉을 ZIP에서 확인했다. PCM 전송 바이트는 native `acceptWaveform`이 반환한 뒤에만 집계하며 캡처 바이트와 구분한다.
+- S23에 앱·계측 APK를 데이터 보존 설치하고 code47/name0.47.0-probe를 확인했다. VIN/설정/XML4개 지문·legacy/archive3개는 동일하고 활성 로그 기존 접두부도 보존됐다. 앱 실행·홈→설정→개발자 진단→음성의 실제 접근성 요소에서 비교용 안내·동의 체크박스·동의 전 시작 비활성을 확인했다. 감지 OFF·앱 서비스 없음이다. 보안 화면의 픽셀 캡처 검증은 하지 않았다.
+- 실제 native 합성 PCM71,098바이트를 입력해 `▁헤이 테슬라 브렁크 열어줘.`를 얻었다. 같은 길이 무음은 빈 문자열이었다. 두 입력 모두 native 수락 바이트71,098·오류 없음·스트림 해제 실패 없음이며 모델 로드는 두 실행에서744ms/466ms였다. 지연 벤치마크나 정답 인식 합격이 아니다. 선두 SentencePiece 표식과 “프렁크” 오인식을 결과 그대로 기록하며 점수·문장을 정답으로 교정하지 않았다.
+- 일회 native smoke와 기존 실차 입장 거부 계측2개가 통과했다. 최초 계측은 모바일 자동화 helper의 UiAutomation 점유로 실패했고 helper 종료 후 재실행했다. 임시 smoke 메서드는 검증 후 제거했다. 사용자 마이크·GATT·차량 명령은 실행하지 않았다.
+
+### v47 비교 시험 절차
+
+1. 감지를 OFF로 두고 화면 잠금을 해제한다. 설정→개발자 진단→음성에서 모델 파일 3개 준비·마이크 권한·화면 표시·기존 캡처 없음 상태를 확인한다.
+2. 파일 입력을 먼저 시험한다. 고정 TTS 파일을 선택해 시작하고 수음이 끝난 뒤 추론 결과·문장 일치·`null` 신뢰도·차단 사유를 확인한다. 같은 길이의 무음 대조와 진행 중 취소를 각각 실행한다.
+3. 직접 마이크를 선택해 시작하고 “헤이 테슬라 프렁크 열어줘”를 한 번 말한다. 최대 10초 수음이 끝난 뒤 추론 결과와 판정을 확인한다. 실패·무음·허용 외 문장을 성공으로 표시하지 않는다.
+4. 실차 동의를 명시적으로 선택한 경우에만 같은 문장을 시험한다. 인식 결과가 정답이어도 신뢰도 조건을 통과할 수 없어 전송 전에 차단되어야 하며 프렁크 개방을 기대하지 않는다. 차단 사유와 마스킹 로그만 비교한다.
+5. 최소 3종을 확인한다: 정답 발화, 부정 또는 허용 외 발화, 무음, 중도 취소 중 3종 이상. 회차마다 수음 종료·추론 시작·결과 표시·자원 해제를 구분해 기록한다.
+6. USB 로그에서 마스킹 저장이 실차 동의 회차에만 있는지, 일반 진단 원문·PCM 파일이 없는지 확인한다. 실제 인식 정확도·지연·배터리는 별도 측정 전 합격으로 선언하지 않는다.
+
+- **미검증**: 실제 사용자 한국어 발화 정확도·지연 분포·메모리·배터리, 직접 마이크의 음향 조건, 잠금/주머니, 차량 접근, 사용자 실차 성공. v46의 과거 실차 실패도 그대로 남는다.
+
 ## 0.46.0-probe — 실차 음성 진행 위치 즉시 표시
 
 - 음성 대기·마이크 반환·키 준비·BLE 연결/서비스 준비·차량 인증·현재 상태/P 확인·신선한 P·SDK 접수·차량 ACK·열림 보고를 실제 상태로 표시한다. 시간 경과로 진행률이나 성공을 만들지 않는다. 실패·결과 불명에서는 마지막 실제 단계와 사유를 유지한다.
@@ -986,7 +1168,9 @@ adb -d exec-out run-as com.heytesla.app cat no_backup/field-diagnostics/events.j
 
 설치 전 원본은 `.local-backups/field-diagnostics/frunk-v42-before-61b1b7b793dd423c8c2d3935a7954d79/`, 설치 후 준비 로그/분석은 `.local-backups/field-diagnostics/frunk-v42-prepared-990a0100c2b642d1944f6f2e2ea3c938/`에 보존했다. 현재 v42·min/target36이며 감지는 정상 중지/OFF, 실차 동의는 미선택, 앱의 마이크/감지 서비스는 실행하지 않는다. 실제 차량 명령은 아직 보내지 않았다.
 
-### 현재 사용자 실차 시나리오(v46)
+### 0.42 당시 사용자 실차 시나리오(v46 기준)
+
+이 절차는 v46까지의 시스템 음성 인식기·실차 개방 시험 기록이다. v47은 신뢰도가 `null`이라 전송 전에 차단되므로 현재 절차는 위 [v47 비교 시험 절차](#v47-비교-시험-절차)를 따른다.
 
 1. 차량 P·프렁크 앞 안전을 확인한다. 휴대폰 화면을 켜고 잠금을 풀며 감지는 OFF로 둔다. 키·VIN을 재등록하지 않는다.
 2. 설정→개발자 진단→음성에서 자동 지원 조회가 끝나면 **실제 차량 동작 · 프렁크 1회** 영역으로 간다.

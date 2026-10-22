@@ -59,12 +59,15 @@ import com.heytesla.app.FrunkVoicePolicy
 import com.heytesla.app.frunkVoiceReasonLabel
 import com.heytesla.app.progressStep
 import com.heytesla.app.SpeechCommandDecision
+import com.heytesla.app.SpeechCommandPhrases
 import com.heytesla.app.SpeechProbeState
 import com.heytesla.app.SpeechProbeStatus
 import com.heytesla.app.SpeechResponseStatus
 import com.heytesla.app.SpeechTrialMode
 import com.heytesla.app.SpeechTrialState
 import com.heytesla.app.SpeechTrialStatus
+import com.heytesla.app.ShadowTranscript
+import com.heytesla.app.SttTranscript
 import com.heytesla.app.UwbProbeState
 import com.heytesla.app.UwbProbeStatus
 import com.heytesla.app.TeslaBlePhase
@@ -1249,7 +1252,19 @@ private fun SpeechDiagnostics(
                 )
             }
         }
-        Text("시험 문장: 헤이 테슬라 프렁크 열어줘", style = MaterialTheme.typography.bodyMedium)
+        Text("시험 문장: ${SpeechCommandPhrases.displaySentence}", style = MaterialTheme.typography.bodyMedium)
+        Text("앱이 입력을 먼저 캡처한 뒤 같은 PCM을 Android 온디바이스 SpeechRecognizer(ko-KR)로 인식합니다. 실시간 스트리밍 인식이 아닙니다.",
+            style = MaterialTheme.typography.bodySmall)
+        Text("인식 후보(최대 3개) 중 하나가 시험 문장과 정확히 같으면 일치로 봅니다. 어느 후보든 취소·열지마가 있으면 취소로 판정합니다. 신뢰도는 기록만 합니다.",
+            style = MaterialTheme.typography.bodySmall)
+        Text(
+            if (selectedMode == SpeechTrialMode.DIRECT_MIC || selectedMode == SpeechTrialMode.BUFFERED_PCM) {
+                "시험 녹음·인식 원문은 기본 저장합니다. 앱 내부 백업 제외 영역에 보관하며 ADB로만 회수합니다."
+            } else {
+                "합성·무음 파일 입력은 녹음·인식 원문을 저장하지 않습니다."
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
         Button(
             onClick = { actions.startTrial(selectedMode) },
             enabled = canStartTrial,
@@ -1314,7 +1329,9 @@ internal fun FrunkVoiceDiagnostics(
     AppSection("실제 차량 동작 · 프렁크 1회") {
         Text("화면을 켜고 잠금을 해제한 실차 시험입니다. 주변 사람·재생 음성도 인식될 수 있으므로 차량 앞 안전을 직접 확인하세요.",
             color = AppWarningColor)
-        Text("“헤이 테슬라 프렁크 열어줘”가 인식되면 추가 확인 없이 안전 조건을 검사해 개방을 요청합니다.")
+        Text("“${SpeechCommandPhrases.displaySentence}”가 인식되면 추가 확인 없이 안전 조건을 검사해 개방을 요청합니다.")
+        Text("마이크 입력을 먼저 캡처하고 말이 끝나면 입력을 해제한 뒤 Android 온디바이스 SpeechRecognizer(ko-KR)로 인식합니다. 인식기가 점수를 제공하지 않으면(0.0 등) 문장 일치만으로 진행합니다.",
+            color = AppWarningColor)
         val step = voice.progressStep()
         Text(step.label, style = MaterialTheme.typography.titleMedium,
             color = when (step) {
@@ -1361,12 +1378,14 @@ internal fun FrunkVoiceDiagnostics(
                 Text(if (voice.frunkCommandSent) "결과 관측 중단 · 전송 철회 불가" else "진행 취소")
             }
         } else {
+            Text("시험 녹음·인식 원문은 기본 저장합니다. 앱 내부 백업 제외 영역에 보관하며 ADB로만 회수합니다.",
+                style = MaterialTheme.typography.bodySmall)
             androidx.compose.foundation.layout.Row(
                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
             ) {
                 Checkbox(checked = consent, onCheckedChange = { consent = it }, enabled = canStart,
                     modifier = Modifier.semantics { contentDescription = "실제 차량 프렁크 1회 시험과 마스킹 인식 로그 저장 동의" })
-                Text("프렁크 1회 시험과 마스킹한 인식 문장·신뢰도·차단 사유의 앱 내부 순환 저장에 동의합니다. 시험 어휘 밖 내용은 가리며 녹음은 저장하지 않습니다.", modifier = Modifier.weight(1f))
+                Text("프렁크 1회 시험과 마스킹한 인식 문장·신뢰도·차단 사유의 앱 내부 순환 저장에 동의합니다.", modifier = Modifier.weight(1f))
             }
             Button(
                 onClick = {
@@ -1383,6 +1402,7 @@ internal fun FrunkVoiceDiagnostics(
                 Text(when {
                     blocked == "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED" -> "정리 불명 · 새 시험 차단 · 앱 프로세스 재시작 필요"
                     !idle -> "기존 진단·정리가 끝난 뒤 시작하세요."
+                    blocked == "SPEECH_SUPPORT_RUNNING" -> "지원 조회가 끝난 뒤 시작하세요."
                     blocked == "DETECTION_MUST_STOP" -> "감지는 제품 음성과 미통합입니다. 기존 중지 버튼으로 감지를 정상 중지한 뒤 시작하세요."
                     blocked != null -> teslaKeyBlockedLabel(blocked)
                     !modelReady -> "온디바이스 한국어 지원 확인을 먼저 완료하세요."
@@ -1390,11 +1410,18 @@ internal fun FrunkVoiceDiagnostics(
                 }, style = MaterialTheme.typography.bodySmall)
             }
         }
-        Text("명령 10초 · 신뢰도 ${FrunkVoicePolicy.MIN_CONFIDENCE} 이상(보수적 시험값). 누락·0.0·부분·분할 결과는 차단합니다.",
+        Text("명령 10초 안에 인식까지 끝나야 합니다 · 후보(n-best) 중 하나가 정확히 일치해야 하며 어느 후보든 취소·열지마가 있으면 차단합니다 · 실제 점수가 오면 ${FrunkVoicePolicy.MIN_CONFIDENCE} 이상이어야 하고, 점수 미제공(0.0 등)은 기록 후 점수 조건을 생략합니다 · 인식기 실패는 일부 결과가 있어도 차단합니다.",
             style = MaterialTheme.typography.bodySmall)
         Text("명령이 인정된 시점부터 최대 40초의 기존 작업 기한이 적용됩니다. 남은 시간을 채우는 가짜 진행 없이 실제 관측된 단계만 표시합니다.",
             style = MaterialTheme.typography.bodySmall)
         voice.commandConfidence?.let { DetailRow("명령 신뢰도", it.toString()) }
+        voice.transcript?.let { transcript ->
+            DetailRow("인식 판정", if (voice.transcriptAccepted) "명령 문장 인정 · 차량 실행 허가 아님"
+                else "차단 · " + (voice.transcriptReason?.let(::frunkVoiceReasonLabel) ?: "사유 미기록"))
+            TranscriptRows(transcript)
+        }
+        voice.recordingId?.let { DetailRow("저장 녹음 ID", it) }
+        if (voice.recordingFailure) Text("녹음 또는 원문 결과 저장 실패 · ADB 회수 시 확인 필요", color = AppWarningColor)
         Text("HOME·잠금·화면 이탈은 신규 전송을 취소합니다. 화면 복귀·회전으로 다시 시작하지 않습니다. 잠금·주머니 동작은 미지원입니다.",
             style = MaterialTheme.typography.bodySmall)
     }
@@ -1429,8 +1456,12 @@ private fun SpeechResult(trial: SpeechTrialState, speechDiagnosticActive: Boolea
             DetailRow("최종 결과 수신", if (trial.finalReceived) "예" else "아니오")
             DetailRow("시험 문장 일치", when (trial.phraseMatched) { true -> "예"; false -> "아니오"; null -> "미판정" })
             DetailRow("호출어·명령 판정", commandDecisionLabel(trial.decision))
-            DetailRow("첫 결과 신뢰도", trial.confidence?.let { String.format(Locale.ROOT, "%.4f", it) } ?: "미제공·유효하지 않음")
+            DetailRow("인식 신뢰도", trial.confidence?.let { String.format(Locale.ROOT, "%.4f", it) } ?: "미제공(0.0 등) · 기록만 함")
+            trial.transcript?.let { TranscriptRows(it) }
+            trial.shadow?.let { ShadowRows(it) }
             DetailRow("진단 상태", trial.status.label)
+            trial.recordingId?.let { DetailRow("저장 녹음 ID", it) }
+            if (trial.recordingFailure) Text("녹음 또는 원문 결과 저장 실패", color = AppWarningColor)
             DetailRow("로컬 dry-run", dryRunResultLabel(trial.commandResult))
             DetailRow("음성 안내", speechResponseLabel(trial.responseStatus))
             Text("차량 전송 안 함", style = MaterialTheme.typography.bodyMedium)
@@ -1468,6 +1499,49 @@ private fun SpeechResult(trial: SpeechTrialState, speechDiagnosticActive: Boolea
             }
         }
     }
+}
+
+/** 사용자가 시작한 시험의 n-best 원문을 정규화·마스킹 없이 RAM 상태 그대로 보여 준다. */
+@Composable
+private fun TranscriptRows(transcript: SttTranscript) {
+    if (transcript.candidates.isEmpty()) {
+        DetailRow("인식 후보", "후보 없음")
+    } else {
+        transcript.candidates.forEachIndexed { index, candidate ->
+            DetailRow("후보 ${index + 1}", "${transcriptText(candidate.text)} · ${transcriptScoreLabel(candidate.confidence)}")
+        }
+        if (transcript.total > transcript.candidates.size) {
+            DetailRow("표시 후보", "전체 ${transcript.total}개 중 ${transcript.candidates.size}개")
+        }
+    }
+    Text("인식 원문은 화면에만 표시합니다 · RAM 전용 · 다음 같은 시험 시작·앱 프로세스 종료 시 지움 · 주변 대화도 표시될 수 있음 · 차량 실행 허가 아님",
+        style = MaterialTheme.typography.bodySmall)
+}
+
+private fun transcriptText(text: String) = if (text.isEmpty()) "(빈 문자열)" else "\"$text\""
+
+/** 같은 PCM을 sherpa-onnx로 다시 인식한 그림자 결과. 위 판정·dry-run과 무관한 비교용 RAM 상태다. */
+@Composable
+private fun ShadowRows(shadow: ShadowTranscript) {
+    DetailRow("실험용 로컬 인식", "sherpa-onnx · 명령 판정·차량 제어에 사용 안 함")
+    DetailRow("로컬 인식 원문", when {
+        shadow.failure != null -> "결과 없음 · ${shadow.failure}"
+        else -> shadow.text?.let(::transcriptText) ?: "결과 없음"
+    })
+    DetailRow("로컬 시험 문장 일치", when (shadow.matched) { true -> "예"; false -> "아니오"; null -> "미판정" })
+    DetailRow("로컬 호출어·명령 판정", commandDecisionLabel(shadow.decision))
+    DetailRow("로컬 처리 시간", "모델 로드 ${shadowMs(shadow.loadMs)} · 인식 ${shadowMs(shadow.decodeMs)}")
+    Text("로컬 인식 원문도 화면에만 표시합니다 · RAM 전용 · 위 판정·dry-run·저장 녹음 결과에 반영 안 함",
+        style = MaterialTheme.typography.bodySmall)
+}
+
+private fun shadowMs(ms: Long?) = ms?.let { "$it ms" } ?: "측정 안 됨"
+
+/** 양수 유한값만 실제 점수다. 0.0·-1·NaN 같은 원값은 숨기지 않고 미제공으로 표시한다. */
+private fun transcriptScoreLabel(score: Float?) = when {
+    score == null -> "점수 없음"
+    score.isFinite() && score > 0f -> String.format(Locale.ROOT, "점수 %.4f", score)
+    else -> "점수 미제공(원값 $score)"
 }
 
 @Composable
@@ -1731,10 +1805,10 @@ private fun modeChipLabel(mode: SpeechTrialMode) = when (mode) {
 }
 
 private fun selectedModeDescription(mode: SpeechTrialMode) = when (mode) {
-    SpeechTrialMode.TTS_PCM -> "발화 없이 합성 파일을 인식하고 입력 해제 후 결과를 음성 안내합니다. 일부 인식기는 자체 마이크를 열 수 있어요."
-    SpeechTrialMode.SILENT_PCM -> "같은 길이의 무음 입력입니다. 후보가 없으면 거절하고 입력 해제 후 음성 안내합니다. 일부 인식기는 자체 마이크를 열 수 있어요."
-    SpeechTrialMode.DIRECT_MIC -> "시스템 마이크로 최대 10초 인식합니다. 캡처 중 시험 문장을 말해 주세요."
-    SpeechTrialMode.BUFFERED_PCM -> "최대 10초 녹음한 뒤 마이크를 해제하고 인식합니다. 캡처 중 말하고 인계 중에는 조용히 기다리세요. 일부 인식기는 자체 마이크를 열 수 있어요."
+    SpeechTrialMode.TTS_PCM -> "발화 없이 합성 파일을 Android 온디바이스 STT로 인식하고 입력 해제 후 결과를 음성 안내합니다."
+    SpeechTrialMode.SILENT_PCM -> "같은 길이의 무음 입력입니다. 후보가 없으면 거절하고 입력 해제 후 음성 안내합니다."
+    SpeechTrialMode.DIRECT_MIC -> "앱이 최대 10초 PCM을 캡처한 뒤 마이크를 해제하고 Android 온디바이스 STT로 인식합니다. 캡처 중 시험 문장을 말해 주세요."
+    SpeechTrialMode.BUFFERED_PCM -> "앱이 최대 10초 PCM을 캡처한 뒤 마이크를 해제하고 Android 온디바이스 STT로 인식합니다. 캡처 중 말하고 인계 중에는 조용히 기다리세요."
 }
 
 private fun trialStartBlockedReason(

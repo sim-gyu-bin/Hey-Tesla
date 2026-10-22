@@ -24,12 +24,23 @@ internal object FrunkVoiceRecognition {
 
     // 공백 단위 전체 토큰만 비교한다. 접미사·숫자·식별자·구두점이 붙으면 토큰 전체를 가린다.
     // 붙여 말한 문장도 아래에 명시한 고정 시험 문법만 보존하며 부분문자열을 추출하지 않는다.
-    private val vocabulary = setOf(
-        "헤이", "테슬라", "헤이테슬라", "프렁크", "열어줘", "프렁크열어줘", "헤이테슬라프렁크열어줘",
-        "취소", "취소해", "취소해줘", "아니", "아니야", "안", "안돼", "말고",
-        "하지", "마", "하지마", "열지", "열지마", "마세요", "열지마세요", "열지말아줘",
-        "프렁크열지마", "헤이테슬라프렁크열지마", "트렁크", "트렁크열어줘", "헤이테슬라트렁크열어줘",
-    )
+    // "열어 줘"처럼 띄어 쓴 결과와 실측 오인식 변형(해이·페이·브렁크·프랑크)은 진단용으로만 보존하며 채택하지 않는다.
+    private val vocabulary = buildSet {
+        addAll(SpeechCommandPhrases.displayWakeWord.split(' '))
+        addAll(SpeechCommandPhrases.displayCommand.split(' '))
+        add(SpeechCommandPhrases.normalizedWakeWord)
+        add(SpeechCommandPhrases.normalizedCommand)
+        add(SpeechCommandPhrases.normalizedSentence)
+        addAll(listOf(
+            "열어", "줘", "해이", "페이", "브렁크", "프랑크",
+            "취소", "취소해", "취소해줘", "아니", "아니야", "안", "안돼", "말고",
+            "하지", "마", "하지마", "열지", "열지마", "마세요", "열지마세요", "열지말아줘", "트렁크",
+        ))
+        for (command in listOf("프렁크열지마", "트렁크열어줘")) {
+            add(command)
+            add(SpeechCommandPhrases.normalizedWakeWord + command)
+        }
+    }
     private val reasons = setOf(
         "FRUNK_VOICE_SOURCE_BLOCKED", "FRUNK_VOICE_GRAMMAR_BLOCKED", "FRUNK_VOICE_CANCELED",
         "FRUNK_VOICE_CONFIDENCE_BLOCKED", "FRUNK_VOICE_EXPIRED", "FRUNK_VOICE_FINAL_REQUIRED",

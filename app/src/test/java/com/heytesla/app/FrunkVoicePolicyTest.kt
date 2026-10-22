@@ -48,8 +48,8 @@ class FrunkVoicePolicyTest {
         }
     }
 
-    @Test fun confidenceMustBeObservedFiniteAndAtLeastThreshold() {
-        listOf(null, 0f, -1f, 0.849f, 1.01f, Float.NaN, Float.POSITIVE_INFINITY).forEach { score ->
+    @Test fun observedScoreMustBeFiniteAndAtLeastThreshold() {
+        listOf(0.849f, 1.01f).forEach { score ->
             val gate = policy()
             assertFalse(command(gate, score = score))
             assertFalse(gate.takeForDispatch(2_001, true))
@@ -57,23 +57,67 @@ class FrunkVoicePolicyTest {
         }
         val boundary = policy()
         assertTrue(command(boundary, score = FrunkVoicePolicy.MIN_CONFIDENCE))
+        assertEquals(FrunkVoicePolicy.MIN_CONFIDENCE, boundary.acceptedConfidence)
         assertTrue(boundary.takeForDispatch(2_001, true))
     }
 
-    @Test fun conflictingCandidatesAndMalformedScoreArraysCannotAuthorize() {
-        val candidates = policy()
-        assertFalse(candidates.command(1_000, SpeechTrialMode.DIRECT_MIC, true,
-            listOf("헤이테슬라프렁크열어줘", "헤이테슬라프렁크열지마"), floatArrayOf(0.99f, 0.99f)))
-        assertFalse(candidates.takeForDispatch(1_001, true))
-        listOf(floatArrayOf(), floatArrayOf(0.99f, 0.99f)).forEach { scores ->
+    @Test fun unavailableScoreSkipsGateButIsReportedAsUnavailable() {
+        listOf(null, 0f, -1f, Float.NaN, Float.POSITIVE_INFINITY).forEach { score ->
+            val gate = policy()
+            assertTrue(command(gate, score = score))
+            assertNull(gate.acceptedConfidence)
+            assertTrue(gate.takeForDispatch(2_001, true))
+        }
+    }
+
+    @Test fun anyExactHypothesisMatchesButItsOwnObservedScoreDecides() {
+        val lower = policy()
+        assertTrue(lower.command(1_000, SpeechTrialMode.DIRECT_MIC, true,
+            listOf("해이 테슬라 브렁크 열어 줘", "헤이 테슬라 프렁크 열어 줘"), floatArrayOf(0f, 0f)))
+        assertNull(lower.acceptedConfidence)
+        val scored = policy()
+        assertFalse(scored.command(1_000, SpeechTrialMode.DIRECT_MIC, true,
+            listOf("해이 테슬라 브렁크 열어 줘", "헤이 테슬라 프렁크 열어 줘"), floatArrayOf(0.99f, 0.5f)))
+        assertEquals("FRUNK_VOICE_CONFIDENCE_BLOCKED", scored.reason)
+        val passing = policy()
+        assertTrue(passing.command(1_000, SpeechTrialMode.DIRECT_MIC, true,
+            listOf("해이 테슬라 브렁크 열어 줘", "헤이 테슬라 프렁크 열어 줘"), floatArrayOf(0.5f, 0.9f)))
+        assertEquals(0.9f, passing.acceptedConfidence)
+    }
+
+    @Test fun cancelWordInAnyHypothesisStopsBeforeMatch() {
+        listOf("헤이테슬라프렁크열지마", "헤이 테슬라 프렁크 열어 줘 취소").forEach { lower ->
+            val gate = policy()
+            assertFalse(gate.command(1_000, SpeechTrialMode.DIRECT_MIC, true,
+                listOf("헤이테슬라프렁크열어줘", lower), floatArrayOf(0.99f, 0.99f)))
+            assertEquals("FRUNK_VOICE_CANCELED", gate.reason)
+            assertFalse(gate.takeForDispatch(1_001, true))
+        }
+    }
+
+    @Test fun malformedObservedScoresAndMissingCandidatesCannotAuthorize() {
+        listOf(floatArrayOf(0.99f, 0.99f), floatArrayOf(0.99f, 0.99f, 0.99f)).forEach { scores ->
             val gate = policy()
             assertFalse(gate.command(1_000, SpeechTrialMode.DIRECT_MIC, true,
                 listOf("헤이테슬라프렁크열어줘"), scores))
+            assertEquals("FRUNK_VOICE_CONFIDENCE_BLOCKED", gate.reason)
             assertFalse(gate.takeForDispatch(2_001, true))
         }
-        val missing = policy()
-        assertFalse(missing.command(1_000, SpeechTrialMode.DIRECT_MIC, true, null, floatArrayOf(0.99f)))
-        assertFalse(missing.takeForDispatch(1_001, true))
+        listOf(null, emptyList<String>()).forEach { candidates ->
+            val missing = policy()
+            assertFalse(missing.command(1_000, SpeechTrialMode.DIRECT_MIC, true, candidates, floatArrayOf(0.99f)))
+            assertEquals("FRUNK_VOICE_GRAMMAR_BLOCKED", missing.reason)
+            assertFalse(missing.takeForDispatch(1_001, true))
+        }
+    }
+
+    @Test fun observedAcousticVariantsAreNotPhoneticallyMerged() {
+        listOf("페이 테슬라 프렁크 열어 줘", "해이 테슬라 프렁크 열어 줘", "헤이 테슬라 브렁크 열어 줘",
+            "헤이 테슬라 프랑크 열어 줘", "헤이 테슬라 트렁크 열어 줘", "a 테슬라 프렁크 열어 줘").forEach { text ->
+            val gate = policy()
+            assertFalse(command(gate, text = text, score = 0f))
+            assertEquals("FRUNK_VOICE_GRAMMAR_BLOCKED", gate.reason)
+        }
     }
 
     @Test fun fullGrammarRejectsNegationRecallExtraWordsAndConfirmation() {

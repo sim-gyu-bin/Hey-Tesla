@@ -25,7 +25,7 @@ internal class AppActions(
     val cancelSupport: () -> Unit,
     val queryUwbSupport: () -> Unit,
     val cancelUwbSupport: () -> Unit,
-    /** 네 입력 모두 동일 STT→로컬 dry-run→입력 해제→오프라인 TTS 진단을 시작한다. */
+    /** 네 입력 모두 동일 STT→로컬 dry-run→입력 해제→오프라인 TTS 진단을 시작한다. 마이크 입력은 녹음·원문을 기본 저장한다. */
     val startTrial: (SpeechTrialMode) -> Unit,
     val finishCapture: () -> Unit,
     /** 인식·정리·TTS 어느 단계든 동일 소유권을 취소한다. 정리 불명 예약은 풀지 않는다. */

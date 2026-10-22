@@ -51,7 +51,7 @@ class SpeechCommandDecisionTest {
     }
 
     @Test fun overLengthSentenceHasNoDecision() {
-        val tooLong = SpeechCommandParser.WAKE_WORD + "가".repeat(SpeechCommandParser.MAX_NORMALIZED_LENGTH)
+        val tooLong = SpeechCommandPhrases.normalizedWakeWord + "가".repeat(SpeechCommandParser.MAX_NORMALIZED_LENGTH)
         assertNull(SpeechCommandParser.decide(tooLong))
     }
 
@@ -71,7 +71,7 @@ class SpeechCommandDecisionTest {
 
     @Test fun accumulatorOverflowRejectsDecisionAndStopsAccepting() {
         val accumulator = SpeechCommandAccumulator(maxLength = 8)
-        accumulator.appendNormalized(SpeechCommandParser.WAKE_WORD) // 5자
+        accumulator.appendNormalized(SpeechCommandPhrases.normalizedWakeWord) // 5자
         accumulator.appendNormalized("프렁크") // 5+3=8, 정확히 상한
         assertFalse(accumulator.overflowed)
         accumulator.appendNormalized("열어줘") // 상한 초과

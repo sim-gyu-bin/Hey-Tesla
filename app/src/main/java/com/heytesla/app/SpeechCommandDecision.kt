@@ -18,16 +18,13 @@ enum class SpeechCommandDecision {
 /**
  * 규칙 기반 문장 판정. Android에 의존하지 않는 순수 Kotlin이라 JVM 테스트에서 그대로 돌린다.
  *
- * 호출어는 **문장 시작의 정확한 '헤이 테슬라'** 만 허용한다. 공백·구두점 차이는 정규화로 흡수하지만
- * 유사 발음·문장 중간 문구·추측은 거절한다. 호출어 뒤 허용 명령도 정확한 '프렁크 열어줘' 하나뿐이며
- * 그 뒤에 글자가 더 붙으면 허용으로 승격하지 않는다.
+ * 호출어는 **문장 시작의 [SpeechCommandPhrases.displayWakeWord]와 정확히 일치**해야 한다.
+ * 공백·구두점 차이는 정규화로 흡수하지만 유사 발음·문장 중간 문구·추측은 거절한다.
+ * 호출어 뒤 허용 명령도 [SpeechCommandPhrases.displayCommand] 하나뿐이며 뒤에 글자가 더 붙으면 허용으로 승격하지 않는다.
  *
  * 판정에는 인식 원문을 담지 않으므로 호출부가 결과를 그대로 영속화해도 원문은 새지 않는다.
  */
 internal object SpeechCommandParser {
-    const val WAKE_WORD = "헤이테슬라"
-    const val FRUNK_COMMAND = "프렁크열어줘"
-
     /** 정규화 문자 수 상한. 넘으면 부분 채택·보충 없이 판정을 거절한다. */
     const val MAX_NORMALIZED_LENGTH = 128
 
@@ -46,11 +43,13 @@ internal object SpeechCommandParser {
 
     /** 이미 [normalize]한 문자열 판정. 조각 누적 경로가 쓴다. */
     fun decideNormalized(normalized: String): SpeechCommandDecision {
-        if (!normalized.startsWith(WAKE_WORD)) return SpeechCommandDecision.WAKE_MISSING
-        if (CANCEL_MARKERS.any { normalized.indexOf(it, WAKE_WORD.length) >= 0 }) return SpeechCommandDecision.COMMAND_CANCELED
-        if (normalized.length == WAKE_WORD.length) return SpeechCommandDecision.COMMAND_MISSING
-        return if (normalized.length == WAKE_WORD.length + FRUNK_COMMAND.length &&
-            normalized.regionMatches(WAKE_WORD.length, FRUNK_COMMAND, 0, FRUNK_COMMAND.length)) {
+        val wakeWord = SpeechCommandPhrases.normalizedWakeWord
+        if (!normalized.startsWith(wakeWord)) return SpeechCommandDecision.WAKE_MISSING
+        if (CANCEL_MARKERS.any { normalized.indexOf(it, wakeWord.length) >= 0 }) return SpeechCommandDecision.COMMAND_CANCELED
+        if (normalized.length == wakeWord.length) return SpeechCommandDecision.COMMAND_MISSING
+        val command = SpeechCommandPhrases.normalizedCommand
+        return if (normalized.length == wakeWord.length + command.length &&
+            normalized.regionMatches(wakeWord.length, command, 0, command.length)) {
             SpeechCommandDecision.FRUNK_OPEN_CANDIDATE
         } else {
             SpeechCommandDecision.COMMAND_UNSUPPORTED

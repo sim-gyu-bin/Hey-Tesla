@@ -1,0 +1,26 @@
+sherpa-onnx-zipformer-korean-2024-06-24 모델 고지
+
+모델: sherpa-onnx-zipformer-korean-2024-06-24 (icefall KsponSpeech zipformer transducer, int8)
+배포 출처: k2-fsa sherpa-onnx asr-models 릴리스
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-korean-2024-06-24.tar.bz2
+원 모델: Hugging Face johnBamma/icefall-asr-ksponspeech-zipformer-2024-06-24
+  https://huggingface.co/johnBamma/icefall-asr-ksponspeech-zipformer-2024-06-24
+모델 라이선스: Apache License 2.0 (원 모델 카드 표기 "license: apache-2.0")
+  Apache-2.0 전문은 같은 디렉터리의 sherpa-onnx-LICENSE와 동일하다.
+
+학습 데이터: KsponSpeech(AI Hub, 한국어 자유 대화 음성). 학습 데이터의 이용 조건은
+모델 라이선스와 별도로 AI Hub 약관이 적용될 수 있다. 이 앱은 학습 데이터를 포함하지 않는다.
+
+용도: Hey Tesla 개발자 진단(음성 인식 진단)의 실험용 그림자 인식에만 사용한다.
+차량 제어·명령 판정에는 사용하지 않는다. 오디오와 인식은 기기 안에서만 처리한다.
+
+포함 파일(assets/zipformer-ko/)과 SHA-256:
+  encoder-epoch-99-avg-1.int8.onnx  70,784,728 B  8b196d723421a0513c98ec25da2c43420c029e817f5e4a90b29ff80291c0af2b
+  decoder-epoch-99-avg-1.int8.onnx   2,844,692 B  2cc8c04ea080a657c18ebc59702e6b049cef08163eba5d68ac5bf707925cb0fb
+  joiner-epoch-99-avg-1.int8.onnx    2,581,421 B  eb654db1ea2cc9d63474855f65958b6059084692a9f2eb4f3812aceb1e416a20
+  tokens.txt                            60,246 B  016bdf0965029263b7ad01b742366ee542ef0bef38261510e8176ff6f2e9e668
+  bpe.vocab                            132,232 B  4dbdff57db7b1e00e8feba8637dec4d2606221f614ce44336c04fd20b07f4c0f
+
+bpe.vocab는 원본 bpe.model(314,212 B, SHA-256
+1491bc92c47dfda4225f5b8930fba3cfa34c3b1ccd25e7d96c630a262f3e918d)에서 sentencepiece로
+piece 순서대로 "piece<TAB>score" 행을 써서 만든 파생 파일이다(핫워드 BPE 분해용).

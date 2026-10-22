@@ -9,17 +9,34 @@ internal class FrunkVoicePolicy(private val deadline: Long, private val startedA
         private set
     var commandAcceptedAtElapsedMs: Long? = null
         private set
+    /** 채택 후보의 실제 점수. 엔진이 점수를 주지 않았으면(0.0·-1·없음) null이다. */
+    var acceptedConfidence: Float? = null
+        private set
 
+    /**
+     * Android STT n-best 중 하나라도 전체 문법과 정확히 같으면 채택한다. 어느 후보든 취소어가 있으면 먼저 멈춘다.
+     * 점수가 실제로 제공되면 채택 후보가 [MIN_CONFIDENCE] 이상이어야 하고, 제공되지 않으면 게이트를 생략한다.
+     */
     fun command(now: Long, source: SpeechTrialMode, final: Boolean,
         candidates: List<String>?, confidence: FloatArray?): Boolean {
         if (phase != Phase.COMMAND) return false
         if (!validTime(now)) return false
         if (source != SpeechTrialMode.DIRECT_MIC) return reject("FRUNK_VOICE_SOURCE_BLOCKED")
         if (!final) return false
-        val text = exactCandidate(candidates) ?: return reject("FRUNK_VOICE_GRAMMAR_BLOCKED")
-        if (text == "취소") return reject("FRUNK_VOICE_CANCELED")
-        if (!confident(confidence)) return reject("FRUNK_VOICE_CONFIDENCE_BLOCKED")
-        if (text != "헤이테슬라프렁크열어줘") return reject("FRUNK_VOICE_GRAMMAR_BLOCKED")
+        if (candidates.isNullOrEmpty()) return reject("FRUNK_VOICE_GRAMMAR_BLOCKED")
+        // 전체 허용 문법만 비교한다. 공백·구두점 외의 부정·추가어는 제거하지 않는다.
+        val normalized = candidates.map(SpeechCommandParser::normalize)
+        if (normalized.any { text -> CANCEL_WORDS.any(text::contains) }) return reject("FRUNK_VOICE_CANCELED")
+        val index = candidates.indices.firstOrNull {
+            candidates[it].length <= SpeechCommandParser.MAX_NORMALIZED_LENGTH &&
+                normalized[it] == SpeechCommandPhrases.normalizedSentence
+        } ?: return reject("FRUNK_VOICE_GRAMMAR_BLOCKED")
+        val score = if (confidence != null && scoresAvailable(confidence)) {
+            if (confidence.size != candidates.size) return reject("FRUNK_VOICE_CONFIDENCE_BLOCKED")
+            confidence[index].takeIf { it.isFinite() && it in MIN_CONFIDENCE..1f }
+                ?: return reject("FRUNK_VOICE_CONFIDENCE_BLOCKED")
+        } else null
+        acceptedConfidence = score
         commandAcceptedAtElapsedMs = now
         phase = Phase.ACCEPTED
         return true
@@ -56,21 +73,14 @@ internal class FrunkVoicePolicy(private val deadline: Long, private val startedA
         return false
     }
 
-    private fun exactCandidate(candidates: List<String>?): String? {
-        val text = candidates?.singleOrNull() ?: return null
-        if (text.length > SpeechCommandParser.MAX_NORMALIZED_LENGTH) return null
-        // 전체 허용 문법만 비교한다. 공백·구두점 외의 부정·추가어는 제거하지 않는다.
-        return SpeechCommandParser.normalize(text)
-    }
-
-    private fun confident(scores: FloatArray?): Boolean = scores?.singleOrNull()?.let {
-        it.isFinite() && it in MIN_CONFIDENCE..1f
-    } == true
-
     companion object {
         const val MIN_CONFIDENCE = 0.85f
         const val COMMAND_MS = 10_000L
         const val HANDOFF_MS = 5_000L
+        private val CANCEL_WORDS = listOf("취소", "열지마")
+
+        /** CONFIDENCE_SCORES는 선택 값이며 미제공은 -1, 이 기기 온디바이스 엔진은 항상 0.0을 준다. 양수 유한값만 실제 점수로 본다. */
+        fun scoresAvailable(scores: FloatArray?): Boolean = scores != null && scores.any { it.isFinite() && it > 0f }
     }
 }
 
@@ -115,6 +125,8 @@ data class FrunkVoiceState(
     val active: Boolean = false,
     val reason: String? = null,
     val commandConfidence: Float? = null,
+    val recordingId: String? = null,
+    val recordingFailure: Boolean = false,
     val inputReleased: Boolean = true,
     val coreStarted: Boolean = false,
     val cancelRequested: Boolean = false,
@@ -127,6 +139,11 @@ data class FrunkVoiceState(
     val coreOutcome: TeslaKeyOutcome? = null,
     /** active였던 마지막 실제 위치. 종료·실패 시 어디까지 갔는지 보여준다. */
     val lastCoreStep: FrunkVoiceStep? = null,
+    /** 이번 회차 인식 원문 후보. 화면 표시 전용 RAM 상태이며 다음 시험 시작 시 새 상태로 지워진다. */
+    val transcript: SttTranscript? = null,
+    /** transcript 판정 시점의 정책 결과. 인정도 차량 실행 허가가 아니며, 차단이면 사유를 함께 둔다. */
+    val transcriptAccepted: Boolean = false,
+    val transcriptReason: String? = null,
 )
 
 /** 종료 뒤에도 마지막 실제 단계와 사유를 남긴다. 성공 표시는 관측된 단계에서만 나온다. */
@@ -169,7 +186,7 @@ internal fun FrunkVoiceState.activeCoreStep(): FrunkVoiceStep = when (coreStage)
 /** 원시 코드를 사용자 문장으로 바꾼다. 모르는 코드는 숨기지 않고 그대로 남긴다. */
 internal fun frunkVoiceReasonLabel(code: String): String = when (code) {
     "FRUNK_VOICE_CONSENT_REQUIRED" -> "시험 동의가 없어 시작하지 않았습니다."
-    "FRUNK_VOICE_MODEL_REQUIRED" -> "온디바이스 한국어 모델을 확인하지 못했습니다."
+    "FRUNK_VOICE_MODEL_REQUIRED" -> "온디바이스 한국어 음성 인식을 확인하지 못했습니다."
     "FRUNK_VOICE_ADMISSION_BLOCKED" -> "다른 진단·정리 상태 때문에 시작할 수 없습니다."
     "FRUNK_VOICE_SOURCE_BLOCKED" -> "마이크 외 입력은 차단했습니다."
     "FRUNK_VOICE_GRAMMAR_BLOCKED", "FRUNK_VOICE_FINAL_REQUIRED" -> "최종 전체 문법 미충족 · 실차 요청 미전송"

@@ -10,3 +10,9 @@ local.properties
 
 # 기기 진단 로그 로컬 백업 — 저장소에 업로드하지 않음
 /.local-backups/
+
+# 로컬 모델·런타임(sherpa-onnx AAR·zipformer asset, tools/prepare_sherpa_ko.py로 준비; moonshine-ko 보존)
+/.local-models/
+
+# 명시적으로 동의한 개발 시험 녹음·원문 회수물
+/.local-recordings/

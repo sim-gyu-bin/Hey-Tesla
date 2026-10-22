@@ -2,33 +2,16 @@ package com.heytesla.app
 
 import android.Manifest
 import android.content.Context
-import android.content.Intent
-import android.media.AudioFormat
-import android.media.AudioManager
-import android.media.AudioRecord
-import android.media.AudioRecordingConfiguration
-import android.media.MediaRecorder
-import android.os.Bundle
 import android.os.Looper
-import android.os.ParcelFileDescriptor
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.system.ErrnoException
-import android.system.Os
-import android.system.OsConstants
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 
 internal enum class SpeechTrialMode(val label: String) {
     DIRECT_MIC("온디바이스 직접 마이크"), BUFFERED_PCM("RAM PCM 인계"),
@@ -52,7 +35,9 @@ internal data class SpeechTrialState(
     val phraseMatched: Boolean? = null,
     val confidence: Float? = null,
     val elapsedMs: Long? = null,
-    /** 최종 결과가 있을 때만 채워지는 진단 판정. 원문·인식 결과 문자열은 담지 않는다. */
+    val recordingId: String? = null,
+    val recordingFailure: Boolean = false,
+    /** 최종 결과가 있을 때만 채워지는 진단 판정. */
     val decision: SpeechCommandDecision? = null,
     val commandResult: DiagnosticCommandResult = DiagnosticCommandResult.NOT_ATTEMPTED,
     val responseStatus: SpeechResponseStatus = SpeechResponseStatus.NOT_STARTED,
@@ -62,9 +47,20 @@ internal data class SpeechTrialState(
     val audioFocusReleased: Boolean = true,
     val offlineVoiceSelected: Boolean = false,
     val responseCleanupFailed: Boolean = false,
+    /** 사용자 중단이 아닌 회차의 인식 원문 후보. 화면 표시 전용 RAM 상태이며 요약·이벤트·파일에 넣지 않는다. */
+    val transcript: SttTranscript? = null,
+    /** sherpa-onnx 그림자 인식. transcript와 같은 RAM 전용 규칙이며 명령 판정에 쓰지 않는다. */
+    val shadow: ShadowTranscript? = null,
 )
 
-/** 원문은 콜백 안에서만 비교한다. 단일 세션은 worker와 RAM 정리까지 lease를 소유한다. */
+/**
+ * 진단 네 모드 모두 RAM에 모은 16 kHz mono PCM16을 Android 온디바이스 SpeechRecognizer(ko-KR)에
+ * segmented pipe로 넘긴다. 직접 마이크도 실시간 partial이 아니라 캡처 종료·입력 해제 뒤에만 인식한다.
+ * 마이크 입력 시험은 별도 체크 없이 녹음·1순위 결과를 전용 파일로 보관하고, 합성·무음 파일 입력은
+ * 저장하지 않는다. 엔진 점수 0.0·-1 같은 무효값은 null로 두고 만들지 않는다. 원문 n-best 앞쪽 3개는
+ * 다음 시험 시작 전까지 화면 RAM 상태로만 둔다. 같은 PCM을 sherpa-onnx 한국어 모델로 한 번 더 인식한
+ * 그림자 결과도 같은 규칙으로 화면에만 두며, 명령 판정·dry-run·요약에는 Android 결과만 쓴다.
+ */
 internal class SpeechRecognitionProbe(
     context: Context,
     private val state: MutableStateFlow<SpeechTrialState>,
@@ -77,28 +73,22 @@ internal class SpeechRecognitionProbe(
     private val gateway = DryRunVehicleGateway()
 
     private class Trial(val mode: SpeechTrialMode, val started: Long, val session: SessionPolicy.Session) {
+        /** 수동 마이크 시험만 PCM·최종 원문을 저장한다. 합성·무음 파일 입력은 제외한다. */
+        val savesRecording = mode == SpeechTrialMode.DIRECT_MIC || mode == SpeechTrialMode.BUFFERED_PCM
         val command = DiagnosticCommandPolicy(session.deadline)
         var response: SpeechResponse? = null
         var finished = false
         val canceled = AtomicBoolean(false)
         val finishCapture = AtomicBoolean(false)
-        val stopWriter = AtomicBoolean(false)
-        val captureFailure = AtomicReference<String?>(null)
-        val cleanupFailures = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        val cleanupFailures = ConcurrentLinkedQueue<String>()
         val releaseUncertain = AtomicBoolean(false)
-        val result = CompletableDeferred<Outcome>()
-        var cleaning = false
-        var recognizer: SpeechRecognizer? = null
         var pcm: ByteArray? = null
         var size = 0
-        var written = 0
-        var pipe: Array<ParcelFileDescriptor>? = null
-        var writer: Job? = null
-        var segmentCount = 0
-        var segmentCharacters = 0
-        var segmentsMatch = true
-        var segmentConfidence: Float? = null
-        val accumulated = SpeechCommandAccumulator()
+        var acceptedBytes = 0
+        var recordingId: String? = null
+        var recordingFailure = false
+        /** 마이크·파일 입력이 실제로 해제됐는지. 인식기·TTS 정리 결과와 분리한다. */
+        var inputReleased = false
     }
 
     private data class Outcome(
@@ -108,8 +98,13 @@ internal class SpeechRecognitionProbe(
         val matched: Boolean? = null,
         val confidence: Float? = null,
         val decision: SpeechCommandDecision? = null,
+        val transcript: SttTranscript? = null,
+        val shadow: ShadowTranscript? = null,
     )
 
+    /**
+     * @param koKrInstalled ko-KR 온디바이스 인식 지원 조회가 완료됐고 설치로 보고됐는지.
+     */
     fun start(mode: SpeechTrialMode, koKrInstalled: Boolean) {
         mainThread()
         if (restartRequired) { runtime.event("SPEECH_TRIAL_RESTART_REQUIRED"); return }
@@ -136,68 +131,56 @@ internal class SpeechRecognitionProbe(
         scope.launch { runTrial(trial) }
     }
 
+    /** 직접 마이크 캡처만 수동 종료한다. 파일 PCM 모드는 이미 캡처가 끝났으므로 무시된다. */
     fun finishCapture() {
         mainThread()
         val trial = current ?: return
         if (!accepts(trial)) return
-        if (trial.mode == SpeechTrialMode.BUFFERED_PCM) {
-            trial.finishCapture.set(true)
-        } else if (state.value.status == SpeechTrialStatus.CAPTURING) {
-            try {
-                trial.recognizer?.stopListening()
-                publish(trial, SpeechTrialStatus.RECOGNIZING)
-            } catch (_: Exception) { trial.result.complete(failure("STOP_FAILED")) }
-        }
+        trial.finishCapture.set(true)
     }
 
     fun cancel() {
         mainThread()
         val trial = current ?: return
         if (trial.finished) return
-        // 먼저 콜백을 무효화한다. worker와 버퍼는 runTrial의 finally만 정리한다.
+        // 콜백·진행 보고를 먼저 봉인한다. 인식기·버퍼·lease 해제는 worker의 finally만 한다.
         trial.canceled.set(true)
         trial.command.cancel()
-        trial.stopWriter.set(true)
+        trial.finishCapture.set(true)
         state.value = state.value.copy(status = SpeechTrialStatus.CLEANING)
-        trial.result.complete(Outcome(SpeechTrialStatus.CANCELED, "USER_CANCELED"))
         trial.response?.cancel()
     }
 
     private suspend fun runTrial(trial: Trial) {
         var outcome = failure("INTERNAL_FAILURE")
         var response = SpeechResponseOutcome()
-        var inputReleased = false
         try {
-            if (trial.mode == SpeechTrialMode.BUFFERED_PCM) {
-                trial.pcm = ByteArray(MAX_BYTES)
-                val captureError = withContext(Dispatchers.IO) { capture(trial) }
-                if (captureError != null) trial.result.complete(failure(captureError))
-                if (trial.size == 0) trial.result.complete(failure("EMPTY_PCM"))
+            val captureFailure: String? = when (trial.mode) {
+                SpeechTrialMode.DIRECT_MIC, SpeechTrialMode.BUFFERED_PCM -> captureMicrophone(trial)
+                SpeechTrialMode.TTS_PCM, SpeechTrialMode.SILENT_PCM ->
+                    withContext(Dispatchers.IO) { loadFixture(trial) }
             }
-            if (trial.mode == SpeechTrialMode.TTS_PCM || trial.mode == SpeechTrialMode.SILENT_PCM) {
-                val fixtureError = withContext(Dispatchers.IO) { loadFixture(trial) }
-                if (fixtureError != null) trial.result.complete(failure(fixtureError))
-            }
-            trial.captureFailure.get()?.let { trial.result.complete(failure(it)) }
-            if (accepts(trial)) state.value = state.value.copy(samples = trial.size / 2L)
-            if (accepts(trial)) {
-                if (!runtime.activityVisible || !runtime.granted(Manifest.permission.RECORD_AUDIO)) {
-                    trial.result.complete(failure("MIC_PREREQUISITE_LOST"))
-                } else {
-                    recognize(trial)
-                }
-            }
-            outcome = withTimeoutOrNull(LIMIT_MS) {
-                while (!trial.result.isCompleted) {
-                    if (runtime.now() >= trial.session.deadline) {
-                        trial.result.complete(Outcome(SpeechTrialStatus.TIMED_OUT, "SESSION_EXPIRED"))
-                    } else if (!runtime.activityVisible || !runtime.granted(Manifest.permission.RECORD_AUDIO)) {
-                        trial.result.complete(failure("MIC_PREREQUISITE_LOST"))
+            if (captureFailure == null && trial.size > 0 && trial.savesRecording && !trial.canceled.get()) {
+                try {
+                    trial.recordingId = withContext(Dispatchers.IO) {
+                        SpeechRecordingStore(app).save(checkNotNull(trial.pcm), trial.size).id
                     }
-                    delay(25)
+                } catch (_: Exception) {
+                    trial.recordingFailure = true
                 }
-                trial.result.await()
-            } ?: Outcome(SpeechTrialStatus.TIMED_OUT, "RECOGNITION_TIMEOUT")
+            }
+            if (accepts(trial)) {
+                state.value = state.value.copy(samples = trial.size / 2L)
+            }
+            outcome = when {
+                captureFailure == "USER_CANCELED" || trial.canceled.get() ->
+                    Outcome(SpeechTrialStatus.CANCELED, "USER_CANCELED")
+                captureFailure != null -> failure(captureFailure)
+                trial.size == 0 -> failure("EMPTY_PCM")
+                !runtime.activityVisible || !runtime.granted(Manifest.permission.RECORD_AUDIO) ->
+                    failure("MIC_PREREQUISITE_LOST")
+                else -> recognize(trial)
+            }
         } catch (_: Exception) {
             outcome = failure("API_FAILURE")
         } finally {
@@ -212,42 +195,20 @@ internal class SpeechRecognitionProbe(
                 gateway,
             )
             state.value = state.value.copy(commandResult = commandResult)
-            trial.cleaning = true
-            trial.stopWriter.set(true)
             state.value = state.value.copy(status = SpeechTrialStatus.CLEANING)
-            try { trial.recognizer?.cancel() }
-            catch (_: Exception) { trial.cleanupFailures.add("RECOGNIZER_CANCEL_FAILED") }
-            try { trial.recognizer?.destroy() }
-            catch (_: Exception) {
-                trial.cleanupFailures.add("RECOGNIZER_DESTROY_FAILED")
-                trial.releaseUncertain.set(true)
-            }
-            trial.recognizer = null
-            // AudioRecord는 capture의 finally에서 해제됨. writer 종료→FD close→PCM 영점화 순서를 지킨다.
-            trial.writer?.join()
-            withContext(Dispatchers.IO) {
-                trial.pipe?.forEachIndexed { index, descriptor ->
-                    try { descriptor.close() }
-                    catch (_: Exception) {
-                        trial.cleanupFailures.add(if (index == 0) "PCM_READ_FD_CLOSE_FAILED" else "PCM_WRITE_FD_CLOSE_FAILED")
-                        trial.releaseUncertain.set(true)
-                    }
-                }
-                trial.pcm?.fill(0)
-            }
-            trial.pipe = null
+            val pcm = trial.pcm
             trial.pcm = null
-            trial.accumulated.clear()
-            inputReleased = trial.cleanupFailures.isEmpty() && !trial.releaseUncertain.get()
+            if (pcm != null) withContext(Dispatchers.IO) { pcm.fill(0) }
         }
 
-        if (inputReleased && interruption(trial) == null) {
+        if (trial.inputReleased && trial.cleanupFailures.isEmpty() && !trial.releaseUncertain.get() &&
+            interruption(trial) == null) {
             val speaker = SpeechResponse(app, "diagnostic-${trial.session.id}")
             trial.response = speaker
             response = speaker.speak(trial.command.result, { interruption(trial) }) { status ->
                 state.value = state.value.copy(
                     status = if (status == SpeechResponseStatus.INITIALIZING) SpeechTrialStatus.RESPONSE_INITIALIZING else SpeechTrialStatus.RESPONDING,
-                    responseStatus = status, inputReleased = true,
+                    responseStatus = status, inputReleased = trial.inputReleased,
                     outputReleased = false, audioFocusReleased = status != SpeechResponseStatus.SPEAKING,
                     offlineVoiceSelected = status == SpeechResponseStatus.SPEAKING,
                 )
@@ -287,13 +248,14 @@ internal class SpeechRecognitionProbe(
         trial.finished = true
         state.value = SpeechTrialState(
             status = outcome.status, mode = trial.mode, reason = outcome.reason,
-            samples = trial.size / 2L, pcmBytesWritten = trial.written,
+            samples = trial.size / 2L, pcmBytesWritten = trial.acceptedBytes,
             finalReceived = outcome.finalReceived, phraseMatched = outcome.matched,
             confidence = outcome.confidence, elapsedMs = elapsed, decision = outcome.decision,
+            recordingId = trial.recordingId, recordingFailure = trial.recordingFailure,
             commandResult = trial.command.result, responseStatus = response.status, responseReason = response.reason,
-            inputReleased = inputReleased, outputReleased = response.outputReleased,
+            inputReleased = trial.inputReleased, outputReleased = response.outputReleased,
             audioFocusReleased = response.audioFocusReleased, offlineVoiceSelected = response.offlineVoiceSelected,
-            responseCleanupFailed = response.cleanupFailed,
+            responseCleanupFailed = response.cleanupFailed, transcript = outcome.transcript, shadow = outcome.shadow,
         )
         restartRequired = trial.releaseUncertain.get()
         // current와 lease는 STT부터 TTS 완료·정리까지 유지한다. 해제 불명은 재시작 외에 풀지 않는다.
@@ -307,13 +269,130 @@ internal class SpeechRecognitionProbe(
                 mode = trial.mode.name, status = outcome.status.name, reason = outcome.reason,
                 finalReceived = outcome.finalReceived, phraseMatched = outcome.matched,
                 confidence = outcome.confidence, elapsedMs = elapsed,
-                samples = trial.size / 2L, pcmBytesWritten = trial.written,
+                samples = trial.size / 2L, pcmBytesWritten = trial.acceptedBytes,
                 audioLeaseRetained = restartRequired, decision = outcome.decision,
                 commandResult = trial.command.result, responseStatus = response.status, responseReason = response.reason,
-                inputReleased = inputReleased, outputReleased = response.outputReleased,
+                inputReleased = trial.inputReleased, outputReleased = response.outputReleased,
                 audioFocusReleased = response.audioFocusReleased, offlineVoiceSelected = response.offlineVoiceSelected,
                 responseCleanupFailed = response.cleanupFailed,
             ),
+        )
+    }
+
+    /**
+     * 제한된 RAM 버퍼로 직접 마이크를 캡처한다. 반환 시 AudioRecord는 이미 해제됐고,
+     * 호출자는 이 반환 뒤에만 인식을 시작한다. 캡처 실패는 고정 비민감 코드다.
+     */
+    private suspend fun captureMicrophone(trial: Trial): String? {
+        val buffer = ByteArray(MAX_BYTES)
+        trial.pcm = buffer
+        if (trial.canceled.get()) {
+            trial.inputReleased = true
+            return "USER_CANCELED"
+        }
+        publish(trial, SpeechTrialStatus.CAPTURING)
+        val captured = withContext(Dispatchers.IO) {
+            SpeechMicCapture.capture(
+                context = app,
+                pcm = buffer,
+                deadlineElapsed = trial.started + LIMIT_MS,
+                canceled = trial.canceled,
+                finish = trial.finishCapture,
+                stopReason = { null },
+                silenceStopMs = 0,
+                progress = { count ->
+                    withContext(Dispatchers.Main.immediate) {
+                        if (accepts(trial)) {
+                            state.value = state.value.copy(samples = count / 2L)
+                        }
+                    }
+                },
+            )
+        }
+        trial.size = captured.bytes
+        captured.cleanupFailures.forEach { trial.cleanupFailures.add(it) }
+        if (captured.releaseUncertain) trial.releaseUncertain.set(true)
+        trial.inputReleased = captured.cleanupFailures.isEmpty() && !captured.releaseUncertain
+        return captured.failure
+    }
+
+    /**
+     * PCM 전체를 Android 온디바이스 인식기에 넘긴다. 인식기는 마이크를 열지 않는다.
+     * 취소·화면 이탈·세션 만료는 인식기 대기를 즉시 끊고 결과를 쓰지 않는다.
+     */
+    private suspend fun recognize(trial: Trial): Outcome {
+        if (accepts(trial)) {
+            state.value = state.value.copy(samples = trial.size / 2L)
+        }
+        publish(trial, SpeechTrialStatus.RECOGNIZING)
+        val pcm = trial.pcm ?: return failure("EMPTY_PCM")
+        val recognized = AndroidPcmRecognizer(app).recognize(pcm, trial.size, RECOGNITION_TIMEOUT_MS) {
+            trial.canceled.get() || !runtime.activityVisible || runtime.now() >= trial.session.deadline
+        }
+        trial.acceptedBytes = recognized.acceptedBytes
+        recognized.cleanupFailures.forEach { trial.cleanupFailures.add(it) }
+        if (recognized.releaseUncertain) trial.releaseUncertain.set(true)
+        val candidates = recognized.candidates
+        trial.recordingId?.let { id ->
+            try {
+                withContext(Dispatchers.IO) {
+                    SpeechRecordingStore(app).saveResult(
+                        id, candidates.firstOrNull()?.text, recognized.failure, runtime.now() - trial.started,
+                    )
+                }
+            } catch (_: Exception) {
+                trial.recordingFailure = true
+            }
+        }
+        if (accepts(trial)) {
+            state.value = state.value.copy(pcmBytesWritten = recognized.acceptedBytes)
+        }
+        val outcome = when {
+            trial.canceled.get() || !runtime.activityVisible -> Outcome(SpeechTrialStatus.CANCELED, "USER_CANCELED")
+            runtime.now() >= trial.session.deadline -> Outcome(SpeechTrialStatus.TIMED_OUT, "SESSION_EXPIRED")
+            recognized.failure == "RECOGNITION_TIMEOUT" -> Outcome(SpeechTrialStatus.TIMED_OUT, "RECOGNITION_TIMEOUT")
+            recognized.failure != null -> failure(recognized.failure)
+            else -> recognitionOutcome(recognized.segments.size, candidates)
+        }
+        // 사용자 중단 회차는 원문을 화면에도 올리지 않는다. 실패·만료 회차는 받은 후보를 그대로 보여 준다.
+        if (outcome.status == SpeechTrialStatus.CANCELED) return outcome
+        val shadow = shadowTranscript(trial, pcm)
+        return outcome.copy(transcript = SttTranscript.of(candidates), shadow = shadow)
+    }
+
+    /**
+     * Android 결과 뒤 같은 PCM을 sherpa-onnx로 인식한다. 취소·화면 이탈·만료면 시작하지 않고,
+     * 인식 중 만료되면 결과를 버린다. 네이티브 인식은 중간에 끊을 수 없어 취소는 인식이 끝난 뒤 반영된다.
+     */
+    private suspend fun shadowTranscript(trial: Trial, pcm: ByteArray): ShadowTranscript? {
+        fun stopped() = trial.canceled.get() || !runtime.activityVisible || runtime.now() >= trial.session.deadline
+        if (stopped()) return null
+        val shadow = withContext(Dispatchers.Default) { SherpaShadowRecognizer.decode(app.assets, pcm, trial.size) }
+        return if (stopped()) null else shadow.judged(SpeechCommandPhrases.normalizedSentence)
+    }
+
+    /**
+     * n-best 중 하나라도 기대 문장과 같으면 일치로 본다. 판정은 어느 후보든 취소면 취소,
+     * 아니면 명령 후보가 있으면 후보, 그 외에는 1순위 판정이다. 점수는 (0, 1] 유한값만 남긴다.
+     */
+    private fun recognitionOutcome(segments: Int, candidates: List<SttHypothesis>): Outcome {
+        val normalized = candidates.map { SpeechCommandParser.normalize(it.text) }
+        val first = normalized.indexOfFirst { it.isNotEmpty() }
+        if (first < 0) return failure("NO_FINAL_RESULT")
+        val matched = normalized.indexOf(SpeechCommandPhrases.normalizedSentence)
+        val picked = if (matched >= 0) matched else first
+        val decisions = normalized.filter { it.isNotEmpty() && it.length <= SpeechCommandParser.MAX_NORMALIZED_LENGTH }
+            .map(SpeechCommandParser::decideNormalized)
+        val decision = when {
+            SpeechCommandDecision.COMMAND_CANCELED in decisions -> SpeechCommandDecision.COMMAND_CANCELED
+            SpeechCommandDecision.FRUNK_OPEN_CANDIDATE in decisions -> SpeechCommandDecision.FRUNK_OPEN_CANDIDATE
+            normalized[first].length <= SpeechCommandParser.MAX_NORMALIZED_LENGTH ->
+                SpeechCommandParser.decideNormalized(normalized[first])
+            else -> null
+        }
+        return Outcome(
+            SpeechTrialStatus.COMPLETE, if (segments <= 1) "FINAL_RECEIVED" else "SEGMENTS_RECEIVED_$segments", true,
+            matched >= 0, candidates[picked].confidence?.takeIf { it.isFinite() && it > 0f && it <= 1f }, decision,
         )
     }
 
@@ -343,6 +422,7 @@ internal class SpeechRecognitionProbe(
 
     private fun loadFixture(trial: Trial): String? {
         var input: java.io.InputStream? = null
+        trial.inputReleased = true
         return try {
             if (trial.canceled.get()) return "USER_CANCELED"
             val pcm = ByteArray(MAX_BYTES)
@@ -359,200 +439,7 @@ internal class SpeechRecognitionProbe(
             catch (_: Exception) {
                 trial.cleanupFailures.add("PCM_FIXTURE_CLOSE_FAILED")
                 trial.releaseUncertain.set(true)
-                trial.result.complete(failure("PCM_FIXTURE_CLOSE_FAILED"))
-            }
-        }
-    }
-
-    private suspend fun capture(trial: Trial): String? {
-        var record: AudioRecord? = null
-        var observer: AudioManager.AudioRecordingCallback? = null
-        var error: String? = null
-        try {
-            if (trial.canceled.get()) return "USER_CANCELED"
-            if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) return "MIC_PERMISSION_REVOKED"
-            val min = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-            if (min <= 0) return "AUDIO_FORMAT_UNAVAILABLE"
-            val audio = AudioRecord.Builder()
-                .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
-                .setAudioFormat(AudioFormat.Builder().setSampleRate(RATE).setChannelMask(AudioFormat.CHANNEL_IN_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
-                .setBufferSizeInBytes(maxOf(min, 6_400)).build()
-            record = audio
-            check(audio.state == AudioRecord.STATE_INITIALIZED)
-            val audioSessionId = audio.audioSessionId
-            val callback = object : AudioManager.AudioRecordingCallback() {
-                override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>) {
-                    if (configs.any { it.clientAudioSessionId == audioSessionId && it.isClientSilenced }) {
-                        trial.captureFailure.compareAndSet(null, "INPUT_SILENCED")
-                        if (accepts(trial)) trial.result.complete(failure("INPUT_SILENCED"))
-                    }
-                }
-            }
-            observer = callback
-            audio.registerAudioRecordingCallback(app.mainExecutor, callback)
-            if (trial.canceled.get()) return "USER_CANCELED"
-            audio.startRecording()
-            check(audio.recordingState == AudioRecord.RECORDSTATE_RECORDING)
-            val deadline = runtime.now() + LIMIT_MS
-            withContext(Dispatchers.Main.immediate) { publish(trial, SpeechTrialStatus.CAPTURING) }
-            val pcm = checkNotNull(trial.pcm)
-            var lastReport = runtime.now()
-            while (!trial.canceled.get() && !trial.finishCapture.get() && trial.size < MAX_BYTES && runtime.now() < deadline) {
-                if (!runtime.granted(Manifest.permission.RECORD_AUDIO)) { error = "MIC_PERMISSION_REVOKED"; break }
-                if (audio.activeRecordingConfiguration?.isClientSilenced == true) trial.captureFailure.compareAndSet(null, "INPUT_SILENCED")
-                trial.captureFailure.get()?.let { error = it }
-                if (error != null) break
-                val count = audio.read(pcm, trial.size, minOf(3_200, MAX_BYTES - trial.size), AudioRecord.READ_NON_BLOCKING)
-                if (count < 0 || count % 2 != 0) { error = "AUDIO_READ_FAILED"; break }
-                trial.size += count
-                val now = runtime.now()
-                if (now - lastReport >= 250) {
-                    withContext(Dispatchers.Main.immediate) {
-                        if (accepts(trial)) state.value = state.value.copy(samples = trial.size / 2L)
-                    }
-                    lastReport = now
-                }
-                delay(10)
-            }
-            if (!runtime.granted(Manifest.permission.RECORD_AUDIO)) error = "MIC_PERMISSION_REVOKED"
-            if (audio.activeRecordingConfiguration?.isClientSilenced == true) error = "INPUT_SILENCED"
-        } catch (_: SecurityException) {
-            error = "MIC_PERMISSION_REVOKED"
-        } catch (_: Exception) {
-            error = "AUDIO_CAPTURE_FAILED"
-        } finally {
-            val audio = record
-            if (audio != null) {
-                try { if (audio.recordingState == AudioRecord.RECORDSTATE_RECORDING) audio.stop() }
-                catch (_: Exception) {
-                    error = "AUDIO_STOP_FAILED"
-                    trial.cleanupFailures.add("AUDIO_STOP_FAILED")
-                }
-                try { observer?.let { audio.unregisterAudioRecordingCallback(it) } }
-                catch (_: Exception) {
-                    error = "AUDIO_CALLBACK_RELEASE_FAILED"
-                    trial.cleanupFailures.add("AUDIO_CALLBACK_RELEASE_FAILED")
-                }
-                try { audio.release() }
-                catch (_: Exception) {
-                    error = "AUDIO_RELEASE_FAILED"
-                    trial.cleanupFailures.add("AUDIO_RELEASE_FAILED")
-                    trial.releaseUncertain.set(true)
-                }
-            }
-        }
-        return trial.captureFailure.get() ?: error
-    }
-
-    private fun recognize(trial: Trial) {
-        mainThread()
-        val recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(app)
-        trial.recognizer = recognizer
-        recognizer.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                publish(trial, if (trial.mode == SpeechTrialMode.DIRECT_MIC) SpeechTrialStatus.CAPTURING else SpeechTrialStatus.RECOGNIZING)
-            }
-            override fun onBeginningOfSpeech() { }
-            override fun onRmsChanged(rmsdB: Float) { }
-            override fun onBufferReceived(buffer: ByteArray?) { }
-            override fun onEndOfSpeech() { publish(trial, SpeechTrialStatus.RECOGNIZING) }
-            override fun onError(error: Int) {
-                if (accepts(trial)) trial.result.complete(failure("RECOGNIZER_ERROR_$error"))
-            }
-            override fun onResults(results: Bundle?) {
-                if (!accepts(trial)) return
-                val first = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                if (first.isNullOrBlank()) { finishSegments(); return }
-                val confidence = results.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)?.firstOrNull()
-                    ?.takeIf { it.isFinite() && it in 0f..1f }
-                val normalized = SpeechCommandParser.normalize(first)
-                trial.result.complete(Outcome(SpeechTrialStatus.COMPLETE, "FINAL_RECEIVED", true,
-                    normalized == EXPECTED_TEXT, confidence,
-                    if (normalized.length <= SpeechCommandParser.MAX_NORMALIZED_LENGTH)
-                        SpeechCommandParser.decideNormalized(normalized) else null))
-            }
-            override fun onSegmentResults(segmentResults: Bundle) {
-                if (!accepts(trial)) return
-                val first = segmentResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                if (first.isNullOrBlank()) return
-                val normalized = SpeechCommandParser.normalize(first)
-                // 원문은 보관하지 않고 순서·길이가 일치하는지만 누적한다.
-                trial.segmentsMatch = trial.segmentsMatch &&
-                    normalized.length <= EXPECTED_TEXT.length - trial.segmentCharacters &&
-                    EXPECTED_TEXT.regionMatches(trial.segmentCharacters, normalized, 0, normalized.length)
-                trial.segmentCharacters = minOf(EXPECTED_TEXT.length + 1, trial.segmentCharacters + normalized.length)
-                trial.segmentCount++
-                trial.accumulated.appendNormalized(normalized)
-                trial.segmentConfidence = if (trial.segmentCount == 1) {
-                    segmentResults.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)?.firstOrNull()
-                        ?.takeIf { it.isFinite() && it in 0f..1f }
-                } else null // 서로 다른 구간의 점수를 문장 전체 신뢰도로 합성하지 않는다.
-            }
-            override fun onEndOfSegmentedSession() = finishSegments()
-            private fun finishSegments() {
-                if (!accepts(trial)) return
-                if (trial.segmentCount == 0) {
-                    trial.result.complete(failure("NO_FINAL_RESULT"))
-                } else {
-                    trial.result.complete(Outcome(
-                        SpeechTrialStatus.COMPLETE, "SEGMENTS_RECEIVED_${trial.segmentCount}", true,
-                        trial.segmentsMatch && trial.segmentCharacters == EXPECTED_TEXT.length,
-                        trial.segmentConfidence,
-                        trial.accumulated.decisionOrNull(),
-                    ))
-                }
-            }
-            override fun onPartialResults(partialResults: Bundle?) { }
-            override fun onEvent(eventType: Int, params: Bundle?) { }
-        })
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
-            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-        if (trial.mode != SpeechTrialMode.DIRECT_MIC) {
-            val pipe = ParcelFileDescriptor.createPipe()
-            trial.pipe = pipe
-            val fd = pipe[1].fileDescriptor
-            Os.fcntlInt(fd, OsConstants.F_SETFL, Os.fcntlInt(fd, OsConstants.F_GETFL, 0) or OsConstants.O_NONBLOCK)
-            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, pipe[0])
-                .putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE)
-                .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
-                .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
-                .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, RATE)
-        }
-        publish(trial, SpeechTrialStatus.STARTING)
-        recognizer.startListening(intent)
-        if (trial.mode != SpeechTrialMode.DIRECT_MIC) {
-            trial.writer = scope.launch(Dispatchers.IO) {
-                val descriptor = checkNotNull(trial.pipe)[1]
-                val deadline = runtime.now() + LIMIT_MS
-                try {
-                    val pcm = checkNotNull(trial.pcm)
-                    while (!trial.stopWriter.get() && !trial.canceled.get() && trial.written < trial.size && runtime.now() < deadline) {
-                        try {
-                            val count = Os.write(descriptor.fileDescriptor, pcm, trial.written, minOf(4_096, trial.size - trial.written))
-                            trial.written += count
-                            withContext(Dispatchers.Main.immediate) {
-                                if (accepts(trial)) state.value = state.value.copy(pcmBytesWritten = trial.written)
-                            }
-                            if (count == 0) delay(10)
-                        } catch (e: ErrnoException) {
-                            if (e.errno != OsConstants.EAGAIN && e.errno != OsConstants.EINTR) throw e
-                            delay(10)
-                        }
-                    }
-                } catch (_: Exception) {
-                    trial.result.complete(failure("PCM_WRITE_FAILED"))
-                } finally {
-                    try { descriptor.close() }
-                    catch (_: Exception) {
-                        trial.cleanupFailures.add("PCM_WRITE_FD_CLOSE_FAILED")
-                        // close() 재호출이 성공해도 최초 close의 실제 해제를 증명하지 못한다.
-                        trial.releaseUncertain.set(true)
-                    }
-                }
+                trial.inputReleased = false
             }
         }
     }
@@ -561,22 +448,21 @@ internal class SpeechRecognitionProbe(
         if (accepts(trial)) state.value = state.value.copy(status = status)
     }
 
-    private fun accepts(trial: Trial): Boolean {
-        if (current !== trial || trial.cleaning || trial.canceled.get() || trial.result.isCompleted) return false
-        if (runtime.now() >= trial.session.deadline) {
-            trial.result.complete(Outcome(SpeechTrialStatus.TIMED_OUT, "SESSION_EXPIRED"))
-            return false
-        }
-        return runtime.policy.accepts(trial.session.id)
-    }
+    private fun accepts(trial: Trial): Boolean =
+        current === trial && !trial.finished && !trial.canceled.get() &&
+            runtime.now() < trial.session.deadline && runtime.policy.accepts(trial.session.id)
+
     private fun mainThread() = check(Looper.myLooper() == Looper.getMainLooper())
-    private fun onDeviceAvailable() = try { SpeechRecognizer.isOnDeviceRecognitionAvailable(app) } catch (_: Exception) { false }
+    private fun onDeviceAvailable() = try {
+        SpeechRecognizer.isOnDeviceRecognitionAvailable(app)
+    } catch (_: Exception) {
+        false
+    }
     private fun failure(reason: String) = Outcome(SpeechTrialStatus.FAILED, reason)
 
     private companion object {
-        const val RATE = 16_000
         const val LIMIT_MS = 10_000L
-        const val MAX_BYTES = 320_000
-        const val EXPECTED_TEXT = "헤이테슬라프렁크열어줘"
+        const val RECOGNITION_TIMEOUT_MS = 15_000L
+        const val MAX_BYTES = SpeechMicCapture.MAX_BYTES
     }
 }
