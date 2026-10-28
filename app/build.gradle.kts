@@ -14,8 +14,8 @@ android {
         applicationId = "com.heytesla.app"
         minSdk = 36
         targetSdk = 36
-        versionCode = 52
-        versionName = "0.52.0-probe"
+        versionCode = 66
+        versionName = "0.66.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // sherpa-onnx AAR은 4개 ABI를 담는다. 대상 기기(arm64)만 포함해 APK 증가를 줄인다.
         ndk {
@@ -25,6 +25,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {
@@ -78,7 +79,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.18.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.datastore:datastore-preferences:1.2.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation(files("../.local-models/sherpa-onnx-1.13.8.aar"))
@@ -86,4 +86,14 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
+}
+
+// 기기·BLE·RF 없이 실제 생산 consumer를 독립 차량 상대편과 실행한다.
+tasks.register<JavaExec>("runVehiclePeerSimulator") {
+    group = "verification"
+    description = "독립 차량 상대편으로 생산 UWB 경로를 호스트에서 실행"
+    val hostRuntime = provider { tasks.named<Test>("testDebugUnitTest").get().classpath }
+    dependsOn(hostRuntime)
+    classpath = files(hostRuntime)
+    mainClass.set("com.heytesla.app.vehicle.uwb.VehiclePeerSimulator")
 }

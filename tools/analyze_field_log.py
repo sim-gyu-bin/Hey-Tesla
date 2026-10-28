@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""읽기 전용 v1–v22 현장 로그 분석. 회전 파일은 오래된 archive→active 순서로 입력한다."""
+"""읽기 전용 v1–v27 현장 로그 분석. 회전 파일은 오래된 archive→active 순서로 입력한다."""
 import argparse
 import csv
 import json
+import math
+import re
 import sys
 import uuid
 from collections import Counter
@@ -10,6 +12,8 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 
 MAX_LINE = 65536
+SUPPORTED_VERSIONS = range(1, 28)
+APPROACH_RECOVERY_VERSIONS = range(18, 28)
 STATUSES = set('IDLE BLOCKED CONNECTING DISCOVERING SUBSCRIBING OBSERVING CLEANING_UP COMPLETE CANCELED TIMED_OUT FAILED CLEANUP_FAILED'.split())
 REASONS = set('INTERNAL_FAILURE SESSION_EXPIRED CONNECT_REQUEST_FAILED USER_CANCELED SUBSCRIPTION_OBSERVED CONNECTION_LOST CONNECTION_FAILED DISCOVERY_REQUEST_FAILED DISCOVERY_FAILED PROFILE_READ_FAILED TESLA_SERVICE_MISSING TESLA_TX_MISSING TESLA_RX_MISSING RX_SUBSCRIPTION_UNSUPPORTED RX_CCCD_MISSING LOCAL_SUBSCRIPTION_FAILED SUBSCRIPTION_REQUEST_FAILED SUBSCRIPTION_FAILED LOCAL_CLOSE_FAILED_RESTART_REQUIRED CONNECTING_TIMEOUT DISCOVERING_TIMEOUT SUBSCRIBING_TIMEOUT OBSERVING_TIMEOUT LEASE_UNAVAILABLE LEASE_LOST VISIBLE_UI_REQUIRED BLUETOOTH_PERMISSION_REQUIRED BLUETOOTH_PERMISSION_REVOKED BLUETOOTH_UNAVAILABLE BLUETOOTH_OFF SINGLE_ASSOCIATION_REQUIRED ASSOCIATION_ADDRESS_UNAVAILABLE ASSOCIATION_RESOLVE_FAILED ASSOCIATION_REMOVED DIAGNOSTIC_EXCLUSIVITY_LOST PREREQUISITE_READ_FAILED USER_STOP DISABLED DEPARTED BLE_FIELD_NOTIFICATION_STOP FIELD_OWNER_NOT_ARMED OBSERVATION_ACTIVE FIELD_MARKER_UNAVAILABLE FIELD_LOG_UNHEALTHY FIELD_MARKER_WRITE_FAILED CDM_UNSUPPORTED CDM_UNAVAILABLE ASSOCIATION_REQUIRED MULTIPLE_ASSOCIATIONS_UNSUPPORTED OBSERVATION_BLUETOOTH_PERMISSION_REQUIRED OBSERVATION_NOTIFICATION_PERMISSION_REQUIRED OBSERVATION_NOTIFICATIONS_BLOCKED OBSERVATION_FGS_START_TIMEOUT OBSERVATION_FGS_SECURITY_DENIED OBSERVATION_FGS_BACKGROUND_START_DENIED OBSERVATION_FGS_START_FAILED OBSERVE_SECURITY_DENIED OBSERVE_UNAVAILABLE OBSERVATION_SERVICE_DESTROYED BLUETOOTH_SCAN_PERMISSION_REQUIRED BLE_SCAN_ADDRESS_UNAVAILABLE BLE_SCAN_PERMISSION_REQUIRED BLE_SCAN_PERMISSION_REVOKED BLE_SCAN_NO_OFFLOADED_FILTER BLE_SCAN_UNAVAILABLE BLE_SCAN_START_FAILED BLE_SCAN_STOP_FAILED BLE_SCAN_CALLBACK_FAILED BLE_NAME_DETECTION_OPTIONS_INVALID VIN_FORMAT_INVALID BLE_SCAN_NAME_UNAVAILABLE'.split())
 REASONS.update(('BLE_SCAN_NO_OFFLOADED_BATCH', 'BLE_SCAN_PENDING_INTENT_FAILED',
@@ -21,6 +25,7 @@ REASONS.update(('BLE_LOCATION_PERMISSION_REQUIRED', 'BLE_LOCATION_DISABLED',
 REASONS.update(('VIN_LOADING', 'VIN_NOT_REGISTERED', 'VIN_SAVING', 'VIN_RESTORE_FAILED', 'VIN_SAVE_FAILED'))
 REASONS.add('GATT_WRITE_EXCEPTION')
 REASONS.add('GATT_SERVICES_INVALIDATED')
+REASONS.add('BLE_FIELD_WAKE_LOCK_UNAVAILABLE')
 REASONS.update('BLE_AUTHENTICATED_READ_OPTIONS_INVALID FRESH_SCAN_REQUIRED SCAN_RESULT_STALE SCAN_DEVICE_UNAVAILABLE SCAN_PAUSE_FAILED SCAN_RESUME_FAILED FIELD_OWNER_LOST APPROACH_EXPIRED CANDIDATE_WITHDRAWN ATTEMPT_SUPERSEDED EXISTING_KEY_UNAVAILABLE EXISTING_KEY_INVALID KEY_PREPARATION_FAILED BODY_STATUS_VERIFIED DRIVE_STATE_VERIFIED AUTHENTICATED_READ_COMPLETE BODY_READ_FAILED DRIVE_READ_FAILED BODY_READ_TIMEOUT DRIVE_READ_TIMEOUT READ_DEADLINE_EXPIRED DEADLINE_EXPIRED AUTHENTICATION_FAILED AUTHENTICATION_TIMEOUT ASSOCIATION_CHANGED READINESS_CHECK_FAILED GATT_CONNECT_REJECTED GATT_CONNECT_PERMISSION_DENIED GATT_CONNECT_FAILED GATT_CONNECTION_LOST GATT_DISCOVERY_REJECTED GATT_DISCOVERY_FAILED TESLA_GATT_PROFILE_UNSUPPORTED GATT_MTU_REJECTED GATT_MTU_FAILED GATT_NOTIFICATION_REJECTED GATT_SUBSCRIPTION_REJECTED GATT_SUBSCRIPTION_FAILED PROTOCOL_START_FAILED GATT_WRITE_FAILED GATT_WRITE_REJECTED RX_FRAME_INVALID RX_BUFFER_LIMIT GATT_CALLBACK_FAILED TX_FRAME_INVALID PROTOCOL_RESPONSE_INVALID LOCAL_CLEANUP_FAILED_RESTART_REQUIRED'.split())
 KINDS = set('PRESENCE_RECEIVED PRESENCE_DISPATCHED PRESENCE_REJECTED CANDIDATE_SIGNAL CANDIDATE_MERGED CANDIDATE_EXPIRED SIGNAL_SHADOWED SIGNAL_SELF_SUPPRESSED SCAN_STARTED SCAN_STOPPED SCAN_FAILED SCAN_MATCH RETRY_SCHEDULED RETRY_SUPPRESSED GATT_REQUEST GATT_CALLBACK GATT_CALLBACK_IGNORED GATT_FIRST_RX'.split())
 SCAN_RECOVERY_KINDS = {'SCAN_RECOVERY_SCHEDULED', 'SCAN_RECOVERY_EXHAUSTED'}
@@ -45,6 +50,7 @@ APPROACH_EVENTS.update(WRITE_EVENTS)
 RX_EVENTS = {'TESLA_APPROACH_RX_NOTIFICATION', 'TESLA_APPROACH_RX_FRAME', 'TESLA_APPROACH_RX_RESPONSE'}
 APPROACH_EVENTS.update(RX_EVENTS)
 RESPONSE_DISPOSITIONS = set('DOMAIN_MISMATCH ROUTE_MISMATCH REQUEST_UUID_MISMATCH ACK_WAITING SESSION_INFO_INVALID SESSION_INFO_AUTH_REJECTED SESSION_READY STATUS_VERIFIED STATUS_INCOMPLETE RESPONSE_REJECTED RESPONSE_INVALID RESPONSE_WAITING'.split())
+RESPONSE_DISPOSITIONS.update(('FIRA_REQUEST', 'FIRA_STOP', 'FIRA_UNRECOGNIZED', 'FIRA_INVALID'))
 DESTINATION_KINDS = {'DOMAIN', 'ROUTING_ADDRESS', 'UNSET', 'UNKNOWN'}
 PAYLOAD_KINDS = {'SESSION_INFO', 'SESSION_INFO_REQUEST', 'PROTOBUF_MESSAGE_AS_BYTES', 'UNSET', 'UNKNOWN'}
 DOMAIN_MISMATCH_REASONS = {'FROM_MISSING', 'FROM_NOT_DOMAIN', 'DOMAIN_DIFFERENT'}
@@ -94,6 +100,286 @@ FRUNK_RECOGNITION_REASONS = set((
     'FRUNK_VOICE_CONFIDENCE_BLOCKED', 'FRUNK_VOICE_EXPIRED', 'FRUNK_VOICE_FINAL_REQUIRED',
     'FRUNK_VOICE_READINESS_LOST', 'FRUNK_VOICE_RECOGNITION_FAILED', 'FRUNK_VOICE_CLEANUP_FAILED',
 ))
+UWB_EVENTS = set('TESLA_UWB_STARTED TESLA_UWB_BLOCKED TESLA_UWB_AUTHENTICATING TESLA_UWB_AUTHENTICATED TESLA_UWB_CAPABILITIES_UNSPECIFIED TESLA_UWB_CAPABILITIES_RECEIVED TESLA_UWB_REQUEST_RECEIVED TESLA_UWB_RESPONSE_SENT TESLA_UWB_BACKEND_OPENED TESLA_UWB_PEER_STARTED TESLA_UWB_DISTANCE_RECEIVED TESLA_UWB_INVALID_RESULT TESLA_UWB_PEER_STOPPED TESLA_UWB_PEERS_ENDED TESLA_UWB_ENDPOINT_CLOSING TESLA_UWB_VEHICLE_STOP_RECEIVED TESLA_UWB_BACKEND_CLOSED TESLA_UWB_SESSION_STOPPED_SENT TESLA_UWB_SESSION_STOPPED_NOT_SENT TESLA_UWB_CLEANING_UP TESLA_UWB_COMPLETE TESLA_UWB_CANCELED TESLA_UWB_FAILED TESLA_UWB_TIMED_OUT TESLA_UWB_CLEANUP_FAILED TESLA_UWB_LOCAL_CLOSED'.split())
+UWB_STAGES = set('IDLE PREPARING AUTHENTICATING WAITING_FOR_VEHICLE STARTING RANGING CLEANING_UP COMPLETE CANCELED FAILED TIMED_OUT BLOCKED CLEANUP_FAILED'.split())
+UWB_GATT_EVENT = 'TESLA_UWB_GATT_OBSERVATION'
+UWB_EVENTS.add(UWB_GATT_EVENT)
+UWB_GATT_EVENTS = set('STAGE CONNECT_RESULT CONNECTION_CALLBACK DESCRIPTOR_CALLBACK RX WRITE RETRY_SCHEDULED RETRY_STARTED RETRY_CANCELED LOCAL_CLOSED CLEANUP_FAILED'.split())
+UWB_GATT_STAGES = set('IDLE PREPARING_KEY CONNECTING DISCOVERING NEGOTIATING_MTU SUBSCRIBING WAITING_FOR_CARD HANDSHAKING READING_STATUS CLEANING_UP COMPLETE BLOCKED CANCELED TIMED_OUT FAILED CLEANUP_FAILED'.split())
+UWB_GATT_BOOLS = ('uwbGattAutoConnect', 'uwbGattConnectAccepted', 'uwbGattConnectedObserved',
+    'uwbGattServiceFound', 'uwbGattTxFound', 'uwbGattRxFound', 'uwbGattSubscriptionConfirmed')
+UWB_GATT_INTS = ('uwbGattConnectionStatus', 'uwbGattConnectionState',
+    'uwbGattDescriptorRequestStatus', 'uwbGattDescriptorCallbackStatus')
+UWB_GATT_TIMES = ('uwbGattOperationStartedElapsedMs', 'uwbGattStageStartedElapsedMs',
+    'uwbGattObservedElapsedMs', 'uwbGattConnectIssuedElapsedMs', 'uwbGattConnectReturnedElapsedMs',
+    'uwbGattAdvertisementAgeAtConnectMs', 'uwbGattConnectionCallbackElapsedMs',
+    'uwbGattDescriptorCallbackElapsedMs', 'uwbGattFirstRxElapsedMs', 'uwbGattLastRxElapsedMs')
+UWB_GATT_KEYS = ('uwbGattStage', 'uwbGattEvent', 'uwbGattConnectAction',
+    *UWB_GATT_BOOLS, *UWB_GATT_INTS, *UWB_GATT_TIMES, 'uwbGattRxNotificationCount')
+UWB_RX_BOOLS = ('uwbRxDecoderIncomplete', 'uwbRxDecoderFailed', 'uwbRxFromPresent',
+    'uwbRxToPresent', 'uwbRxRequestUuidPresent', 'uwbRxRequestUuidMatches',
+    'uwbRxToRouteMatches', 'uwbRxSignedStatusPresent')
+UWB_RX_INTS = ('uwbRxExpectedDomain', 'uwbRxFromDomain', 'uwbRxSignedMessageFault', 'uwbRxOperationStatus')
+UWB_RX_TIMES = ('uwbRxProtocolReceivedElapsedMs', 'uwbRxProtocolObservedElapsedMs')
+UWB_RX_COUNTS = ('uwbRxFrameCount', 'uwbRxProtocolCount')
+UWB_RX_ENUMS = {
+    'uwbRxStep': set('WAITING SEND COMPLETE FRUNK_RESULT FAILED UWB_READY UWB_INPUT'.split()),
+    'uwbRxInputKind': set('ROUTABLE_MESSAGE RAW_FIRA WRAPPED_PLAINTEXT ENCRYPTED_RESPONSE'.split()),
+    'uwbRxAead': {'NOT_ATTEMPTED', 'VERIFIED', 'FAILED'},
+    'uwbRxFiraKind': {'REQUEST', 'STOP', 'UNRECOGNIZED', 'INVALID'},
+    'uwbRxAuthEvidence': set('ACKNOWLEDGED REQUEST_REJECTED KEY_NOT_PAIRED_REPORTED OPERATION_REJECTED UNEXPECTED_PAYLOAD SESSION_STATUS_UNSUPPORTED SIGNATURE_MISSING TAG_MISSING TAG_LENGTH_INVALID PARAMETERS_INVALID HMAC_MISMATCH SESSION_INFO_INVALID'.split()),
+    'uwbRxDisposition': RESPONSE_DISPOSITIONS,
+    'uwbRxFromKind': DESTINATION_KINDS,
+    'uwbRxToKind': DESTINATION_KINDS,
+    'uwbRxPayloadKind': PAYLOAD_KINDS,
+    'uwbRxDomainMismatchReason': DOMAIN_MISMATCH_REASONS,
+}
+UWB_RX_BODY_KEYS = ('uwbRxBodyBytes', 'uwbRxBodyStatus', 'uwbRxBodyFields')
+UWB_RX_OBSERVATION_ENUMS = {
+    'uwbRxBodyStatus': {'COMPLETE', 'TRUNCATED', 'MALFORMED', 'UNSUPPORTED'},
+    'uwbRxRequestCorrelation': {'CURRENT', 'PREVIOUS', 'UNMATCHED'},
+}
+UWB_RX_OBSERVATION_KEYS = (*UWB_RX_BODY_KEYS, 'uwbRxRequestCorrelation')
+UWB_RX_BODY_FIELD = re.compile(r'[1-9][0-9]{0,8}/[0125]/(?:0|[1-9][0-9]{0,3})')
+UWB_RX_KEYS = (*UWB_RX_COUNTS, 'uwbRxNotificationFrameCount', *UWB_RX_BOOLS,
+    *UWB_RX_TIMES, *UWB_RX_INTS, *UWB_RX_ENUMS, *UWB_RX_OBSERVATION_KEYS)
+UWB_NONNEGATIVE_INTS = ('uwbPeerCount', 'uwbStartedPeerCount', 'uwbValidDistanceCount',
+    'uwbInvalidResultCount', 'uwbLastPeerIndex')
+UWB_REASONS = REASONS | set((
+    'BACKEND_UNAVAILABLE', 'CAPABILITIES_TIMEOUT', 'CAPABILITIES_REQUEST_FAILED',
+    'CAPABILITIES_CALLBACK_FAILED', 'CAPABILITIES_CHANGED', 'CAPABILITIES_INVALID',
+    'CAPABILITIES_UNSPECIFIED', 'MEASUREMENT_SCHEDULE_FAILED', 'INVALID_RANGING_RESULT',
+    'NATIVE_CLOSE_TIMEOUT', 'NATIVE_START_FAILED', 'NATIVE_OPEN_FAILED', 'NATIVE_BACKEND_FAILED',
+    'NATIVE_CLEANUP_FAILED', 'NO_DISTANCE_RECEIVED', 'DISTANCE_RECEIVE_TIMEOUT',
+    'NEGOTIATION_FAILED', 'UWB_NOT_ENABLED',
+    'DISTANCE_UNSUPPORTED', 'CHANNEL_INTERSECTION_EMPTY', 'PREAMBLE_INTERSECTION_EMPTY',
+    'SLOT_DURATION_UNSUPPORTED', 'CONFIG_UNSUPPORTED', 'UPDATE_RATE_UNSUPPORTED',
+    'NEGOTIATION_ALREADY_ACTIVE', 'EMPTY_REQUEST', 'DUPLICATE_ENDPOINT', 'STOP_WITHOUT_SESSION',
+    'INVALID_STOP_ENDPOINT', 'UNKNOWN_STOP_ENDPOINT', 'UNSUPPORTED_ENDPOINT',
+    'INVALID_PEER_ADDRESSES',
+    'VEHICLE_STS_UNSUPPORTED', 'STS_MODE_UNSUPPORTED', 'INVALID_FIRA_MESSAGE',
+    'AMBIGUOUS_FIRA_MESSAGE', 'UWB_PURPOSE_INVALID', 'UWB_AUTHENTICATED_SESSION_REQUIRED',
+    'UWB_SESSION_EXPIRED', 'UWB_ENCRYPTED_RESPONSE_REJECTED', 'UWB_PROTOCOL_RESPONSE_INVALID',
+    'UWB_VIN_SNAPSHOT_CHANGED', 'RANGING_PERMISSION_REQUIRED', 'RANGING_PERMISSION_DENIED',
+    'UI_PAUSED', 'UI_DESTROYED', 'DIAGNOSTICS_HIDDEN', 'USER_STOP',
+))
+
+
+def uwb_state(value, elapsed, version):
+    """동일 거리 표본의 raw 스냅샷만 정제한다. 각도 단위·framework 시계는 해석하지 않는다."""
+    safe = {'uwbStage': allowed(value.get('uwbStage'), UWB_STAGES),
+        'uwbBackendOpened': value.get('uwbBackendOpened')
+            if type(value.get('uwbBackendOpened')) is bool else None}
+    for key in UWB_NONNEGATIVE_INTS:
+        number = integer(value.get(key))
+        safe[key] = number if number is not None and number >= 0 else None
+    meters = value.get('uwbLastDistanceMeters')
+    safe['uwbLastDistanceMeters'] = meters if (
+        type(meters) in (int, float) and meters >= 0 and
+        (type(meters) is int or math.isfinite(meters))) else None
+    confidence = integer(value.get('uwbLastConfidence'))
+    safe['uwbLastConfidence'] = confidence if confidence in (0, 1, 2) else None
+    for key in ('uwbLastAzimuthRaw', 'uwbLastElevationRaw'):
+        raw = value.get(key) if version >= 24 else None
+        safe[key] = raw if type(raw) is float and math.isfinite(raw) else None
+    for key in ('uwbLastAzimuthConfidence', 'uwbLastElevationConfidence'):
+        confidence = integer(value.get(key)) if version >= 24 else None
+        safe[key] = confidence if confidence in (0, 1, 2) else None
+    for key in ('uwbAzimuthSupported', 'uwbElevationSupported'):
+        supported = value.get(key) if version >= 24 else None
+        safe[key] = supported if type(supported) is bool else None
+    safe['uwbLastFrameworkTimestampMs'] = integer(value.get('uwbLastFrameworkTimestampMs'))
+    received = integer(value.get('uwbLastReceivedElapsedMs'))
+    safe['uwbLastReceivedElapsedMs'] = received if received is not None and 0 <= received <= elapsed else None
+    # SDK reason 원값: 미정의 숫자도 보존하되 문자열·bool은 절대 내보내지 않는다.
+    safe['uwbClosedReason'] = integer(value.get('uwbClosedReason'))
+    safe['uwbOpenFailedReason'] = integer(value.get('uwbOpenFailedReason'))
+    safe['uwbReason'] = allowed(value.get('uwbReason'), UWB_REASONS)
+    safe.update(uwb_gatt_state(value, elapsed, version))
+    safe.update(uwb_rx_state(value, elapsed, version))
+    return safe
+
+
+def uwb_gatt_state(value, elapsed, version):
+    safe = dict.fromkeys(UWB_GATT_KEYS)
+    if version < 25:
+        return safe
+    safe['uwbGattStage'] = allowed(value.get('uwbGattStage'), UWB_GATT_STAGES)
+    events = UWB_GATT_EVENTS | {'PROTOCOL'} if version >= 26 else UWB_GATT_EVENTS
+    safe['uwbGattEvent'] = allowed(value.get('uwbGattEvent'), events)
+    safe['uwbGattConnectAction'] = allowed(value.get('uwbGattConnectAction'), {'CREATE', 'RECONNECT'})
+    for key in UWB_GATT_BOOLS:
+        safe[key] = value.get(key) if type(value.get(key)) is bool else None
+    for key in UWB_GATT_INTS:
+        number = integer(value.get(key))
+        safe[key] = number if number is not None and -(2**31) <= number < 2**31 else None
+    for key in (*UWB_GATT_TIMES, 'uwbGattRxNotificationCount'):
+        number = integer(value.get(key))
+        upper = 2**63 - 1 if key == 'uwbGattRxNotificationCount' else elapsed
+        safe[key] = number if number is not None and 0 <= number <= upper else None
+    return safe
+
+
+def uwb_rx_body(value):
+    """본문 값은 받지 않고 canonical 숫자 shape 3개가 함께 유효할 때만 보존한다."""
+    byte_count = integer(value.get('uwbRxBodyBytes'))
+    status = allowed(value.get('uwbRxBodyStatus'), UWB_RX_OBSERVATION_ENUMS['uwbRxBodyStatus'])
+    fields = value.get('uwbRxBodyFields')
+    if (byte_count is None or not 0 <= byte_count <= 4096 or status is None or
+            type(fields) is not str or len(fields) > 135):
+        return dict.fromkeys(UWB_RX_BODY_KEYS)
+    triples = fields.split(',') if fields else []
+    if len(triples) > 8:
+        return dict.fromkeys(UWB_RX_BODY_KEYS)
+    minimum_bytes = 0
+    for triple in triples:
+        if UWB_RX_BODY_FIELD.fullmatch(triple) is None:
+            return dict.fromkeys(UWB_RX_BODY_KEYS)
+        number, wire, length = map(int, triple.split('/'))
+        if (number > 536870911 or
+                (wire == 0 and not 1 <= length <= 10) or
+                (wire == 1 and length != 8) or
+                (wire == 2 and length > 4096) or
+                (wire == 5 and length != 4)):
+            return dict.fromkeys(UWB_RX_BODY_KEYS)
+        minimum_bytes += ((number << 3 | wire).bit_length() + 6) // 7 + length
+        if wire == 2:
+            minimum_bytes += max(1, (length.bit_length() + 6) // 7)
+    # tag/length의 비최소 원 varint encoding은 shape만으로 복원할 수 없다.
+    if (minimum_bytes > byte_count or
+            (status == 'COMPLETE' and not triples and byte_count != 0) or
+            (status == 'TRUNCATED' and (len(triples) != 8 or byte_count <= minimum_bytes)) or
+            (status in ('MALFORMED', 'UNSUPPORTED') and
+             (len(triples) >= 8 or byte_count <= minimum_bytes))):
+        return dict.fromkeys(UWB_RX_BODY_KEYS)
+    return dict(zip(UWB_RX_BODY_KEYS, (byte_count, status, fields)))
+
+
+def uwb_rx_state(value, elapsed, version):
+    safe = dict.fromkeys(UWB_RX_KEYS)
+    if version < 26:
+        return safe
+    for key in UWB_RX_BOOLS:
+        safe[key] = value.get(key) if type(value.get(key)) is bool else None
+    for key in UWB_RX_INTS:
+        number = integer(value.get(key))
+        safe[key] = number if number is not None and -(2**31) <= number < 2**31 else None
+    for key in (*UWB_RX_TIMES, *UWB_RX_COUNTS, 'uwbRxNotificationFrameCount'):
+        number = integer(value.get(key))
+        upper = (16 if key == 'uwbRxNotificationFrameCount' else
+                 2**63 - 1 if key in UWB_RX_COUNTS else elapsed)
+        safe[key] = number if number is not None and 0 <= number <= upper else None
+    for key, choices in UWB_RX_ENUMS.items():
+        safe[key] = allowed(value.get(key), choices)
+    if version == 27:
+        safe.update(uwb_rx_body(value))
+        safe['uwbRxRequestCorrelation'] = allowed(value.get('uwbRxRequestCorrelation'),
+            UWB_RX_OBSERVATION_ENUMS['uwbRxRequestCorrelation'])
+    return safe
+
+
+def summarize_uwb_rx(points):
+    """작업·시계 구간·counter reset별 총분모와 실제 새 사건의 관측분모를 분리한다."""
+    scopes = {}
+    operations = []
+    count_keys = {'notification': 'uwbGattRxNotificationCount',
+                  'frame': 'uwbRxFrameCount', 'protocol': 'uwbRxProtocolCount'}
+    dimensions = ('uwbRxStep', 'uwbRxInputKind', 'uwbRxAead', 'uwbRxFiraKind',
+                  'uwbRxAuthEvidence', 'uwbRxDisposition', 'uwbRxDomainMismatchReason',
+                  *UWB_RX_OBSERVATION_ENUMS)
+    for point in points:
+        state = point['state']
+        point['rxObservation'] = {'operationIndex': None, 'newNotification': False,
+            'newProtocol': False, 'newFrameCount': None}
+        started = state['uwbGattOperationStartedElapsedMs']
+        if started is None:
+            continue
+        scope = (point['processId'], point['segment'], started)
+        current = scopes.get(scope)
+        counts = {name: state[key] for name, key in count_keys.items()}
+        reset = current is not None and any(value is not None and
+            current['counterTotals'][name] is not None and value < current['counterTotals'][name]
+            for name, value in counts.items())
+        if current is None or reset:
+            current = {'operationIndex': len(operations), 'processId': scope[0], 'segment': scope[1],
+                'operationStartedElapsedMs': started,
+                'counterResetIndex': 0 if current is None else current['counterResetIndex'] + 1,
+                'counterResetObserved': reset, 'firstLine': point['line'], 'lastLine': point['line'],
+                'counterTotals': dict.fromkeys(count_keys),
+                'observedEvents': {'notification': 0, 'frame': None, 'protocol': 0},
+                'notificationFrameCountUnobserved': 0,
+                'decoder': {key: Counter() for key in ('uwbRxDecoderIncomplete', 'uwbRxDecoderFailed')},
+                'classifications': {key: Counter() for key in dimensions},
+                'protocolQueueDelayMs': Counter(),
+                '_seenNotification': set(), '_seenProtocol': set()}
+            scopes[scope] = current
+            operations.append(current)
+        current['lastLine'] = point['line']
+        for name, value in counts.items():
+            if value is not None:
+                old = current['counterTotals'][name]
+                current['counterTotals'][name] = value if old is None else max(old, value)
+        observed = point['rxObservation']
+        observed['operationIndex'] = current['operationIndex']
+        if point['event'] != UWB_GATT_EVENT:
+            continue
+        kind = state['uwbGattEvent']
+        for event, name, seen_key, flag in (
+                ('RX', 'notification', '_seenNotification', 'newNotification'),
+                ('PROTOCOL', 'protocol', '_seenProtocol', 'newProtocol')):
+            count = counts[name]
+            if kind != event or count is None or count <= 0 or count in current[seen_key]:
+                continue
+            current[seen_key].add(count)
+            current['observedEvents'][name] += 1
+            observed[flag] = True
+        if observed['newNotification']:
+            frames = state['uwbRxNotificationFrameCount']
+            observed['newFrameCount'] = frames
+            if frames is not None:
+                current['observedEvents']['frame'] = (current['observedEvents']['frame'] or 0) + frames
+            else:
+                current['notificationFrameCountUnobserved'] += 1
+            for key in current['decoder']:
+                value = state[key]
+                current['decoder'][key]['unobserved' if value is None else str(value).lower()] += 1
+        if observed['newProtocol']:
+            for key in dimensions:
+                value = state[key]
+                current['classifications'][key][value if value is not None else 'unobserved'] += 1
+            delay = point['gattTimingMs']['protocolQueueDelayMs']
+            if delay is not None:
+                current['protocolQueueDelayMs'][delay] += 1
+    for operation in operations:
+        del operation['_seenNotification'], operation['_seenProtocol']
+        operation['decoder'] = {key: dict(value) for key, value in operation['decoder'].items()}
+        operation['classifications'] = {key: dict(value) for key, value in operation['classifications'].items()}
+        operation['protocolQueueDelayMs'] = distribution(operation['protocolQueueDelayMs'])
+    return operations
+
+
+def uwb_gatt_timing(state, elapsed):
+    """원 elapsed를 보존하며 관측된 두 시각이 순서대로 있을 때만 차이를 낸다."""
+    def difference(end, start):
+        return end - start if end is not None and start is not None and end >= start else None
+    started = state['uwbGattOperationStartedElapsedMs']
+    observed = state['uwbGattObservedElapsedMs']
+    return {
+        'operationElapsedMs': difference(observed, started),
+        'stageElapsedMs': difference(observed, state['uwbGattStageStartedElapsedMs']),
+        'snapshotAgeMs': difference(elapsed, observed),
+        'connectCallElapsedMs': difference(state['uwbGattConnectReturnedElapsedMs'],
+            state['uwbGattConnectIssuedElapsedMs']),
+        'protocolQueueDelayMs': difference(state['uwbRxProtocolObservedElapsedMs'],
+            state['uwbRxProtocolReceivedElapsedMs']),
+        **{name: difference(state[key], started) for name, key in (
+            ('connectIssuedSinceStartMs', 'uwbGattConnectIssuedElapsedMs'),
+            ('connectReturnedSinceStartMs', 'uwbGattConnectReturnedElapsedMs'),
+            ('connectionCallbackSinceStartMs', 'uwbGattConnectionCallbackElapsedMs'),
+            ('descriptorCallbackSinceStartMs', 'uwbGattDescriptorCallbackElapsedMs'),
+            ('firstRxSinceStartMs', 'uwbGattFirstRxElapsedMs'),
+            ('lastRxSinceStartMs', 'uwbGattLastRxElapsedMs'))},
+    }
 
 
 def integer(value):
@@ -426,12 +712,12 @@ def record_approach(t, event, raw, process, segment, wall, elapsed, line, clock_
 
 
 def is_approach_recovery(attempts, retries, blocks):
-    """v18–v22의 두 번째 시작만 허용한다. 복구 관측은 광고 수신·검증 성공 자체가 아니다."""
+    """v18–v25의 두 번째 시작만 허용한다. 복구 관측은 광고 수신·검증 성공 자체가 아니다."""
     if len(attempts) != 2:
         return False
     first, second = attempts
     for a in attempts:
-        if (a['versions'] not in ([18], [19], [20], [21], [22]) or a['startCount'] != 1 or a['timeBoundaryObserved'] or
+        if (len(a['versions']) != 1 or a['versions'][0] not in APPROACH_RECOVERY_VERSIONS or a['startCount'] != 1 or a['timeBoundaryObserved'] or
             a['invalidTimeObserved'] or a['duplicateFinals'] or
             a['stages'][0]['event'] != 'TESLA_APPROACH_READ_STARTED'):
             return False
@@ -575,6 +861,7 @@ def analyze(stream, exclude=(), *, additional_streams=()):
     processes = Counter()
     trials = {}
     frunk_events = []
+    uwb_events = []
     totals = Counter()
     previous = None
     segment = 0
@@ -598,7 +885,7 @@ def analyze(stream, exclude=(), *, additional_streams=()):
             totals['malformedRows'] += 1
             continue
         version = integer(row.get('version'))
-        if version not in range(1, 23):
+        if version not in SUPPORTED_VERSIONS:
             issue(line_no, 'UNSUPPORTED_VERSION')
             totals['unsupportedRows'] += 1
             continue
@@ -632,7 +919,7 @@ def analyze(stream, exclude=(), *, additional_streams=()):
         versions[str(version)] += 1
         totals['analyzedRows'] += 1
         processes[process] += 1
-        if (version >= 21 and process != 'invalid' and row.get('event') in FRUNK_EVENTS and
+        if (version >= 21 and process != 'invalid' and allowed(row.get('event'), FRUNK_EVENTS) is not None and
             (row['event'] != FRUNK_RECOGNITION_EVENT or version >= 22)):
             raw_state = row.get('state') if isinstance(row.get('state'), dict) else {}
             frunk_events.append({'line': line_no, 'processId': process, 'segment': segment,
@@ -643,6 +930,18 @@ def analyze(stream, exclude=(), *, additional_streams=()):
                     if version >= 22 and row['event'] == FRUNK_RECOGNITION_EVENT else None,
                 'state': {key: raw_state.get(key) if type(raw_state.get(key)) is bool else None
                           for key in FRUNK_STATE_KEYS}})
+        if (version >= 23 and process != 'invalid' and allowed(row.get('event'), UWB_EVENTS) is not None
+                and (row['event'] != UWB_GATT_EVENT or version >= 25)):
+            raw_state = row.get('state') if isinstance(row.get('state'), dict) else {}
+            safe_state = uwb_state(raw_state, elapsed, version)
+            uwb_events.append({'line': line_no, 'processId': process, 'segment': segment,
+                'trialId': trial if trial != 'invalid' else None,
+                'recordWallMs': wall, 'recordElapsedMs': elapsed, 'event': row['event'],
+                'state': safe_state,
+                'gattTimingMs': uwb_gatt_timing(safe_state, elapsed),
+                'newDistanceReceived': row['event'] == 'TESLA_UWB_DISTANCE_RECEIVED' and
+                    safe_state['uwbLastDistanceMeters'] is not None and
+                    safe_state['uwbLastReceivedElapsedMs'] is not None})
         if trial is None or trial == 'invalid' or process == 'invalid':
             totals['unassignedRows'] += 1
             continue
@@ -698,7 +997,7 @@ def analyze(stream, exclude=(), *, additional_streams=()):
             record_approach(t, event, row.get('teslaApproachRead'), process, segment,
                 wall, elapsed, line_no, clock_bad, issue, version)
         raw = row.get('bleTrial')
-        recovery_row = version >= 8 and isinstance(row.get('bleEvidence'), dict) and row['bleEvidence'].get('kind') in SCAN_RECOVERY_KINDS
+        recovery_row = version >= 8 and isinstance(row.get('bleEvidence'), dict) and allowed(row['bleEvidence'].get('kind'), SCAN_RECOVERY_KINDS) is not None
         if version >= 5 and isinstance(raw, dict) and not recovery_row:
             attempt = integer(raw.get('attempt'))
             no_attempt_snapshot = attempt == 0 and raw.get('status') in ('IDLE', 'BLOCKED') and event != 'BLE_FIELD_TRIAL_FINISHED'
@@ -770,7 +1069,7 @@ def analyze(stream, exclude=(), *, additional_streams=()):
             candidate = integer(evidence.get('candidate'))
             if candidate is not None and candidate > 0 and kind not in SCAN_V8_KINDS:
                 t['candidateIds'].add((process, segment, candidate))
-                if version in (18, 19, 20, 21, 22) and event == 'BLE_EVIDENCE' and kind == 'RETRY_SCHEDULED' and evidence.get('gate') == 'COOLDOWN':
+                if version in APPROACH_RECOVERY_VERSIONS and event == 'BLE_EVIDENCE' and kind == 'RETRY_SCHEDULED' and evidence.get('gate') == 'COOLDOWN':
                     t['approachRetryEvidence'].setdefault((process, segment, candidate), []).append({
                         'line': line_no, 'elapsedMs': elapsed, 'clockAlignmentWarning': clock_bad, 'version': version})
                 if kind == 'CANDIDATE_SIGNAL':
@@ -811,7 +1110,8 @@ def analyze(stream, exclude=(), *, additional_streams=()):
         t['completeAttemptCount'] = sum(a['countedComplete'] for a in t['attempts'])
         t['termination'] = 'abnormal_marker' if t['unclosedMarkers'] else 'normal_stop' if t['lastStopLine'] is not None and (t['lastStartLine'] is None or t['lastStopLine'] > t['lastStartLine']) else 'stop_not_recorded'
         output_trials.append(t)
-    return {'reportVersion': 1, 'counts': {key: totals[key] for key in ('lines', 'analyzedRows', 'malformedRows', 'unsupportedRows', 'excludedRows', 'unassignedRows')}, 'versions': dict(versions), 'processes': dict(processes), 'trials': output_trials, 'frunkEvents': frunk_events, 'issues': issues, 'excludedTrialsFound': sorted(found), 'excludedTrialsNotFound': sorted(excluded - found), 'clockMismatchObserved': clock_bad, 'logHealth': {'status': 'warnings' if issues else 'no_observed_parse_warnings', 'lossCount': None, 'writerHealth': 'not_in_record_schema', 'completeness': 'not_proven'}, 'visits': None}
+    uwb_rx_operations = summarize_uwb_rx(uwb_events)
+    return {'reportVersion': 1, 'counts': {key: totals[key] for key in ('lines', 'analyzedRows', 'malformedRows', 'unsupportedRows', 'excludedRows', 'unassignedRows')}, 'versions': dict(versions), 'processes': dict(processes), 'trials': output_trials, 'frunkEvents': frunk_events, 'uwbEvents': uwb_events, 'uwbRxOperations': uwb_rx_operations, 'issues': issues, 'excludedTrialsFound': sorted(found), 'excludedTrialsNotFound': sorted(excluded - found), 'clockMismatchObserved': clock_bad, 'logHealth': {'status': 'warnings' if issues else 'no_observed_parse_warnings', 'lossCount': None, 'writerHealth': 'not_in_record_schema', 'completeness': 'not_proven'}, 'visits': None}
 
 
 def iso_ms(value):
@@ -943,6 +1243,32 @@ def main(argv=None):
         counts = report['counts']
         print(f"전체 {counts['lines']}행 · 분석 {counts['analyzedRows']}행 · 제외 {counts['excludedRows']}행 · 오류 {len(report['issues'])}건")
         print('로그 유실 수/기록기 건강: 미확인. BLE COMPLETE·구독·0 RX는 차량 인증/거리/프렁크 성공의 증거가 아닙니다.')
+        if report['uwbEvents']:
+            print(f"UWB 측정 · 행 {len(report['uwbEvents'])} · 새 거리 수신 {sum(point['newDistanceReceived'] for point in report['uwbEvents'])}")
+        for point in report['uwbEvents']:
+            state = point['state']
+            distance = state['uwbLastDistanceMeters'] if point['newDistanceReceived'] else None
+            print(f"UWB 행 {point['line']} · {point['event']} · 새 거리(m) {distance} · 종료 사유 {state['uwbClosedReason']} · 열기 실패 사유 {state['uwbOpenFailedReason']} · 진단 사유 {state['uwbReason']}")
+            gatt = {key: state[key] for key in UWB_GATT_KEYS}
+            print(f"  GATT 현재 관측 {json.dumps(gatt, ensure_ascii=False, allow_nan=False)}")
+            print(f"  GATT 상대 경과(ms) {json.dumps(point['gattTimingMs'], ensure_ascii=False, allow_nan=False)}")
+            print(f"  RX 마지막 관측 {json.dumps({key: state[key] for key in UWB_RX_KEYS}, ensure_ascii=False, allow_nan=False)}")
+            print(f"  RX 새 사건 {json.dumps(point['rxObservation'], ensure_ascii=False, allow_nan=False)}")
+            snapshot_kind = '새 거리 표본' if point['newDistanceReceived'] else '과거 표본 스냅샷'
+            sample = {key: state[key] for key in (
+                'uwbLastPeerIndex', 'uwbLastDistanceMeters', 'uwbLastConfidence',
+                'uwbLastFrameworkTimestampMs', 'uwbLastReceivedElapsedMs',
+                'uwbLastAzimuthRaw', 'uwbLastAzimuthConfidence',
+                'uwbLastElevationRaw', 'uwbLastElevationConfidence',
+                'uwbAzimuthSupported', 'uwbElevationSupported')}
+            print(f"  {snapshot_kind} {json.dumps(sample, ensure_ascii=False, allow_nan=False)}")
+        if report['uwbEvents']:
+            print('backend opened·peer started는 거리 수신이 아닙니다. 과거 샘플 스냅샷은 새 측정으로 세지 않으며 실차 거리/제어 성공을 단정하지 않습니다. raw 각도는 단위·방향을 해석하지 않은 관측이며 차량 위치나 정밀 방위가 아닙니다. framework timestamp의 시계 기준은 미확인이고 보정하지 않습니다.')
+            print('GATT 접수 true는 SDK 접수일 뿐 연결 완료가 아닙니다. connectedObserved false는 이번 작업의 연결 성공 미관측이며 연결 불가 확정이 아닙니다. null은 미관측/구버전, 0 status와 RX 횟수도 원값입니다. GATT 현재 관측은 마지막 단계/사건의 스냅샷이며 현재 연결 유지나 새 거리 수신을 뜻하지 않습니다.')
+            print('RX 총분모(counterTotals)는 작업별 누적 notification/frame/protocol이며 observedEvents는 로그에 실제 남은 중복 없는 새 사건의 분모입니다. 마지막 metadata 스냅샷은 분류에 재합산하지 않습니다. decoder false·0·null은 성공이 아니며 AEAD VERIFIED와 HMAC 인증·FiRa 입력·거리 성공은 별개입니다. domain/fault/status 원값은 진위 증명이 아닙니다.')
+            print('schema27 본문 shape와 request correlation은 새 PROTOCOL 사건의 부분집합입니다. COMPLETE 빈 본문은 미관측 null과 다르며 TRUNCATED는 항목 관측 상한입니다. CURRENT/PREVIOUS는 동일 identity의 header 대조일 뿐 인증·수락·복호 성공이 아닙니다. schema1–26에서는 새 4개 key를 미관측으로 둡니다.')
+        for operation in report['uwbRxOperations']:
+            print(f"UWB RX 작업별 분모/decoder/분류/대기(ms) {json.dumps(operation, ensure_ascii=False, allow_nan=False)}")
         for point in report['frunkEvents']:
             print(f"실차 프렁크 관측 {json.dumps(point, ensure_ascii=False, allow_nan=False)}")
         if report['frunkEvents']:
@@ -964,8 +1290,8 @@ def main(argv=None):
                 for blocked in trial['approachReadBlocks']:
                     print(f"인증 읽기 차단 {json.dumps(blocked, ensure_ascii=True, allow_nan=False)}")
                 print('전체완료는 BODY·DRIVE 검증 및 최종 COMPLETE·local close·lease 반환의 로그 근거입니다. 지난 관측이며 제어 명령·물리 완료가 아닙니다. 원 DRIVE wall 시각 미관측은 null입니다.')
-                if any(version in (18, 19, 20, 21, 22) for version in trial['versions']):
-                    print('v18–v22 제한복구는 같은 후보의 clean transient 종료·COOLDOWN 예약·3.5초 대기·최대 2회·첫 시작부터 관측된 40초 예산의 근거입니다. 반복 관측과 정책 위반을 구분하며 새 광고 수신 자체나 복구 성공을 뜻하지 않습니다.')
+                if any(version in APPROACH_RECOVERY_VERSIONS for version in trial['versions']):
+                    print('v18–v27 제한복구는 같은 후보의 clean transient 종료·COOLDOWN 예약·3.5초 대기·최대 2회·첫 시작부터 관측된 40초 예산의 근거입니다. 반복 관측과 정책 위반을 구분하며 새 광고 수신 자체나 복구 성공을 뜻하지 않습니다.')
         for issue in report['issues']:
             print(f"행 {issue['line']}: {issue['code']}")
         for trial in report['excludedTrialsNotFound']:

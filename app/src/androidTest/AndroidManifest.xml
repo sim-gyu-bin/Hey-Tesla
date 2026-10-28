@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- AGP rewrites the first instrumentation name; keep its ordinary runner explicit. -->
+    <instrumentation
+        android:name="androidx.test.runner.AndroidJUnitRunner"
+        android:functionalTest="false"
+        android:handleProfiling="false"
+        android:targetPackage="com.heytesla.app" />
+    <instrumentation
+        android:name="com.heytesla.app.diagnostics.NoRuntimeAndroidJUnitRunner"
+        android:functionalTest="false"
+        android:handleProfiling="false"
+        android:label="Explicit no-runtime SDK parcel bench"
+        android:targetPackage="com.heytesla.app" />
+</manifest>

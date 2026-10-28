@@ -1,6 +1,6 @@
 # 요구사항
 
-> 이 페이지는 최종 Android 제품 요구사항이다. 현재 로컬 진단 앱의 구현·수동 마이크 검증 범위는 [실측 기록](Device-Validation.md)에 별도로 기록하며, 잠금·차량 접근·음성 명령 요구사항의 달성을 뜻하지 않는다.
+> 이 페이지는 최종 Android 제품 요구사항이다. 현재 v66 소스·생성 APK(`0.66.0`/66)는 사용자 승인 ON 이후 BLE 감지·자동 UWB와 별도 출처의 좌표 기반 대략적 거리/방향을 병행한다. 자동 마이크·음성·프렁크는 미연결이다. 마지막 확인 S23 설치본은`0.65.0`/65·사용자 OFF·실제 서비스 실행0이며 USB 분리 뒤66 설치·기기/실차 검증은 미실행이다. [v66 정본](Tesla-Integration.md#v66-좌표-기반-나침반uwb-병행)의 현재 계약과 [실측 기록](Device-Validation.md)의 실행 근거를 구분한다. 최종 FGS IPC 보완은 편집 중 계약이며 통과를 주장하지 않는다.
 
 [Wiki 홈](Home.md) · [네이티브 아키텍처](Native-Architecture.md) · [상태 머신](State-Machine.md)
 
@@ -42,13 +42,13 @@
 - 등록 요청은 차량 키 목록을 변경할 수 있으므로 상태 조회와 버튼·동의를 분리한다. 화면의 승인 대기나 등록 응답만으로 등록·인증 성공을 표시하지 않는다. 전송 후 취소·시간 초과는 등록 취소 보장이 아니며 자동 재등록하지 않는다.
 - 인증의 명시적 무오류 `OK` ACK나 검증되지 않은 세션 응답에는 기존 기한 안에서 정상 인증 응답을 기다린다. 잘못된 서명·태그·HMAC을 수락하거나 기한을 연장하지 않는다. 키 미등록 응답은 미등록 보고로 표시하고 자동 등록으로 전환하지 않는다. 제외·실패 근거는 식별자·원시 응답 없이 고정 코드로 구분한다.
 - 시작 전 입장 차단과 실행 중 자기 예약은 다르게 표시한다. 자기 예약을 외부 진단 충돌로 표시하지 않으며 진행 중 VIN·동의·모든 시작 버튼은 비활성화하고 단계·취소를 제공한다. 실제 외부 예약과 정리 실패 차단은 유지하며 정리 실패가 표시 우선순위다.
-- VIN은 개발자 진단 상단에서 한 번 등록하고 AndroidKeyStore로 보호하는 앱 전용 암호화 저장소에서 재사용한다. 편집 입력만 RAM에 두며 저장 제출·화면 이탈·배경 전환 때 지운다. 개인키·세션키·VIN·원시 프로토콜 응답은 로그에 남기지 않는다. 차량 작업은 휴대폰 잠금 해제·화면 표시·단일 등록 대상·기존 진단 중지 조건을 그대로 요구한다.
+- VIN은 개발자 진단 상단에서 한 번 등록하고 AndroidKeyStore로 보호하는 앱 전용 암호화 저장소에서 재사용한다. 편집 입력만 RAM에 두며 저장 제출·화면 이탈·배경 전환 때 지운다. 개인키·세션키·VIN·원시 프로토콜 응답은 로그에 남기지 않는다. 이 수동 차량 작업은 휴대폰 잠금 해제·화면 표시·단일 등록 대상·기존 진단 중지 조건을 그대로 요구한다.
 - 기존 VCSEC 조회는 암호화 상태 응답의 잠금·프렁크 값만 표시한다. v22의 별도 Infotainment 조회는 인증된 `GetDriveState` 응답의 P·R·N·D 또는 UNKNOWN과 원본/실제 수신 시각을 표시한다. 누락·Invalid·SNA는 P가 아니며 시각 누락을 로컬 wall clock으로 대체하지 않는다. 지난 조회를 현재 P·차량 감지·명령 실행 허가로 재사용하지 않는다. 프렁크·잠금·주행 제어, UWB 거리 측정, 반복 조회는 없다.
 
 ### 화면 표시 음성 프렁크 실차 시험
 
 - v44의 별도 실제 차량 동작 영역만 실제 프렁크 명령을 허용한다. 기존 합성/TTS/PCM·음성 dry-run은 차량에 연결하지 않는다. 실차 동의는 RAM에서만 유지하고 한 번 시작하면 해제한다. 초기 시험은 화면 표시·잠금 해제·감지 정상 중지 상태만 지원하며 잠금 주머니 완성으로 보고하지 않는다.
-- 직접 마이크의 정확한 최종 명령이 인정되면 별도 “확인” 발화 없이 안전 조건을 검사해 개방을 요청한다. 주변 사람·재생 음성의 명령도 실행될 수 있으므로 동의와 직접 시작을 요구한다. 최종 단일 후보·신뢰도0.85 이상은 보수적 시험 정책이지 화자 인증·실측 최적값이 아니다. 누락/0.0/부분 결과·불명 문장은 실차 요청을 만들지 않으며 화면의 차단 사유를 보존한다.
+- 직접 마이크의 정확한 최종 명령이 인정되면 별도 “확인” 발화 없이 안전 조건을 검사해 개방을 요청한다. 주변 사람·재생 음성의 명령도 실행될 수 있으므로 동의와 직접 시작을 요구한다. 현재 정책은 n-best 중 정확한 전체 문법 후보를 허용하고, 어느 후보든 취소어가 있으면 먼저 차단한다. 실제 양수 유한 점수가 제공되면 채택 후보0.85 이상을 요구하며 승인된 점수 미제공 값은 점수 gate만 생략한다. 부분 결과·불명 문장·기한 만료는 전송하지 않는다. 마이크 해제와 인식기/pipe 정리를 별도로 확인하며 어느 쪽이든 불명이면 명령 dispatch·음성 lease 반환·차량 core 입장을 막고 정리 불명 예약을 유지한다. 이 정책은 화자 인증·실측 최적값을 뜻하지 않는다.
 - 실제 전송 직전 같은 작업에서 검증한 P를 요구한다. 수신 monotonic5초·원 wall10초·원 wall 미래 skew2초 및 명령 인정부터40초 기한을 검사한다. 원 시각 보정·이전 접근 P 재사용·불명값의 P 승격은 금지한다. SDK0 이후 결과 불명 명령은 재전송하지 않으며 후속 인증 BODY 상태와 차량 명령 응답을 분리한다.
 - 실차 시험의 기존 마스킹 순환 로그는 시험 어휘 밖 내용을 가리며 명령 판정은 마스킹 전 결과에 기존 정책을 적용한다. v49부터 사용자가 직접 시작한 개발용 마이크 음성 시험은 녹음·최종 인식 원문을 기본으로 백업 제외 전용 파일에 저장한다. 별도 저장 체크는 없으며 시작 버튼 가까이 기본 저장을 고지한다. 일반 STT의 직접 마이크·녹음 후 PCM과 실차 음성 시험에 적용하며 합성·무음 파일·부분 인식은 자동 저장하지 않는다. 화면 진입·복원·복귀만으로 녹음하지 않으며 실차 안전 동의는 별도로 유지한다. 저장 실패를 성공으로 표시하지 않는다.
 
@@ -76,21 +76,66 @@
 
 - 개발자 진단 상단에서 VIN 17자리 형식을 검증해 등록·변경하며 기본 표시는 마스킹한다. 키 등록·인증·P 조회·광고명 감지는 같은 저장 VIN을 사용하고 각 화면의 중복 입력은 제거한다.
 - 암호화 저장은 AndroidKeyStore로 보호하며 평문 저장·복호화 실패 시 평문 fallback을 금지한다. 앱 재실행·재부팅 뒤 복원할 수 있어야 하며 VIN·광고명/hash·키를 로그·Wiki·저장소에 남기지 않는다. 저장 데이터는 Android 백업·기기 간 전송에서 제외한다.
-- 미등록·복원/저장 실패는 성공으로 숨기지 않는다. 등록·변경·복원만으로 차량 연결·키 추가·조회·감지·마이크를 시작하지 않으며 실제 작업은 명시적인 시작과 기존 입장 게이트를 요구한다.
+- 미등록·복원/저장 실패는 성공으로 숨기지 않는다. VIN 등록·변경·복원만으로 차량 연결·키 추가·조회·감지·마이크를 시작하지 않는다. 수동 작업은 명시적인 시작을, 제품 서비스는 별도로 승인·저장된 ON과 아래 새 광고 입장 조건을 요구한다.
 - 실행·정리·예약 유지 중에는 VIN 변경을 막고 작업 시작 시 확정한 대상 VIN을 끝까지 사용한다. 기존 앱 키·차량 등록·설정·로그를 삭제·초기화·재등록하지 않고 `FLAG_SECURE` 및 승인·취소·자원 정리 경계를 유지한다.
 
-### 차량 광고명 감지 진단
+### 차량 광고명 감지 진단 — 과거/별도 모드
 
 - 별도 BLE 진단은 저장 VIN의 시작 스냅샷으로 공식 광고명을 계산하고 AltBeacon의 native exact-name 필터로 감시한다. 이름/hash·MAC은 RAM에서만 처리하고 상태·로그·앱 Intent·영속 설정에 남기지 않는다. `ScanResult.timestampNanos`와 전달 시각을 구분하며 최신 일치 표본만 소비한다.
-- 기본 이름 모드는 감지 전용이며 GATT·TX·마이크·BT 보조·재시도를 사용하지 않는다. 별도 명시적 **접근 인증·상태 조회** 모드만 기존 앱 키로 BODY·DRIVE 읽기를 허용한다. 감지 ON/OFF만 영속화하고 복원은 감지만 재개한다. 이전 후보·조회·명령·자동 음성 동의는 복원하지 않으며 사용자 중지·OS 시작 거절을 존중한다.
+- `VEHICLE_NAME_DETECTION`은 감지 전용이며 GATT·TX·마이크·BT 보조·재시도를 사용하지 않는다. 별도 명시적 **접근 인증·상태 조회** 모드는 기존 앱 키로 BODY·DRIVE 읽기를 허용한다. 과거 감지 전용 ON 복원은 감지만 재개했으며 이전 후보·조회·명령·자동 음성 동의를 복원하지 않았다. 현재 홈의 `VEHICLE_SERVICE_UWB` 및 저장 ON 복원은 아래 별도 계약을 따른다.
 - 광고 일치는 차량 인증·거리·현재 P·제어 허가가 아니다. foreground 스캔 기간 1,100ms·background 30,000ms와 기본 무선 모드를 유지하고 두 모드의 betweenScanPeriod를 0ms로 설정한다. 앱 설정상의 5분 대기는 제거하지만 차량 미광고·OS/OEM 제한은 남는다. 실차 감지율·전력 비용·UWB 호환성은 별도 검증한다.
 
-### 접근 기반 인증·읽기 조회
+### 접근 기반 인증·읽기 조회 — 별도 모드
 
 - 현재 광고의 원 `BluetoothDevice`·timestamp만 RAM 대상에 사용한다. 10초 freshness·미래/역순/중복/이전 세대·owner/token/후보/회차·VIN snapshot·단일 association 유지·BT/권한/위치/알림/FGS·배타 예약을 검사한다. CDM 당시 주소 fallback·BT/CDM만으로 새 읽기는 금지한다.
 - native 스캔 정지 확인 후 단일 lease·GATT에서 기존 키만 원자 로드한다. alias가 없거나 손상되면 생성·삭제·교체·등록하지 않는다. BODY→새 DRIVE conversation은 각각 fresh domain handshake와 `start(false)`이며 총 40초 기한·재전송/연결 재시도 없음이다.
 - 수동 등록·조회는 기존 화면/잠금 해제 조건을 유지한다. background 예외는 정확한 서비스 소유 읽기 회차에만 적용한다. HOME·잠금은 해당 읽기를 취소하지 않지만 사용자 OFF·권한/BT/owner 상실은 전송을 봉인한다. 준비 IO·정리 중에는 예약을 먼저 반환하지 않는다.
 - BODY 성공 후 DRIVE 실패는 부분 결과다. 로컬 정리 불명은 예약 유지와 재입장 차단이며 실제 자원 해제 후 감지를 재개한다. 같은 후보에서는 다시 조회하지 않고 후보 철회/만료 후 새 광고에서만 재무장한다. 지난 P·누락 원 시각·UNKNOWN은 제어 허가가 아니다.
+
+### v55 제품 서비스 감지·자동 UWB
+
+- 홈 ON은 `VEHICLE_SERVICE_UWB`를 선택한다. **신선한 정확 `FILTERED_SCAN` 광고 → native scan pause 확인 → 기존 앱 키 단일 lease → 인증·FiRa 협상 → UWB 측정 → 정리 확인·lease 반환 → 스캔 재개**를 수행한다. 과거 감지 전용이나 BODY·DRIVE 읽기 모드를 묵시적으로 승격시키지 않는다. 키 생성·추가 등록·마이크·음성·프렁크·클라우드는 이 경로에 연결하지 않는다.
+- 살아 있는 `ObservationService`·현재 token/후보/회차·시작 VIN·해당 광고의 실제 `BluetoothDevice`와 신선도를 모두 검사한다. CDM·자체 BT·주소 fallback·이전 세대/중복/역순 광고만으로 시작하지 않는다. 한 접근 후보당 한 번이며 pause·GATT·정리 시간은 부재로 세지 않는다. 정리 후 실제 재관측에서 후보가 철회/만료되고 새 광고가 와야 다음 접근으로 재무장한다.
+- v60은 광고 입장 신선도와 이미 시작된 서비스 연결 수명을 분리한다. 최초 SDK 발급 직전까지 원 광고10초를 검사하고, 실제 non-null GATT handle을 소유한 뒤에는 기존 연결/단계/전체 기한을 적용한다. handshake 플래그나 원 광고 시각은 앞당기거나 덮어쓰지 않는다. 초기133은 전송 전·연결 진전 전·같은 handle·2초 뒤1회만 복구하며 서비스 OFF/owner·VIN·권한 상실·정리 불명은 계속 봉인한다. 수동 프렁크·UWB·기존 접근 읽기 경계를 일반적으로 완화하지 않는다.
+- 저장 ON 복원은 새 token·빈 후보로 감지를 시작하고 이후 새 광고만 소비한다. 이전 후보·인증·UWB 세션·거리·명령은 재생하지 않는다. OFF/알림 중지는 영속화하고 OS의 복원 거절·force-stop·권한 제한을 성공으로 감추지 않는다.
+- `RANGING` 미허용은 감지를 유지하고 UWB만 차단한다. 권한은 명시적인 UI 행동으로 기존 launcher에서 요청하며 결과·권한 팝업 복귀만으로 죽은 서비스를 다시 시작하거나 이전 회차를 재생하지 않는다. 실행 중 권한 상실은 해당 UWB의 새 전송을 봉인하고 정리하며, BLE 필수 권한 상실은 서비스 중지 경계다.
+- HOME·잠금 유지 예외는 정확한 `serviceOwned` 요청에만 적용한다. 서비스 OFF·권한/BT/owner 상실에는 새 소비·전송을 봉인한 뒤 bounded 정리를 수행한다. native 정리 실패는 예약·FGS와 재입장 차단을 유지하고 정상 종료로 표시하지 않는다. 기존 수동 키/조회·UWB는 화면/잠금 게이트와 화면 이탈 취소를 그대로 따른다.
+- 서비스 UWB는 최초 유효 거리 대기 60초, 유효 수신 후 callback elapsed 기준 10초 미수신으로 종료한다. 유효 수신이 이어지는 측정은 고정 60초·전체 180초로 자르지 않되 초기 연결·인증·협상의 180초 기한은 유지한다. 별도 수동 UWB는 서비스 OFF·직접 시작과 기존 측정 60초·전체 180초 제한을 유지한다. 이 수치는 종료 정책이며 RF 수신·근접 보장이 아니다.
+- 대기 중 wake lock은 없다. 서비스 회차는 초기 연결 180초+정리 여유 5초의 유한 lock만 취득하고, 실제 `serviceOwned` `RANGING`의 새 유효 거리 수신에서만 최소 5초 간격으로 20초(갱신 간격 5초+미수신 종료 10초+정리 여유 5초)를 갱신한다. 회차 완료·정리 실패에도 lock 해제를 시도하되, 해제 자체가 불명이면 lock 참조·실패 상태·field/scan 예약·FGS를 유지하고 재시작을 요구한다. lock 해제 성공과 native 정리 불명의 FGS/lease 보존은 별개다. 기존 45초 회차 lock을 서비스 UWB의 지속 측정 상한으로 적용하지 않는다.
+- 알림은 `serviceOwned`·`RANGING`·live peer·callback 수신 2초 이내의 유효 표본만 최근 거리로 표시한다. callback이 없어도 readiness 갱신에서 표시를 만료시키며 peer 정지·endpoint close·정리 즉시 제외한다. 최신 callback을 우선하고 동시 시각에는 작은 peer index를 선택하며 같은 peer의 거리/각도만 쓴다. 지난 표본은 진단 근거로만 보존하고 정리 실패·중지·오류를 거리보다 우선한다.
+- 실제 이번 세션 capability에 따라 AoA를 요청한다. v55 당시 raw 각도·confidence는 독립 검증 후 RAM에만 두었다. 사용자가 선택한 “360도 검증부터 진행”에 따라 v59는 동일 거리 표본의 raw 각도·독립 축별 confidence·세션 지원 여부를 아래 schema24 계약으로 기존 순환 로그에 기록한다.
+- UWB AoA의 설치 모듈 radians·공개 API degrees 충돌과 단위 식별/실차 앞뒤 근거 부족은 유지된다. **UWB 정밀360도**는 검증 중이며 단위를 추정·변환하거나 좌표 화살표와 합성하지 않는다. v59의 회전 화살표·GPS·나침반 미추가는 당시 범위다. 현재 v66의 별도 WGS 좌표·폰 진북 기반 대략적 안내는 아래 계약을 따르며 UWB 전후 판정 성공이 아니다.
+- 소스 구현과 호스트 합성 smoke는 실제 BLE/UWB RF·잠금 지속·거리·방향·native 종료의 기기 검증과 별개다. v54 설치·앱 버전 표시 이력은 v55 기기 성공 근거가 아니며, v59 로그 추가 역시 설치·UI·실차 방향 검증 성공을 뜻하지 않는다.
+
+### v61 FiRa 식별자·종료 계약 정정
+
+- request `vd0.u0.field1`은 endpoint enum이 아닌 **uint32 상관 ID**다. request·plan·소유 세션의 `requestSessionId: Long`은 `0..0xffff_ffffL`을 끝까지 보존한다. 누락 기본값0·상위 bit·최댓값을 허용하고 중복 검사는 유지한다. response `vd0.v0.field1`은 원 ID를 그대로 echo하며0은 proto 기본값에 따라 생략한다. v60의 request1..11 제한은 잘못된 해석으로 정정한다.
+- 새 FiRa/backend `firaSessionId: Int`와 request ID는 별개다. 기존 backend nonzero 정책은 유지하되 공식 `SecureRandom.nextInt()`의 보장으로 설명하지 않는다. peer 주소·peer index·Android session handle·상위/하위 bit에서 stop 대상 ID를 추정하지 않는다.
+- stop/stopped `vd0.y1/z1`은 **0=NONE을 포함한0..11 enum** 목록이다. 알려진 stop값을 `Long`으로 확장해 원 request ID와 exact 비교하며 정상 부분 stop은 해당 세션만 정리한다.0은 exact0 ID 선택이지 전체 종료 표시가 아니다.
+- 빈 목록·unknown enum·하나라도 미매칭인 stop은 회차 봉인·소유 RF 전체 로컬 정리·새 TX 금지로 보낸다. 이는 **우리 기존 fail-closed 정책**이며 공식의 미매칭 전체 종료 동등성을 주장하지 않는다.
+- 자연 종료·timeout·peer 종료의 로컬 정리는 uint32 전체 ID에 대해 가능해야 한다. 정리 성공 뒤 stopped에는 원 ID 중0..11로 표현 가능한 항목만 직렬화한다. 혼합 목록은 해당 항목만 보내고 전부 비표현이면 새 TX 없이 `TESLA_UWB_SESSION_STOPPED_NOT_SENT`를 남겨 완료 정산한다. 실제 송신과 통지 처리 완료는 분리한다. **공식 `oc0.e.G`는 enum filter 뒤 빈 `z1`도 생성하므로 TX 생략은 공식과 다른 우리 보수 정책**이다.
+- response 대기 중 stop된 plan은 늦은 BLE 완료 callback에도 RF를 시작하지 않는다. 취소·실패·OFF·권한/owner 상실의 전송 봉인, native close 불명의 lease 유지, 중복 close·late callback 봉인, 부분 세션 주소/STS 소거 격리를 유지한다. 기존 인증·권한·owner/token/VIN·replay·capability/config·기한·backend와 마이크/프렁크 경계는 바꾸지 않는다.
+- [v61 REA·원 DEX 근거](Tesla-Integration.md#v61-rea원-dex-대조--fira-식별자-계약-정정)는 정적 계약이다. v60 실차는 로컬 `UNSUPPORTED_ENDPOINT`로 RF 전 종료됐다. 이후 v61 설치·호스트/비차량 회귀는 통과했지만10/26 17:07 실차1회는 키 인증·CCCD·native0·notification12 뒤30초 협상 기한이 만료됐다. request 처리·RF/거리/각도 성공은 관측되지 않았으며 ID 수정의 차량 수락 효과로 단정하지 않는다.
+
+### v65 단말 정보·수신 시각 안전 요구사항
+
+- wire·enum·실제 Android 데이터·구독/해제 상세는 [단말 정보 응답 정본](Tesla-Integration.md#v65-단말-정보-응답거리-receipt-시각)을 따른다. metadata는 기존 UWB owner·인증 송신 경로 안에서만 처리하며 모델/앱 버전 위장·가짜 배터리·미관측 AVAILABLE·종료 후 송신을 금지한다.
+- ONCHANGE의 단일 구독·최신 변경 coalescing·모든 receiver/listener 해제와 실패 시 정리 불명 예약을 요구한다. route/UUID·AEAD·replay·owner/token/VIN·OFF·권한·기한·bounded queue 경계는 유지한다.
+- field3 요청은 단말 정보나 거리 승인과 별개다. UNLOCK/DRIVE 자동 권한 승인과 임의 rejection을 추가하지 않으며 기존 키·마이크·프렁크·잠금/주행 제어 권한을 확대하지 않는다.
+- 거리 source timestamp는 원값, receipt는 callback ingress monotonic, 처리 시각은 queue dispatch로 구분한다. 알림2초·유효 receipt+10초 무수신 종료·최초60초 및 기존 수동/협상 기한은 불변이며 지연 처리로 freshness를 새로 부여하지 않는다. 만료·권한 상실·close 뒤 queued 표본으로 현재값을 부활시키지 않는다.
+- FieldLog schema27은 변경하지 않는다. field44 누락 보완·호스트 통과·65 설치를 실차 RF 원인 해결이나 유효 거리/방향·차량 수락으로 확대하지 않는다. channel·STS·AoA·timeout·retry와 기존 안전 정책은 그대로다.
+
+### v66 좌표 안내·접근 한정 수집 요구사항
+
+- 전송·좌표 선택·시각·FGS IPC의 단일 정본은 [v66 좌표 기반 나침반·UWB 병행](Tesla-Integration.md#v66-좌표-기반-나침반uwb-병행)이다. 기존 앱 키·단일 GATT에서 domain3 READ_ONLY 위치를15초 단발 sidecar로 읽고 domain2 UWB의 crypto/identity/replay·기한·주 전송 우선순위를 분리한다. 위치 거절/무응답은 UWB 독립, 실제 공유 transport 오류는 전체 실패다.
+- 좌표/폰 센서값은 RAM 전용이고 raw GPS 로그·영속/백업·서버 전송을 금지한다. FieldLog schema27을 유지한다. 현재 차량 위치와 DriveState의 목적지를 혼동하거나 GCJ·누락/서로 다른 family 축·state/receipt 시각으로 정상 WGS fix를 꾸미지 않는다.
+- 차량60초·폰15초·heading2초의 개별 TTL과 미래2초를 적용한다. 폰 accuracy100m 초과는 숫자를 숨기고 근처 `max(10m, accuracy)`에서는 방향을,1km 초과에서는 화살표를 숨긴다. 시계 샘플 지연은 일시 숨김, 실제 후퇴는 봉인이다. 임계값은 안내 정책이지 UWB/접근 인증·탑승·제어 조건이 아니다.
+- 실제 AltBeacon BeaconService의 connectedDevice|location **양성 type ACK → armed**와 실제 phone source 수집을 구분한다. armed idle은 GPS/센서 OFF이고 현재 동일 serviceUwbRequest 접근에서만 시작한다. 위치 거절/timeout/null·좌표 없는 operation 종료는 해제, 유효 fix는 원 나이를 반영한60초 이내 남은 기간만 유지한다. 만료에는 긴 UWB 회차 중에도 해제하고 새 poll/retry를 추가하지 않는다.
+- 선택 background 위치 권한은 설정의 **항상 위치 허용(선택)**에서 사용자 직접 승인만 허용한다. visible/unlocked에서 시작한 location FGS의 HOME·잠금 유지와 boot/복원을 구분한다. background 권한 없는 복원은 BLE/UWB 유지·좌표 명시 재개, 허용된 복원도 새 owner·빈 좌표다. 권한 복귀로 죽은 서비스를 재시작하지 않는다.
+- OFF·VIN/owner/권한 상실은 raw RAM·late callback을 봉인한다. source/FGS 정리 불명은 기존 예약·FGS·재입장 차단을 유지한다. 자동 마이크·프렁크 미연결과 수동 작업의 화면/잠금 조건은 불변이다.
+
+
+
 
 
 ## 시간 정책
@@ -113,14 +158,22 @@
 ## 실차 시험 로그
 
 - 비민감 진단 이벤트를 앱 내부 파일에 보관하고 시험 후 USB 디버깅 연결에서 회수한다. 이 기본 로그 동의는 외부 전송 승인이 아니다. 개발용 마이크 음성 시험은 기본 저장 안내를 표시하고 사용자의 직접 시작 시 녹음·최종 원문을 전용 영역에 보관한다.
-- 프로세스·시험 식별자, 시각, 허용된 이벤트 코드와 권한·관찰·오디오 상태를 기록한다. 실차 시험은 기존 마스킹 문장·신뢰도·판정 사유만 일반 순환 로그에 추가한다. VIN·Bluetooth 주소·association ID·위치·음성 녹음·임의 원문·예외 원문은 일반 로그에 넣지 않는다. 개발 시험 전용 녹음 보관과 사용자가 등록한 VIN의 암호화 설정 저장은 진단 로그와 별개다.
+- 프로세스·시험 식별자, 시각, 허용된 이벤트 코드와 권한·관찰·오디오 상태를 기록한다. 실차 음성 시험은 기존 마스킹 문장·신뢰도·판정 사유만 일반 순환 로그에 추가한다. VIN·Bluetooth 주소·association ID·위치·음성 녹음·임의 원문·예외 원문은 일반 로그에 넣지 않는다. 개발 시험 전용 녹음 보관과 사용자가 등록한 VIN의 암호화 설정 저장은 진단 로그와 별개다.
 - 기존 `events.jsonl`은 보존한다. 승인된 새 `events-v2.jsonl`과 `.1`~`.3`만 파일당 512KiB·전체 2MiB 상한으로 순환한다. 비동기 큐는 512개로 제한하며 쓰기 실패·유실 가능성을 표시하되 감지 서비스를 중지시키지 않는다. 반복 광고는 집계하고 상태 전이·오류를 기록한다.
+- v59의 FieldLog schema24는 같은 `lastReceivedSample`의 거리·peer·수신 시각에 `uwbLastAzimuthRaw`·`uwbLastElevationRaw`와 독립적인 `uwbLastAzimuthConfidence`·`uwbLastElevationConfidence`를 함께 기록하고, 세션의 `uwbAzimuthSupported`·`uwbElevationSupported`를 추가한다. raw는 음수를 허용하는 유한 Double/null, confidence는 축별 0..2 정수/null, 지원 여부는 Boolean/null이며 단위 변환이나 누락값의 0/false 대체를 하지 않는다.
+- 다음 표본에 각도·confidence가 없으면 이전 값을 이월하지 않는다. 반복·종료 스냅샷의 지난 표본은 새 수신이 아니며 v1..v23 로그와 해석을 보존한다. 추가 필드는 비민감 숫자·Boolean/null만 허용하고 VIN·MAC·STS·GPS·자유 문구를 기록하지 않는다. 사용자 [정차 360도 시험](Tesla-Integration.md#v59-360도-검증용-raw-계측) 이후 USB 로그 회수·분석이 필요하며 로그 저장 자체는 단위·앞뒤 판별 성공 증거가 아니다.
+- v60의 FieldLog schema25는 서비스 UWB의 같은 Operation에서 관측한 GATT 단계·사건·실제 elapsed 시각·CREATE/RECONNECT·SDK 접수·원 status/state·CCCD·연결/프로필/RX 관측을 추가한다. `connectedObserved`는 이번 작업에서 연결 성공을 관측했다는 뜻이지 현재 연결 유지나 인증 성공이 아니다. 미관측 원 코드는 null이며 SDK 접수를 callback 완료로 만들지 않는다. 신규 회차는 초기화하고 terminal 스냅샷은 보존하며 GATT 사건을 새 거리·각도 수신으로 세지 않는다. 이전 schema1..24는 새 필드 미관측으로 해석하고 기존 순환 상한·민감정보 제외를 유지한다.
+- v62의 schema26은 서비스 UWB의 notification·완성 frame·실제 protocol 소비를 다른 분모로 기록한다. 기존 GATT RX 사건에는 해당 notification의 decoder frame 산출·미완성/실패를 추가하고 PROTOCOL 사건에는 실제 반환 step·입력 형식·기존 auth evidence·AEAD 검사·FiRa 분류와 비민감 header/제외 사유를 담는다. 원문·키·STS·VIN·MAC·UUID는 기록하지 않는다.
+- 새 회차는 지원 카운터0·미관측 메타 null, schema1..25의 새 필드는 null이다. protocol별 header/암호/분류는 reset하고 terminal·capability·거리의 지난 snapshot을 새 수신으로 세지 않는다. 정상 FiRa를 `RESPONSE_INVALID`로 오표시하지 않되 수락·보안·replay·기한·backend 정책을 바꾸지 않는다. RX/PROTOCOL 관측은 거리·wake lock 갱신이나 차량 제어 허가가 아니다.
+- v64 schema27은 UWB observer의 미분류/해석 오류 plaintext에 한해 최상위 필드 번호·wire·길이만4096바이트/8항목/135자 이내로 요약한다. 현재/직전 생성 요청과의 header 일치 분류는 인증·수락과 분리하고 이전 key/hash/replay context를 보존하지 않는다. raw 값·본문·식별자·해시·자유 문구를 제외하며 Kotlin/Python strict 검증·부분 요약 제외·수신별 reset·schema1..26 미관측·새 PROTOCOL 사건만 집계를 요구한다. 이전 응답 수락·복호·재시도·기한·차량 동작은 바꾸지 않는다.
 - 기록된 이벤트는 프로세스 재시작 후 보존하되 종료 중 수신하지 못한 이벤트나 아직 저장하지 못한 내용을 복원했다고 표현하지 않는다. 로그가 없다는 사실만으로 차량 접근이 없었다고 단정하지 않는다.
 
-## 주말 BLE 반복 시험의 경계
+## 과거 BLE 반복 시험의 경계와 로그 스키마
+
+이 절은 기존 주말 BLE 비교 시험·접근 읽기 모드와 버전별 로그 해석 계약을 보존한다. 현재 사용자 표면의 제품명·조작 흐름이 아니며, 감지만 복원·UWB 없음·45초 회차 lock 등은 해당 과거/별도 모드 범위다. v55 홈 서비스에는 위 `VEHICLE_SERVICE_UWB` 계약을 적용한다. 과거 로그·이벤트명·스키마를 현재 제품 표현에 맞추어 삭제하거나 재해석하지 않는다.
 
 - 사용자가 명시적으로 시작한다. 비 self-managed Bluetooth association 한 개·Bluetooth ON·`BLUETOOTH_CONNECT`·알림 허용을 요구한다. AltBeacon 보조 스캔은 `BLUETOOTH_SCAN`·정확한 위치 동의·시스템 위치 ON을 추가 요구한다. 권한은 사용자가 직접 승인하며 UWB 권한·무필터 fallback은 추가하지 않는다. 로그 실패는 감지 입장 차단 조건이 아니다.
-- 보조 스캔에서는 AltBeacon `BeaconService`가 location FGS·스캐너·알림 하나를 소유하고 bound-only `ObservationService`가 CDM·후보 정책·기존 GATT 정리를 담당한다. 보조 스캔 없는 관찰은 기존 connectedDevice FGS를 유지한다. 마이크/STT·다른 진단과 상호 배제하며 HOME·잠금은 중지 조건이 아니다.
+- **역사 구분:** v27 도입 당시 보조 스캔에서는 AltBeacon `BeaconService`가 location FGS·스캐너·알림 하나를, bound-only `ObservationService`가 CDM·후보 정책·기존 GATT 정리를 소유했다. 이후 v55~v65의 실제 BLE FGS는 connectedDevice였고 location FGS/백그라운드 위치 권한을 사용하지 않았다. v66은 실제 BeaconService의 connectedDevice 기본 감시에 선택 좌표 lease의 location type ACK를 추가한다. 따라서 과거 “BeaconService location 소유”를 v55~v65의 실제 유형이나 현재 센서 상시 수집으로 읽지 않는다. 마이크/STT·다른 진단의 상호 배제와 HOME·잠금 유지 경계는 각 경로 계약을 따른다.
 - 기준 방식은 실제 CDM BLE 출현당 한 회차이며 종료 후 실제 이탈을 기다린다. 개선 방식은 선택한 CDM·외부 BT·필터 스캔 증거를 하나의 후보로 병합하고 후보와 GATT 회차 순번을 구분한다. BT 보조를 꺼도 비교 증거만 기록하며 GATT를 유발하지 않는다. 자체 GATT 중/close 후의 BT 연결 신호는 억제하고 BT 연결 해제는 기존 증거 철회에만 사용한다.
 - 등록 주소 비교 프리셋과 감지만·스캔·BT 보조·백그라운드 연결·제한 재시도는 시작 전 RAM에서 선택하며 실행 중 고정한다. 감지만 모드는 GATT·회차 wake lock을 발급하지 않는다. 등록 주소 비교의 `autoConnect=true`는 별도 옵션이며 두 비교 프리셋 기본은 false다. 직접 GATT 키/상태 읽기는 v40부터 아래 연결 정책을 적용한다.
 - 필터 스캔은 AltBeacon 2.21.2의 `ForegroundServiceScanStrategy`와 기본 스캔 기간·무선 모드, foreground/background 대기 0ms를 사용한다. 앱의 40초/120초 Handler 스케줄·5초 배치 경로는 제거한다. GATT 전 native stop 확인·콜백 세대 봉인을 유지한다. 실제 수신 시각으로 오래된/역순/중복 표본을 거절하며 창 종료만으로 유효 표본을 먼저 폐기하지 않는다.

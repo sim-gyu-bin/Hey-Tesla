@@ -2,11 +2,13 @@
 
 **차량 근처에서만 작동하는 Android 네이티브 음성 리모컨.** 잠긴 휴대폰을 주머니에서 꺼내지 않고, 차량에 접근해 “헤이 테슬라, 프렁크 열어줘”라고 말하는 사용 경험을 목표로 한다.
 
-> 현재 소스는 **`0.52.0-probe`(`versionCode=52`)**다. v0.51까지의 Android 내장 `SpeechRecognizer` 명령 판정은 그대로 두고, 개발자 진단 → 음성 인식 진단(`SpeechRecognitionProbe`)에만 sherpa-onnx 한국어 오프라인 zipformer(`sherpa-onnx-zipformer-korean-2024-06-24`)를 **실험용 그림자 인식기**로 추가했다. Moonshine 재도입이 아니며, 그림자 결과는 명령 판정(`FrunkVoicePolicy`)·실차 음성 시험(`FrunkVoiceProbe`)·차량 제어에 쓰지 않는다. 그림자 원문은 v0.51 n-best와 같이 RAM 전용으로만 표시한다. [v0.52 검증 절차](wiki/Device-Validation.md#0520-probe--sherpa-onnx-zipformer-진단-그림자-인식)를 따른다.
+> 현재 소스·생성 APK 버전은 **`0.66.0`(`versionCode=66`)**이다. 기능별 패키지 이관 뒤 미사용 구형 실행 경로·빈 패키지·불필요 선언을 정리했다. 앱·계측 APK 빌드, JVM582개·독립 상대편97개·Python 도구176개와 실제 소비자 호스트 smoke를 통과했다. **정리 APK는 폰에 설치하지 않았다.** S23에는 기존 같은 버전의 [좌표 기반 나침반·UWB 병행](wiki/Tesla-Integration.md#v66-좌표-기반-나침반uwb-병행) 설치본이 남아 있으며 마지막 확인 상태는 서비스 OFF다. 실제 차량 위치 응답·UWB 거리 성공은 미검증이다. [검증 기록](wiki/Device-Validation.md)을 따른다.
+>
+> v0.52에서 추가한 sherpa-onnx 한국어 zipformer는 음성 인식 진단의 **그림자 인식기**로 유지한다. 실제 명령 판정은 Android 온디바이스 `SpeechRecognizer` 결과를 사용하며, 그림자 결과는 차량 제어·실차 음성 시험에 쓰지 않는다.
 >
 > 호출어·명령 문구의 단일 원본은 `SpeechCommandPhrases`다. 표시용 기본값 두 개에서 정규화 문장·sherpa 보정 문구·로그 마스킹의 기본 허용 어휘·진단 안내를 파생한다. 기존 정확 일치·취소·점수·차량 안전 조건은 유지하며, 호출어 설정 UI와 사용자 호출어의 저장·변경 기능은 아직 없다.
 >
-> 아래는 v0.50 전환 기록이며 그 음성 경로는 v0.52에서도 명령 판정 경로로 유지된다.
+> 아래는 v0.50 전환 기록이며 그 음성 경로는 현재도 명령 판정 경로로 유지된다.
 >
 > v0.50 전환 당시 소스는 **`0.50.0-probe`(`versionCode=50`) Android 내장 온디바이스 `SpeechRecognizer`(`ko-KR`) 전환**이다. v47~v49의 로컬 Moonshine STT(sherpa-onnx)는 v0.50에서 모델·AAR·라이선스 자산과 함께 완전히 제거했다. 앱이 직접 캡처한 16 kHz mono PCM을 `AndroidPcmRecognizer`가 `EXTRA_AUDIO_SOURCE` 파이프와 segmented session으로 인식기에 전달한다. 후보(n-best) 중 하나라도 정규화 후 `헤이테슬라프렁크열어줘`와 정확히 일치하면 수락하고, 하나라도 `취소`/`열지마`를 포함하면 차단한다. 인식기가 점수를 주지 않으면(0.0·−1·null·비유한값) "점수 미제공"으로 기록하고 신뢰도 게이트를 생략하며, 실제 점수는 0.85 이상이어야 한다. STT 일치는 차량 제어 허가가 아니며 P·HANDOFF 5초·명령 10초·안전 동의 게이트는 그대로다. **v0.50 실기·실차 결과는 아직 기록되지 않았다.** [v0.50 검증 절차](wiki/Device-Validation.md#0500-probe--android-온디바이스-speechrecognizer-전환)를 따른다.
 >
@@ -51,6 +53,12 @@ Android 앱은 React Native가 아닌 **Kotlin 네이티브**로 개발한다. �
 
 개발 도구와 라이브러리는 아래 빌드 조합으로 고정했다. 호출어 엔진과 접근 경로의 최종 채택은 아직 확정하지 않았다. 진단·실차 음성 STT는 v0.50에서 Android 내장 온디바이스 `SpeechRecognizer`로 전환했으며(v47~v49의 Moonshine 경로는 제거) 실제 인식·실차 경로 검증은 별도다. v0.52에서는 사용자 승인에 따라 sherpa-onnx 1.13.8 런타임과 `sherpa-onnx-zipformer-korean-2024-06-24` 모델을 **진단 화면 전용 그림자 인식**에 한해 추가했다(명령 판정·차량 제어 미사용, 네트워크 전송 없음). 그 밖의 새 외부 음성 SDK·모델, 계정·비용 발생 또는 외부 오디오 전송은 사전 동의 없이 추가하지 않는다.
 
+### 기능별 Kotlin 소스구조
+
+단일 Android `app` 모듈을 유지하며, `app/src/main/java/com/heytesla/app/` 아래 Kotlin 파일을 기능별 폴더와 실제 패키지로 정리한다. `app/`은 앱 런타임·설정, `service/`는 Android 서비스·리시버, `vehicle/`은 `detection/`·`ble/`·`protocol/`·`key/`·`uwb/`·`navigation/`·`frunk/`, `speech/`는 음성, `diagnostics/`는 진단, `logging/`은 로그, `ui/`는 Compose 표현을 담는다. 세부 경계는 [네이티브 아키텍처](wiki/Native-Architecture.md#기능별-실제-소스구조)에 둔다.
+
+Manifest에 등록된 Android component는 파일을 용도별 폴더로 옮겨도 기존 `com.heytesla.app.*` FQCN을 유지한다. 기존 CDM 연결·기본 비서 선택·PendingIntent·런처의 component identity를 보존하기 위한 예외이며 중간 래퍼나 호환 alias를 추가하지 않는다. 패키지 이관 뒤에는 현재 제품 시작점이 없는 구형 BLE 비교·관찰·자동 BODY→DRIVE 조회·자동 마이크 실행 가지와 전용 테스트를 제거했다. 현재 서비스 UWB·좌표 안내·수동 키 조회·음성·프렁크와 공통 송수신·안전 회귀·과거 로그 해석은 보존한다. Nordic 빈 패키지·빈 아이콘 폴더·미사용 Preview 직접 의존성도 제거했다. 앱 ID·namespace·버전66·저장키·현재 서비스 정책·권한은 유지하며 사용자 데이터·로컬 모델·벤더 라이선스는 삭제하지 않는다.
+
 ## 반드시 지킬 조건
 
 - 초기 설치·권한·계정·설정 단계 외에는 앱 실행, 알림 터치, 잠금 해제, 마이크 버튼, 매번 지문 인증, 매사용 서비스 수동 시작을 요구하지 않는다.
@@ -85,19 +93,19 @@ Android 앱은 React Native가 아닌 **Kotlin 네이티브**로 개발한다. �
 
 ## 빌드와 실행
 
-현재 소스와 S23 설치는 `com.heytesla.app` / `0.47.0-probe`(`versionCode=47`)다. 앱·계측 APK 빌드, JVM337개(실패/오류/skip0), Lint 오류0/경고14, Python 분석기94개를 통과했다. debug APK는238,276,380바이트이며 모델3개 비압축·JNI4개 ABI·라이선스5개 동봉을 확인했다. S23 native 합성 음성·무음 추론과 입장 거부 계측2개를 통과했지만 합성 발화는 `▁헤이 테슬라 브렁크 열어줘.`로 오인식했다. 무음 결과는 빈 문자열이었다. 실제 홈·설정·음성 진단에서 비교용 안내와 동의 전 시작 차단을 확인했다. 감지 OFF·앱 서비스 없음이며 VIN/설정/XML4개 지문·legacy/archive 로그 동일·활성 로그 기존 접두부 보존을 확인했다. 사용자 발화·실차 개방은 미검증이고 기존 키·VIN·등록·설정·로그는 초기화하지 않는다.
+소스와 S23의 기존 설치본은 모두 `com.heytesla.app` / `0.66.0`(`versionCode=66`)이지만, **이번 소스구조 리팩터링은 폰 설치 전**이다. 기존 설치본의 데이터 보존 설치 후 실제 설정 버전·홈 OFF·실행 서비스0을 확인한 기록과 구분하며 사용자 ON/OFF 설정은 바꾸지 않는다. 앱 정보는 BuildConfig 기반 버전 이름·빌드 번호를 표시한다. 홈 ON은 차량 감지·좌표 안내·자동 UWB를 제어하며 `RANGING` 미허용 시 감지는 유지하되 UWB 측정은 차단한다. 기존 VIN·앱 키·등록·녹음·로그를 초기화하지 않는다.
 
-직접 GATT는 지원 OS(minSdk36)에서 `autoConnect=true`로 생성하고, 접근 읽기의 초기133에만2초 뒤 같은 handle의 `connect()`를1회 호출한다. 최종 중지/기한 종료에서 disconnect+close하며 기존 연결/탐색/MTU/CCCD/암호 검증 경계를 유지한다. 세대 가드는 재접속 전 이미 진입·게시된 콜백을 거절하지만 Android가 제공하지 않는 연결 요청ID를 만들어 가정하지 않는다. SDK Boolean 접수는 연결·차량 인증 성공이 아니다.
+직접 GATT는 지원 OS(minSdk36)에서 `autoConnect=true`로 생성하고, 접근 읽기와 서비스 UWB의 초기133 중 전송·연결 진전 전인 경우에만2초 뒤 같은 handle의 `connect()`를1회 호출한다. 최종 중지/기한 종료에서 disconnect+close하며 기존 연결/탐색/MTU/CCCD/암호 검증 경계를 유지한다. 세대 가드는 재접속 전 이미 진입·게시된 콜백을 거절하지만 Android가 제공하지 않는 연결 요청ID를 만들어 가정하지 않는다. SDK Boolean 접수는 연결·차량 인증 성공이 아니다.
 
 v41은 SDK 201(BUSY)로 **미접수된** 쓰기만 같은 조각으로100ms 뒤 최대2회 추가 발급한다. 원 쓰기5초·전체40초 기한을 유지하며 SDK0 뒤 callback 오류/타임아웃은 같은 쓰기를 재전송하지 않는다.100ms/2회는 Tesla APK의 확정 정책이 아닌 우리 제한값이다. 검증된 BODY 응답의 절전 원 코드를 기록하지만 Infotainment가 깨어 있음·현재 P·제어 허가로 승격하지 않는다. 자동 차량 깨우기는 추가하지 않았다.
 
 v0.50의 실차 경로는 개발자 진단→음성에서 별도 안전 동의 후 직접 시작한다. 앱이 16 kHz·mono·PCM16을 최대 10초(320,000바이트) 캡처하고, 같은 PCM을 `AndroidPcmRecognizer`가 온디바이스 `SpeechRecognizer`(`ko-KR`)에 `EXTRA_AUDIO_SOURCE` 파이프(non-blocking 쓰기)로 전달한다. segmented session(`EXTRA_SEGMENTED_SESSION`)의 `onSegmentResults`를 결합하며, 비segmented 파이프는 S23에서 결과가 null이었다. 파일·무음 대조도 같은 경로를 쓴다. `FrunkVoicePolicy`는 후보 중 하나라도 정규화 후 `헤이테슬라프렁크열어줘`와 정확히 일치하면 수락하고, 하나라도 `취소`/`열지마`를 포함하면 차단한다. 발음 변형 문자열(페이/해이 테슬라, 브렁크/프랑크 등)은 수락하지 않는다. 점수 0.0·−1·null·비유한값은 "점수 미제공"으로 기록하고 신뢰도 게이트를 생략하며, 실제 점수가 오면 0.85 이상이어야 한다. 인식기 실패는 부분 세그먼트가 있어도 명령 없음이다. STT 일치는 차량 제어 허가가 아니며 P·HANDOFF 5초·명령 10초·안전 동의 게이트를 모두 통과해야 전송 단계로 간다. 인식 타임아웃은 운영 15초다. v0.50의 실기·실차 프렁크 결과는 아직 기록되지 않았다.
 
-AltBeacon2.21.2·FGS·스캔 공백0, 읽기 진단의60초 이탈 대기 제거·광고10초 기준·후보당 최대2회/원40초 예산·상위3.5초 읽기 복구는 유지한다. 이 읽기 복구를 실차 명령에 적용하지 않는다. 새 키 등록·자동 깨우기·새 권한·UWB·클라우드·상시 wake lock은 추가하지 않는다. 복원은 감지만이며 이전 조회/명령/음성 동의는 재생하지 않는다. Android16/API36 이상, AGP9.3.1·Gradle9.5.0·Compose compiler2.4.10·BOM2026.06.01·protobuf0.10.0/protoc4.36.2를 사용하며 Gradle/Lint는 명령별 JDK21을 지정한다. v0.50 설치 후 [검증 절차](wiki/Device-Validation.md#0500-probe--android-온디바이스-speechrecognizer-전환)를 따른다.
+AltBeacon2.21.2·FGS·스캔 공백0과 별도 읽기 진단의 제한 복구는 유지한다. 제품 UWB는 한 접근당 한 회차이며 반복 광고·자체 GATT·스캔 재개만으로 재시도하지 않는다. 저장 ON 복원은 새 token·빈 후보·새 광고부터 시작하고 이전 조회/명령/음성 동의/UWB 세션은 재생하지 않는다. v0.54의 수동 RAW UWB에 이어 v0.55 제품 서비스도 사용자 승인 `RANGING` 권한을 요구한다. 새 키 등록·자동 깨우기·클라우드·대기 중 wake lock은 추가하지 않았다. Android16/API36 이상, AGP9.3.1·Gradle9.5.0·Compose compiler2.4.10·BOM2026.06.01·protobuf0.10.0/protoc4.36.2를 사용하며 Gradle/Lint는 명령별 JDK21을 지정한다.
 
 1. JDK 21과 Android SDK Platform 36 / Build Tools 36.0.0을 준비한다. 이 저장소의 실제 빌드는 Android Studio bundled JDK 21.0.10으로 수행했다.
 2. `JAVA_HOME`을 JDK에 맞추고, Git에서 제외된 `local.properties`에 자신의 `sdk.dir`을 지정한다. `ANDROID_HOME`과 `ANDROID_SDK_ROOT`를 함께 설정했다면 동일한 SDK를 가리키게 하거나 빌드 명령의 환경에서 일치시킨다. 전역 환경을 자동 변경하지 않는다.
-3. 다음 명령으로 APK·단위 테스트·Lint를 실행한다. 별도 모델 준비 단계는 없다.
+3. 새 클론은 아래 모델 준비 안내를 먼저 따른다. 로컬 모델·AAR이 준비되면 다음 명령으로 APK·단위 테스트·Lint를 실행한다.
 
 ```sh
 ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon
@@ -117,7 +125,7 @@ APK는 `app/build/outputs/apk/debug/app-debug.apk`에 생성된다. 승인된 US
 adb -d install -r app/build/outputs/apk/debug/app-debug.apk
 adb -d shell am start -n com.heytesla.app/.MainActivity
 ```
-**설정 → 개발자 진단 → UWB 지원 → UWB 지원 확인**은 Android 16 `RangingManager`의 공개 capability만 조회한다. 하드웨어 feature·framework backend·원 가용 코드·거리 측정용 권한을 분리하고, 상세 지원 값은 RAM에만 둔다. 새 권한 선언/승인·실제 거리 세션·peer/address/STS 생성·BLE TX는 없다. 조회 중 다른 진단을 예약 차단하고 정리 불명은 Activity 재생성으로 풀지 않는다. S23에서는 두 거리 권한 미승인에서도 응답을 받았으며, `ENABLED`는 차량 인증·거리 준비의 증거가 아니다.
+**설정 → 개발자 진단 → UWB**에서 **UWB 지원 확인**과 **거리 진단 시작**을 구분한다. 지원 확인은 기존 capability 조회만 하며 RF 거리 세션·BLE TX를 시작하지 않는다. 거리 진단은 서비스 OFF·저장 VIN·시스템 차량 등록·기존 앱 키·사용자가 허용한 `RANGING` 권한을 요구한다. 실제 backend 지원을 확인하고 BLE 세션 HMAC 검증→암호화 FiRa 응답→RAW UWB 세션을 진행하며, peer별 실제 거리(m)·confidence·유효/무효 횟수와 종료 사유를 표시한다. `onOpened`/`onStarted`는 거리 수신 성공이 아니고 종료 후 값은 과거 결과다. 거리·원시 framework 시각·callback 수신 시각은 비민감 순환 로그와 분석기에 보존하며 VIN·주소·STS는 기록하지 않는다. capabilities 비트 의미·차량 수락·실거리는 아직 미확인이다. [구현 계약과 한계](wiki/Tesla-Integration.md#v54-수동-tesla-uwb-거리-진단)를 따른다.
 
 **설정 → 개발자 진단 → 차량 키**는 제품 자동 제어와 별도의 수동 진단이다. v21의 실차 앱 키 인증·암호 상태 조회·같은 키의 새 BLE 연결 조회는 통과했으므로 키 등록을 반복하지 않는다. 새 대상의 초기 등록에만 직접 동의한 **키 추가 요청 · 카드 승인 후 상태 1회 조회**와 실제 키카드 승인이 필요하다. 앱은 Driver 역할의 Android 키만 추가하며 기존 폰키를 제거·교체하지 않는다. **우리 앱 키로 인증·상태 1회 조회**와 **주차 기어 상태 1회 조회**는 등록 요청과 별개이며 개발자 진단 상단의 저장 VIN을 사용한다.
 
@@ -125,17 +133,17 @@ adb -d shell am start -n com.heytesla.app/.MainActivity
 
 
 
-BLE 감지 대조 시험은 **설정 → 개발자 진단 → BLE 연결**에서 광고명/등록 주소 기준/등록 주소 개선 방식과 개별 옵션을 선택한 뒤 명시적으로 시작한다. 기본 광고명 모드는 저장 VIN을 사용하며 감지만·스캔 조건을 고정하고 GATT·마이크·UWB는 시작하지 않는다. 등록 주소 기준은 CDM BLE 출현당 한 회차이며, 등록 주소 개선은 BT 보조·필터 스캔·제한 재시도를 켜고 `autoConnect`는 여전히 false다. **감지만 · GATT 없음**은 후보만 집계하며 GATT·회차 wake lock을 발급하지 않는다. 옵션은 RAM에서만 선택하고 실행 중 고정한다. SCAN 요청/승인은 시작과 별개이며 권한을 대신 승인하지 않는다.
+차량 감지는 **홈 → 서비스 사용 ON/OFF**에서 제어한다. 저장 VIN으로 광고명을 계산하는 감지 전용 모드이며 비교 프리셋·BLE 시험·접근 관찰 조작은 개발자 진단에서 제거했다. 켜짐 설정과 실제 감시 실행은 별도 표시하고, Bluetooth·스캔·위치·알림 등의 준비가 부족하면 이유를 표시한다. 사용자가 OFF로 끄면 저장 설정과 실제 감지를 함께 종료하며, 실행 실패로 서비스 owner가 없어도 OFF를 저장한다.
 
-v28의 **접근 시 인증·상태 조회 → 접근 인증·상태 조회 시작**은 별도 선택이다. 원 광고가 10초 이내이고 현재 FGS owner/token/회차가 일치할 때만 native 스캔 정지 확인 후 연결한다. 기존 키만 읽고 같은 GATT에서 BODY와 새 DRIVE 세션을 각각 `start(false)`로 인증한다. 회차 총 40초·재시도 없음, 같은 후보에서는 재실행하지 않으며 실제 자원 해제·예약 반환 후 감지를 재개한다. 부분 조회·정리 불명·지난 P를 전체 성공이나 제어 허가로 표시하지 않는다. 로그 v9의 `teslaApproachRead`가 후보/회차·도메인·검증·수신/원본 시각·정리를 분리한다.
+기존 v28 접근 인증·상태 조회 구현은 내부에 남지만, 홈 감지 서비스와 부팅 복원에서는 실행하지 않는다. 수동 차량 키·상태 읽기는 **설정 → 개발자 진단 → 차량 키**에 유지한다. 부팅 완료·패키지 교체의 기존 `BleDetectionRecoveryReceiver`는 저장 ON일 때 새 감지 세션만 요청하며, VIN 복원이 끝나기 전의 OFF도 존중한다. 사용자 강제 종료·권한 상실·OS 시작 거절을 우회하거나 이전 후보·음성·차량 명령을 복원하지 않는다.
 
 작업 순서는 [AGENTS.md](AGENTS.md)의 **구현·검증·데이터 보존 설치 → 사용자 실차 테스트 → USB 로그 분석 → 다음 단계 판단**을 따른다. USB 없이도 내부 로그는 기록된다. 현재 조회 ON 여부와 미검증은 [기기 기록](wiki/Device-Validation.md)을 확인한다.
 
-개선 후보는 CDM·외부 BT·필터 스캔을 기존 정책으로 병합한다. GATT 안전 조건·자기 BT 억제·후보별 제한 재시도는 유지한다. v27은 앱의 40초/120초 Handler·PendingIntent 스케줄을 제거하고 AltBeacon이 스캔과 location FGS·알림을 소유한다. `ObservationService`는 보조 스캔 중 bound-only이며 중복 FGS 알림을 만들지 않는다. 정확한 위치 권한과 시스템 위치 ON은 사용자 직접 동의가 필요하다.
+AltBeacon이 등록 차량 BLE 감시용 **connectedDevice FGS**와 알림을 소유한다. v66 좌표 안내는 같은 `BeaconService`의 **connectedDevice|location 실제 type ACK** 뒤에만 준비하며 새 접근에서만 휴대전화 위치·센서를 수집한다. `ObservationService`는 bound-only이며 중복 FGS 알림을 만들지 않는다. 선택 백그라운드 위치 권한은 사용자가 Android 설정에서 직접 허용한다. 미허용 재부팅 복원은 BLE/UWB를 유지하되 좌표 안내만 앱에서 명시적으로 재개한다. [수집 수명·권한 계약](wiki/Tesla-Integration.md#v66-좌표-기반-나침반uwb-병행)을 따른다.
 
 AltBeacon 스캔 기간은 기본 foreground 1,100ms·background 30,000ms를 유지하고, 두 모드의 betweenScanPeriod를 명시적으로 0ms로 설정한다. 이전 기본 background 5분 대기는 제거했다. 기본 무선 모드와 콜백 주기는 별개이며 OS/OEM 지연·무선 duty cycle까지 없어진다는 보장은 아니다. `longScanForcingEnabled` 기본값은 유지한다. stock `NonBeaconLeScanCallback`은 원 수신 timestamp와 정확한 이름 필터 주입을 제공하지 않으므로 고정 소스의 좁은 어댑터를 사용한다. 가짜 BeaconParser·주소 고정·서비스 UUID 광고 포함을 가정하지 않는다. 상세 변경 범위는 [아키텍처](wiki/Native-Architecture.md)를 따른다.
 
-기존 `events.jsonl`은 보존하고 새 `events-v2.jsonl` 및 `.1`~`.3`만 순환한다. 파일당 512KiB·합계 2MiB, 큐 512개이며 쓰기 실패는 표시하되 감지를 중단하지 않는다. VIN·광고명/hash·MAC·키·RX 원문은 기록하지 않는다. `ScanResult.timestampNanos`와 전달 시각·역순/중복/이전 세대 거절·스캐너 중단을 분리한다. 이전 PendingIntent receiver는 고아 등록 정리 전용이다.
+기존 `events.jsonl`은 보존하고 `events-v2.jsonl`과 `events-v2.1.jsonl`~`events-v2.3.jsonl`만 순환한다. 파일당 512KiB·합계 2MiB, 큐 512개이며 쓰기 실패는 표시하되 감지를 중단하지 않는다. VIN·광고명/hash·MAC·키·RX 원문은 기록하지 않는다. `ScanResult.timestampNanos`와 전달 시각·역순/중복/이전 세대 거절·스캐너 중단을 분리한다. 이전 PendingIntent receiver는 고아 등록 정리 전용이다.
 
 명시적 ON/OFF와 실행 상태를 분리한다. 프로세스 초기화·재부팅·업데이트·Bluetooth ON에서 감지만 복원하며 이전 근접 상태·명령은 재생하지 않는다. Android background/while-in-use FGS 제한·사용자 강제 종료 때문에 즉시 복원은 보장하지 않는다. FGS fallback은 정상 실시간 감지로 표시하지 않는다. 대기 wake lock은 추가하지 않았고 기존 짧은 GATT wake lock은 그대로다.
 
@@ -194,7 +202,7 @@ USB 없이도 코드 작업·빌드·정책 검증을 할 수 있다. 새 APK를
 
 ### USB 녹음 회수와 휴대폰 재시험
 
-디버그 앱과 계측 APK가 설치된 USB 기기가 필요하다. PC에서 음성 모델을 실행하지 않으며, 저장 PCM은 휴대폰의 Android 온디바이스 `SpeechRecognizer`로만 재시험한다(재생 타임아웃 30초). 마이크·BLE·차량 명령은 실행하지 않는다.
+디버그 앱과 계측 APK가 설치된 USB 기기가 필요하다. 아래 실행예제·도구는 소스 이관 뒤의 `com.heytesla.app.speech.SpeechRecordingReplayDeviceTest`를 대상으로 하므로, 기존 설치본에 실행하기 전에 이관본 앱·계측 APK를 함께 데이터 보존 설치해야 한다. PC에서 음성 모델을 실행하지 않으며, 저장 PCM은 휴대폰의 Android 온디바이스 `SpeechRecognizer`로만 재시험한다(재생 타임아웃 30초). 마이크·BLE·차량 명령은 실행하지 않는다.
 
 > **경고:** `connectedAndroidTest`는 실행 후 앱을 삭제해 저장 녹음을 포함한 앱 데이터를 지우므로 사용하지 않는다. `adb install -r`로 앱 APK와 테스트 APK를 데이터 보존 설치한 뒤 `am instrument`로만 실행한다.
 
@@ -204,12 +212,12 @@ python3 -B tools/speech_recordings.py --serial DEVICE_SERIAL fetch --id RECORDIN
 python3 -B tools/speech_recordings.py --serial DEVICE_SERIAL replay --id RECORDING_UUID
 ```
 
-`replay`는 계측 테스트 `SpeechRecordingReplayDeviceTest#replaySavedRecording`(인자 `recordingId`)을 실행해 저장 녹음을 재인식하고 결과를 해당 녹음의 `runs/`에 추가한다. 재시험 뒤 같은 `fetch` 명령으로 새 결과만 추가 회수한다. 기존 다른 파일은 덮어쓰지 않고 원본은 지우지 않는다. 회수물은 Git 제외 영역인 `.local-recordings/`에만 보관한다. 녹음의 생성 시각·ID로 마스킹 순환 로그의 해당 시험 시각과 비교한다.
+`replay`는 계측 테스트 `com.heytesla.app.speech.SpeechRecordingReplayDeviceTest#replaySavedRecording`(인자 `recordingId`)을 실행해 저장 녹음을 재인식하고 결과를 해당 녹음의 `runs/`에 추가한다. 재시험 뒤 같은 `fetch` 명령으로 새 결과만 추가 회수한다. 기존 다른 파일은 덮어쓰지 않고 원본은 지우지 않는다. 회수물은 Git 제외 영역인 `.local-recordings/`에만 보관한다. 녹음의 생성 시각·ID로 마스킹 순환 로그의 해당 시험 시각과 비교한다.
 
 고정 합성 fixture와 저장된 모든 녹음을 현재 정책에 한 번에 통과시켜 보려면 `replayAll`을 쓴다. 결과는 `HTSTT` 태그 로그로만 남고 저장하지 않는다.
 
 ```sh
-adb shell am instrument -w -e class com.heytesla.app.SpeechRecordingReplayDeviceTest#replayAll com.heytesla.app.test/androidx.test.runner.AndroidJUnitRunner
+adb shell am instrument -w -e class com.heytesla.app.speech.SpeechRecordingReplayDeviceTest#replayAll com.heytesla.app.test/androidx.test.runner.AndroidJUnitRunner
 adb logcat -d -s HTSTT:I
 ```
 

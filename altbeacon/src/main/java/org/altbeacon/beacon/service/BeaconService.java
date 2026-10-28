@@ -121,6 +121,35 @@ public class BeaconService extends Service {
     public static final int MSG_SET_SCAN_PERIODS = 6;
     public static final int MSG_SYNC_SETTINGS = 7;
 
+
+    // App-owned display-only location lease. No coordinates cross this Messenger boundary.
+    public static final int MSG_LOCATION_FOREGROUND = 40;
+    public static final int MSG_LOCATION_FOREGROUND_RESULT = 41;
+    public static final String LOCATION_OWNER = "location_owner";
+    public static final String LOCATION_REQUEST = "location_request";
+    public static final String LOCATION_ENABLED = "location_enabled";
+    public static final String LOCATION_LEASE_ID = "location_lease_id";
+    // IPC resource bound, not a Tesla/RF policy. Never evict a tombstone and re-admit a replay.
+    private static final int MAX_LOCATION_LEASE_RECORDS = 128;
+    private final HashMap<String, LocationLeaseRecord> locationLeases = new HashMap<>();
+    private static final class LocationLeaseRecord {
+        final WeakReference<IBinder> owner;
+        final String ownerToken;
+        long lastSequence = -1L;
+        boolean terminal;
+
+        LocationLeaseRecord(IBinder owner, String ownerToken) {
+            this.owner = new WeakReference<>(owner);
+            this.ownerToken = ownerToken;
+        }
+    }
+    private IBinder locationOwner;
+    private String locationOwnerToken;
+    private String locationLeaseId;
+    private long locationOwnerGeneration;
+    private IBinder.DeathRecipient locationOwnerDeath;
+    private boolean foregroundStarted;
+    private boolean locationCleanupFailed;
     static class IncomingHandler extends Handler {
         private final WeakReference<BeaconService> mService;
 
@@ -139,6 +168,10 @@ public class BeaconService extends Service {
         public void handleMessage(Message msg) {
             BeaconService service = mService.get();
             if (service != null) {
+                if (msg.what == MSG_LOCATION_FOREGROUND) {
+                    service.setLocationForeground(msg);
+                    return;
+                }
                 StartRMData startRMData = StartRMData.fromBundle(msg.getData());
                 if (startRMData != null) {
                     switch (msg.what) {
@@ -277,17 +310,128 @@ public class BeaconService extends Service {
             try {
                 LogManager.d(TAG, "Upgrading service to foreground service with notificationId" + notificationId);
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    this.startForeground(notificationId, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
+                    // A restored scanner starts connectedDevice-only; location requires an explicit lease.
+                    this.startForeground(notificationId, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
                 }
                 else {
                     this.startForeground(notificationId, notification);
                 }
+                foregroundStarted = true;
                 LogManager.d(TAG, "Called startForeground successfully");
             }
             catch (SecurityException exception) {
                 // https://issuetracker.google.com/issues/294408576
                 LogManager.w(TAG, "Call to service startForeground() threw a SecurityException.  The Foreground Service for beacon scanning may have started anyway, but this behavior might change in  different conditions or a future Android version.");
             }
+        }
+    }
+
+    private void setLocationForeground(Message request) {
+        if (request.sendingUid != android.os.Process.myUid() || request.replyTo == null) return;
+        String token = request.getData().getString(LOCATION_OWNER);
+        String leaseId = request.getData().getString(LOCATION_LEASE_ID);
+        long sequence = request.getData().getLong(LOCATION_REQUEST, -1L);
+        boolean enabled = request.getData().getBoolean(LOCATION_ENABLED, false);
+        IBinder owner = request.replyTo.getBinder();
+        boolean success = false;
+        if (token != null && token.length() == 36 && leaseId != null && leaseId.length() == 36 && sequence >= 0) {
+            LocationLeaseRecord record = locationLeases.get(leaseId);
+            if (record == null && locationLeases.size() < MAX_LOCATION_LEASE_RECORDS) {
+                record = new LocationLeaseRecord(owner, token);
+                locationLeases.put(leaseId, record);
+            }
+            if (record != null && owner.equals(record.owner.get()) && token.equals(record.ownerToken) &&
+                    sequence > record.lastSequence) {
+                // Consume before permission/type checks: a failed enable cannot become valid on replay.
+                record.lastSequence = sequence;
+                boolean sameOwner = locationOwner == null ||
+                        (locationOwner.equals(owner) && token.equals(locationOwnerToken) && leaseId.equals(locationLeaseId));
+                boolean permitted = foregroundStarted && sameOwner && !locationCleanupFailed &&
+                        (!enabled || !record.terminal);
+                if (!enabled || !permitted) record.terminal = true;
+                if (permitted) {
+                    try {
+                        if (enabled) {
+                            if (!owner.isBinderAlive() || !locationStartAllowed()) throw new SecurityException();
+                            if (locationOwner == null) {
+                                final long generation = ++locationOwnerGeneration;
+                                IBinder.DeathRecipient death = () -> handler.post(() ->
+                                        releaseDeadLocationOwner(owner, token, leaseId, generation));
+                                owner.linkToDeath(death, 0);
+                                locationOwner = owner;
+                                locationOwnerToken = token;
+                                locationLeaseId = leaseId;
+                                locationOwnerDeath = death;
+                            }
+                        }
+                        updateLocationForeground(enabled);
+                        if (!enabled) clearLocationOwner();
+                        success = true;
+                    } catch (Exception ignored) {
+                        record.terminal = true;
+                        // An acquired owner survives until a confirmed demotion, including partial enable.
+                        if (!enabled) locationCleanupFailed = true;
+                    }
+                }
+            }
+        }
+        final long generationAtResult = locationOwnerGeneration;
+        Message response = Message.obtain(null, MSG_LOCATION_FOREGROUND_RESULT, success ? 1 : 0,
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ? getForegroundServiceType() : 0);
+        response.getData().putString(LOCATION_OWNER, token);
+        response.getData().putString(LOCATION_LEASE_ID, leaseId);
+        response.getData().putLong(LOCATION_REQUEST, sequence);
+        try {
+            request.replyTo.send(response);
+        } catch (android.os.RemoteException ignored) {
+            if (enabled && success) releaseDeadLocationOwner(owner, token, leaseId, generationAtResult);
+        }
+    }
+
+    private boolean locationStartAllowed() {
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED ||
+                !getSystemService(android.location.LocationManager.class).isLocationEnabled()) return false;
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED) return true;
+        android.app.ActivityManager.RunningAppProcessInfo process = new android.app.ActivityManager.RunningAppProcessInfo();
+        android.app.ActivityManager.getMyMemoryState(process);
+        return process.importance <= android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND &&
+                !getSystemService(android.app.KeyguardManager.class).isDeviceLocked();
+    }
+
+    private void updateLocationForeground(boolean enabled) {
+        BeaconManager manager = BeaconManager.getInstanceForApplication(getApplicationContext());
+        Notification notification = manager.getForegroundServiceNotification();
+        android.app.NotificationManager notifications = getSystemService(android.app.NotificationManager.class);
+        for (android.service.notification.StatusBarNotification active : notifications.getActiveNotifications()) {
+            if (active.getId() == manager.getForegroundServiceNotificationId() && active.getTag() == null) {
+                notification = active.getNotification();
+                break;
+            }
+        }
+        if (notification == null) throw new IllegalStateException();
+        int types = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE;
+        if (enabled) types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+        startForeground(manager.getForegroundServiceNotificationId(), notification, types);
+    }
+
+    private void clearLocationOwner() {
+        if (locationOwner != null && locationOwnerDeath != null) locationOwner.unlinkToDeath(locationOwnerDeath, 0);
+        locationOwner = null;
+        locationOwnerToken = null;
+        locationLeaseId = null;
+        locationOwnerDeath = null;
+    }
+
+    private void releaseDeadLocationOwner(IBinder owner, String token, String leaseId, long generation) {
+        if (locationOwner == null || !locationOwner.equals(owner) || !token.equals(locationOwnerToken) ||
+                !leaseId.equals(locationLeaseId) || generation != locationOwnerGeneration) return;
+        LocationLeaseRecord record = locationLeases.get(leaseId);
+        if (record != null) record.terminal = true;
+        try {
+            updateLocationForeground(false);
+            clearLocationOwner();
+        } catch (Exception ignored) {
+            locationCleanupFailed = true;
         }
     }
 
@@ -329,6 +473,8 @@ public class BeaconService extends Service {
     @Override
     public boolean onUnbind(Intent intent) {
         LogManager.i(TAG, "unbinding so destroying self");
+        clearLocationOwner();
+        foregroundStarted = false;
         this.stopForeground(true);
         this.stopSelf();
         return false;
@@ -338,6 +484,17 @@ public class BeaconService extends Service {
     @Override
     public void onDestroy() {
         LogManager.e(TAG, "onDestroy()");
+        try {
+            clearLocationOwner();
+        } catch (Exception ignored) {
+            locationCleanupFailed = true;
+            locationOwner = null;
+            locationOwnerToken = null;
+            locationLeaseId = null;
+            locationOwnerDeath = null;
+        }
+        locationLeases.clear();
+        foregroundStarted = false;
         if (android.os.Build.VERSION.SDK_INT < 18) {
             LogManager.w(TAG, "Not supported prior to API 18.");
             return;

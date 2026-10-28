@@ -5,7 +5,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from analyze_field_log import MAX_LINE, analyze, compare_visits, main
+from analyze_field_log import MAX_LINE, analyze, compare_visits, main, uwb_rx_state
 
 P = '11111111-1111-4111-8111-111111111111'
 Q = '22222222-2222-4222-8222-222222222222'
@@ -13,6 +13,43 @@ T = '33333333-3333-4333-8333-333333333333'
 U = '44444444-4444-4444-8444-444444444444'
 BASE = 1767225600000
 HEADER = 'visitId,trialId,approachAt,handleAt,departAt\n'
+GATT_BOOLS = ('uwbGattAutoConnect', 'uwbGattConnectAccepted', 'uwbGattConnectedObserved',
+    'uwbGattServiceFound', 'uwbGattTxFound', 'uwbGattRxFound', 'uwbGattSubscriptionConfirmed')
+GATT_INTS = ('uwbGattConnectionStatus', 'uwbGattConnectionState',
+    'uwbGattDescriptorRequestStatus', 'uwbGattDescriptorCallbackStatus')
+GATT_TIMES = ('uwbGattOperationStartedElapsedMs', 'uwbGattStageStartedElapsedMs',
+    'uwbGattObservedElapsedMs', 'uwbGattConnectIssuedElapsedMs', 'uwbGattConnectReturnedElapsedMs',
+    'uwbGattAdvertisementAgeAtConnectMs', 'uwbGattConnectionCallbackElapsedMs',
+    'uwbGattDescriptorCallbackElapsedMs', 'uwbGattFirstRxElapsedMs', 'uwbGattLastRxElapsedMs')
+GATT_KEYS = ('uwbGattStage', 'uwbGattEvent', 'uwbGattConnectAction',
+    *GATT_BOOLS, *GATT_INTS, *GATT_TIMES, 'uwbGattRxNotificationCount')
+RX_BOOLS = ('uwbRxDecoderIncomplete', 'uwbRxDecoderFailed', 'uwbRxFromPresent',
+    'uwbRxToPresent', 'uwbRxRequestUuidPresent', 'uwbRxRequestUuidMatches',
+    'uwbRxToRouteMatches', 'uwbRxSignedStatusPresent')
+RX_INTS = ('uwbRxExpectedDomain', 'uwbRxFromDomain', 'uwbRxSignedMessageFault', 'uwbRxOperationStatus')
+RX_TIMES = ('uwbRxProtocolReceivedElapsedMs', 'uwbRxProtocolObservedElapsedMs')
+RX_COUNTS = ('uwbRxFrameCount', 'uwbRxProtocolCount')
+RX_ENUMS = {
+    'uwbRxStep': ('WAITING', 'SEND', 'COMPLETE', 'FRUNK_RESULT', 'FAILED', 'UWB_READY', 'UWB_INPUT'),
+    'uwbRxInputKind': ('ROUTABLE_MESSAGE', 'RAW_FIRA', 'WRAPPED_PLAINTEXT', 'ENCRYPTED_RESPONSE'),
+    'uwbRxAead': ('NOT_ATTEMPTED', 'VERIFIED', 'FAILED'),
+    'uwbRxFiraKind': ('REQUEST', 'STOP', 'UNRECOGNIZED', 'INVALID'),
+    'uwbRxAuthEvidence': ('ACKNOWLEDGED', 'REQUEST_REJECTED', 'KEY_NOT_PAIRED_REPORTED',
+        'OPERATION_REJECTED', 'UNEXPECTED_PAYLOAD', 'SESSION_STATUS_UNSUPPORTED',
+        'SIGNATURE_MISSING', 'TAG_MISSING', 'TAG_LENGTH_INVALID', 'PARAMETERS_INVALID',
+        'HMAC_MISMATCH', 'SESSION_INFO_INVALID'),
+    'uwbRxDisposition': ('DOMAIN_MISMATCH', 'ROUTE_MISMATCH', 'REQUEST_UUID_MISMATCH',
+        'ACK_WAITING', 'SESSION_INFO_INVALID', 'SESSION_INFO_AUTH_REJECTED', 'SESSION_READY',
+        'STATUS_VERIFIED', 'STATUS_INCOMPLETE', 'RESPONSE_REJECTED', 'RESPONSE_INVALID',
+        'RESPONSE_WAITING', 'FIRA_REQUEST', 'FIRA_STOP', 'FIRA_UNRECOGNIZED', 'FIRA_INVALID'),
+    'uwbRxFromKind': ('DOMAIN', 'ROUTING_ADDRESS', 'UNSET', 'UNKNOWN'),
+    'uwbRxToKind': ('DOMAIN', 'ROUTING_ADDRESS', 'UNSET', 'UNKNOWN'),
+    'uwbRxPayloadKind': ('SESSION_INFO', 'SESSION_INFO_REQUEST', 'PROTOBUF_MESSAGE_AS_BYTES', 'UNSET', 'UNKNOWN'),
+    'uwbRxDomainMismatchReason': ('FROM_MISSING', 'FROM_NOT_DOMAIN', 'DOMAIN_DIFFERENT'),
+}
+RX_KEYS = (*RX_COUNTS, 'uwbRxNotificationFrameCount', *RX_BOOLS, *RX_TIMES, *RX_INTS, *RX_ENUMS)
+RX_BODY_KEYS = ('uwbRxBodyBytes', 'uwbRxBodyStatus', 'uwbRxBodyFields')
+RX_OBSERVATION_KEYS = (*RX_BODY_KEYS, 'uwbRxRequestCorrelation')
 
 
 def record(**changes):
@@ -23,6 +60,48 @@ def record(**changes):
 
 def parse(*rows, exclude=()):
     return analyze(io.StringIO(''.join(json.dumps(row)+'\n' for row in rows)), exclude)
+
+
+def uwb(event='TESLA_UWB_DISTANCE_RECEIVED', offset=0, **changes):
+    state = dict(uwbStage='RANGING', uwbBackendOpened=True, uwbPeerCount=2,
+        uwbStartedPeerCount=1, uwbValidDistanceCount=1, uwbInvalidResultCount=0,
+        uwbLastPeerIndex=0, uwbLastDistanceMeters=1.25, uwbLastConfidence=2,
+        uwbLastFrameworkTimestampMs=9876543210123, uwbLastReceivedElapsedMs=990,
+        uwbLastAzimuthRaw=-12.5, uwbLastAzimuthConfidence=0,
+        uwbLastElevationRaw=-0.25, uwbLastElevationConfidence=2,
+        uwbAzimuthSupported=True, uwbElevationSupported=False,
+        uwbClosedReason=None, uwbOpenFailedReason=None, uwbReason=None)
+    state.update(dict.fromkeys(GATT_KEYS))
+    state.update(dict.fromkeys(RX_KEYS))
+    state.update(dict.fromkeys(RX_OBSERVATION_KEYS))
+    state.update(changes)
+    return record(version=24, trialId=None, event=event,
+        wallMs=BASE+offset, elapsedMs=1000+offset, state=state)
+
+
+def uwb_gatt(event='TESLA_UWB_GATT_OBSERVATION', offset=0, **changes):
+    state = dict(uwbGattStage='CONNECTING', uwbGattEvent='CONNECT_RESULT',
+        uwbGattOperationStartedElapsedMs=100, uwbGattStageStartedElapsedMs=200,
+        uwbGattObservedElapsedMs=900, uwbGattConnectIssuedElapsedMs=200,
+        uwbGattConnectReturnedElapsedMs=210, uwbGattAutoConnect=False,
+        uwbGattConnectAction='CREATE', uwbGattConnectAccepted=False,
+        uwbGattAdvertisementAgeAtConnectMs=0, uwbGattConnectionStatus=None,
+        uwbGattConnectionState=None, uwbGattConnectionCallbackElapsedMs=None,
+        uwbGattDescriptorRequestStatus=None, uwbGattDescriptorCallbackStatus=None,
+        uwbGattDescriptorCallbackElapsedMs=None, uwbGattFirstRxElapsedMs=None,
+        uwbGattLastRxElapsedMs=None, uwbGattConnectedObserved=False,
+        uwbGattServiceFound=False, uwbGattTxFound=False, uwbGattRxFound=False,
+        uwbGattSubscriptionConfirmed=False, uwbGattRxNotificationCount=0)
+    state.update(changes)
+    return dict(uwb(event, offset, **state), version=25)
+
+
+def uwb_rx(event='TESLA_UWB_GATT_OBSERVATION', offset=0, **changes):
+    return dict(uwb_gatt(event, offset, **changes), version=26)
+
+def uwb_rx_observation(event='TESLA_UWB_GATT_OBSERVATION', offset=0, **changes):
+    return dict(uwb_rx(event, offset, **changes), version=27)
+
 
 
 def visits(*rows):
@@ -72,6 +151,769 @@ def recovery_rows(stage='FAILED', reason='GATT_CONNECT_FAILED', second_start=370
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_supported_schema_boundary_without_inventing_uwb_events(self):
+        report = parse(*(record(version=version) for version in range(1, 28)))
+        self.assertEqual(report['issues'], [])
+        self.assertEqual(report['counts']['analyzedRows'], 27)
+        self.assertEqual(report['counts']['unsupportedRows'], 0)
+        self.assertEqual(set(report['versions']), {str(version) for version in range(1, 28)})
+        self.assertEqual(report['uwbEvents'], [])
+        for version in range(1, 23):
+            row = uwb()
+            row['version'] = version
+            self.assertEqual(parse(row)['uwbEvents'], [])
+
+    def test_v24_manual_uwb_keeps_null_trial_and_record_context_before_trial_filter(self):
+        row = uwb()
+        report = parse(row)
+        self.assertEqual(report['issues'], [])
+        self.assertEqual(report['trials'], [])
+        self.assertEqual(report['counts']['unassignedRows'], 1)
+        point = report['uwbEvents'][0]
+        self.assertEqual({key: point[key] for key in
+            ('line', 'processId', 'segment', 'trialId', 'recordWallMs', 'recordElapsedMs', 'event')},
+            dict(line=1, processId=P, segment=1, trialId=None, recordWallMs=BASE,
+                recordElapsedMs=1000, event='TESLA_UWB_DISTANCE_RECEIVED'))
+        self.assertEqual(point['state'], row['state'])
+        self.assertTrue(point['newDistanceReceived'])
+        assigned = dict(uwb(offset=10), trialId=T)
+        excluded = parse(row, assigned, exclude=(T,))
+        self.assertEqual(len(excluded['uwbEvents']), 1)
+        self.assertIsNone(excluded['uwbEvents'][0]['trialId'])
+        self.assertEqual(excluded['counts']['excludedRows'], 1)
+        self.assertEqual(excluded['excludedTrialsFound'], [T])
+
+    def test_v23_missing_raw_observations_remain_unknown_and_do_not_carry_from_v24(self):
+        keys = ('uwbLastAzimuthRaw', 'uwbLastAzimuthConfidence',
+            'uwbLastElevationRaw', 'uwbLastElevationConfidence',
+            'uwbAzimuthSupported', 'uwbElevationSupported')
+        current = uwb()
+        legacy = dict(uwb(offset=1), version=23)
+        for key in keys:
+            del legacy['state'][key]
+        legacy_with_unknown_fields = dict(uwb(offset=2), version=23)
+        report = parse(current, legacy, legacy_with_unknown_fields)
+        self.assertEqual(report['issues'], [])
+        self.assertEqual(len(report['uwbEvents']), 3)
+        self.assertEqual(report['uwbEvents'][0]['state'], current['state'])
+        for point in report['uwbEvents'][1:]:
+            self.assertTrue(point['newDistanceReceived'])
+            self.assertEqual(point['state']['uwbLastDistanceMeters'], 1.25)
+            self.assertEqual(point['state']['uwbLastPeerIndex'], 0)
+            self.assertEqual(point['state']['uwbLastFrameworkTimestampMs'], 9876543210123)
+            self.assertEqual(point['state']['uwbLastReceivedElapsedMs'], 990)
+            self.assertTrue(all(point['state'][key] is None for key in keys))
+
+    def test_uwb_export_uses_fixed_events_and_strips_private_state_and_strings(self):
+        row = uwb(uwbStage='RANGING-private-VIN', uwbClosedReason='private-address',
+            uwbLastDistanceMeters='private-distance', uwbLastConfidence='private-confidence',
+            uwbLastFrameworkTimestampMs='private-clock', uwbLastReceivedElapsedMs='private-time',
+            uwbOpenFailedReason='private-open-failure', uwbReason='PRIVATE_REASON_WITH_VIN',
+            uwbLastAzimuthRaw='private-azimuth', uwbLastAzimuthConfidence='private-confidence',
+            uwbLastElevationRaw='private-elevation', uwbLastElevationConfidence='private-confidence',
+            uwbAzimuthSupported='private-capability', uwbElevationSupported='private-capability',
+            uwbKey='private-key', uwbVin='private-VIN', uwbAddress='private-address',
+            uwbSts='private-sts', gps='private-gps', uwbAngleUnit='private-unit',
+            uwbDirection='private-direction', arbitrary='private-payload')
+        unknown = dict(uwb(offset=10), event='TESLA_UWB_private-event')
+        report = parse(row, unknown)
+        self.assertEqual(len(report['uwbEvents']), 1)
+        safe = report['uwbEvents'][0]['state']
+        for key in ('uwbStage', 'uwbClosedReason', 'uwbLastDistanceMeters', 'uwbLastConfidence',
+                    'uwbLastFrameworkTimestampMs', 'uwbLastReceivedElapsedMs',
+                    'uwbOpenFailedReason', 'uwbReason', 'uwbLastAzimuthRaw', 'uwbLastAzimuthConfidence',
+                    'uwbLastElevationRaw', 'uwbLastElevationConfidence',
+                    'uwbAzimuthSupported', 'uwbElevationSupported'):
+            self.assertIsNone(safe[key])
+        self.assertFalse(report['uwbEvents'][0]['newDistanceReceived'])
+        self.assertNotIn('private-', json.dumps(report, allow_nan=False))
+        self.assertNotIn('PRIVATE_REASON_WITH_VIN', json.dumps(report, allow_nan=False))
+
+    def test_uwb_distance_requires_finite_nonnegative_numbers_not_booleans(self):
+        for meters in (0, 1, 1.25, 1e308):
+            with self.subTest(meters=meters):
+                point = parse(uwb(uwbLastDistanceMeters=meters))['uwbEvents'][0]
+                self.assertEqual(point['state']['uwbLastDistanceMeters'], meters)
+                self.assertTrue(point['newDistanceReceived'])
+        for meters in (None, -1, -0.1, True, False, '1.25', float('inf'),
+                       float('-inf'), float('nan'), [], {}):
+            with self.subTest(meters=meters):
+                report = parse(uwb(uwbLastDistanceMeters=meters))
+                self.assertIsNone(report['uwbEvents'][0]['state']['uwbLastDistanceMeters'])
+                self.assertFalse(report['uwbEvents'][0]['newDistanceReceived'])
+                json.dumps(report, allow_nan=False)
+
+    def test_uwb_raw_angles_keep_finite_signed_doubles_without_conversion(self):
+        for raw in (-1.7976931348623157e308, -540.0, -0.0, 0.0, 5e-324,
+                    3.141592653589793, 1.7976931348623157e308):
+            with self.subTest(raw=raw):
+                row = uwb(uwbLastAzimuthRaw=raw, uwbLastElevationRaw=raw)
+                point = parse(row)['uwbEvents'][0]
+                self.assertEqual(point['state'], row['state'])
+                self.assertEqual(json.dumps(point['state']['uwbLastAzimuthRaw']), json.dumps(raw))
+                self.assertTrue(point['newDistanceReceived'])
+        for raw in (None, True, False, 0, 1, -1, 2**63, '1.25', float('inf'),
+                    float('-inf'), float('nan'), ['private-raw'], {'private-raw': 1}):
+            with self.subTest(raw=raw):
+                report = parse(uwb(uwbLastAzimuthRaw=raw, uwbLastElevationRaw=raw))
+                point = report['uwbEvents'][0]
+                self.assertIsNone(point['state']['uwbLastAzimuthRaw'])
+                self.assertIsNone(point['state']['uwbLastElevationRaw'])
+                self.assertEqual(point['state']['uwbLastAzimuthConfidence'], 0)
+                self.assertEqual(point['state']['uwbLastElevationConfidence'], 2)
+                self.assertTrue(point['newDistanceReceived'])
+                self.assertNotIn('private-raw', json.dumps(report, allow_nan=False))
+
+    def test_uwb_angle_confidence_is_axis_independent_and_never_reuses_distance_confidence(self):
+        for confidence in (0, 1, 2, None, -1, 3, 2**63, True, False, 1.0, '2',
+                           float('nan'), float('inf'), [], {'private-confidence': 2}):
+            with self.subTest(confidence=confidence):
+                expected = confidence if type(confidence) is int and 0 <= confidence <= 2 else None
+                for axis, other in (('Azimuth', 'Elevation'), ('Elevation', 'Azimuth')):
+                    point = parse(uwb(**{
+                        'uwbLastConfidence': 1,
+                        f'uwbLast{axis}Raw': None,
+                        f'uwbLast{axis}Confidence': confidence,
+                        f'uwbLast{other}Raw': -0.5,
+                        f'uwbLast{other}Confidence': None,
+                    }))['uwbEvents'][0]
+                    self.assertEqual(point['state'][f'uwbLast{axis}Confidence'], expected)
+                    self.assertIsNone(point['state'][f'uwbLast{axis}Raw'])
+                    self.assertEqual(point['state'][f'uwbLast{other}Raw'], -0.5)
+                    self.assertIsNone(point['state'][f'uwbLast{other}Confidence'])
+                    self.assertEqual(point['state']['uwbLastConfidence'], 1)
+                    json.dumps(point, allow_nan=False)
+
+    def test_uwb_capabilities_only_accept_booleans_without_inventing_angles(self):
+        for supported in (True, False, None, 0, 1, 1.0, 'true', 'false',
+                          float('nan'), float('inf'), [], {'private-capability': True}):
+            with self.subTest(supported=supported):
+                point = parse(uwb(uwbAzimuthSupported=supported, uwbElevationSupported=supported,
+                    uwbLastAzimuthRaw=None, uwbLastElevationRaw=None,
+                    uwbLastAzimuthConfidence=None, uwbLastElevationConfidence=None))['uwbEvents'][0]
+                expected = supported if type(supported) is bool else None
+                self.assertIs(point['state']['uwbAzimuthSupported'], expected)
+                self.assertIs(point['state']['uwbElevationSupported'], expected)
+                self.assertIsNone(point['state']['uwbLastAzimuthRaw'])
+                self.assertIsNone(point['state']['uwbLastElevationRaw'])
+                self.assertIsNone(point['state']['uwbLastAzimuthConfidence'])
+                self.assertIsNone(point['state']['uwbLastElevationConfidence'])
+                json.dumps(point, allow_nan=False)
+
+    def test_uwb_next_distance_does_not_fill_missing_angles_from_previous_peer_or_sample(self):
+        first = uwb()
+        second = uwb(offset=1, uwbLastPeerIndex=1, uwbLastDistanceMeters=2.5,
+            uwbLastFrameworkTimestampMs=999, uwbLastReceivedElapsedMs=1001,
+            uwbLastAzimuthRaw=None, uwbLastAzimuthConfidence=None,
+            uwbLastElevationRaw=None, uwbLastElevationConfidence=None)
+        third = uwb(offset=2, uwbLastPeerIndex=1, uwbLastDistanceMeters=3.0,
+            uwbLastFrameworkTimestampMs=1000, uwbLastReceivedElapsedMs=1002,
+            uwbLastAzimuthRaw=None, uwbLastAzimuthConfidence=0,
+            uwbLastElevationRaw=-0.75, uwbLastElevationConfidence=None)
+        report = parse(first, second, third)
+        self.assertEqual(report['issues'], [])
+        self.assertEqual([point['state'] for point in report['uwbEvents']],
+            [row['state'] for row in (first, second, third)])
+        self.assertTrue(all(point['newDistanceReceived'] for point in report['uwbEvents']))
+
+    def test_uwb_integer_enums_counters_and_closed_sdk_reason_are_typed(self):
+        for confidence in (0, 1, 2, None, -1, 3, True, 1.0, '2'):
+            point = parse(uwb(uwbLastConfidence=confidence))['uwbEvents'][0]
+            expected = confidence if type(confidence) is int and 0 <= confidence <= 2 else None
+            self.assertEqual(point['state']['uwbLastConfidence'], expected)
+        for stage in ('IDLE', 'PREPARING', 'AUTHENTICATING', 'WAITING_FOR_VEHICLE',
+                      'STARTING', 'RANGING', 'CLEANING_UP', 'COMPLETE', 'CANCELED',
+                      'FAILED', 'TIMED_OUT', 'BLOCKED', 'CLEANUP_FAILED'):
+            self.assertEqual(parse(uwb(uwbStage=stage))['uwbEvents'][0]['state']['uwbStage'], stage)
+        for value in (-1, True, 1.0, '2', 2**63):
+            changes = {key: value for key in ('uwbPeerCount', 'uwbStartedPeerCount',
+                'uwbValidDistanceCount', 'uwbInvalidResultCount', 'uwbLastPeerIndex')}
+            safe = parse(uwb(**changes))['uwbEvents'][0]['state']
+            self.assertTrue(all(safe[key] is None for key in changes))
+        self.assertIsNone(parse(uwb(uwbBackendOpened=1))['uwbEvents'][0]['state']['uwbBackendOpened'])
+        for key in ('uwbClosedReason', 'uwbOpenFailedReason'):
+            for reason in (0, 5, 999, -99, None, True, 1.0, 'private-reason'):
+                safe = parse(uwb(**{key: reason}))['uwbEvents'][0]['state']
+                self.assertEqual(safe[key], reason if type(reason) is int else None)
+        for reason in ('NO_DISTANCE_RECEIVED', 'UI_PAUSED', 'RANGING_PERMISSION_DENIED',
+                       'NATIVE_OPEN_FAILED', 'GATT_CONNECT_FAILED', 'USER_CANCELED'):
+            safe = parse(uwb(uwbReason=reason))['uwbEvents'][0]['state']
+            self.assertEqual(safe['uwbReason'], reason)
+        safe = parse(uwb(uwbClosedReason=5, uwbOpenFailedReason=2))['uwbEvents'][0]['state']
+        self.assertEqual(safe['uwbClosedReason'], 5)
+        self.assertEqual(safe['uwbOpenFailedReason'], 2)
+
+    def test_uwb_preserves_unknown_framework_clock_without_wall_or_elapsed_projection(self):
+        for timestamp in (0, -1, 9876543210123, BASE, 2**63-1):
+            point = parse(uwb(uwbLastFrameworkTimestampMs=timestamp))['uwbEvents'][0]
+            self.assertEqual(point['state']['uwbLastFrameworkTimestampMs'], timestamp)
+            self.assertEqual(point['state']['uwbLastReceivedElapsedMs'], 990)
+            self.assertEqual(point['recordWallMs'], BASE)
+            self.assertEqual(point['recordElapsedMs'], 1000)
+            self.assertNotIn('receivedProjectedWallMs', point)
+        for received in (0, 1000, 1001, -1, True, '990', 990.0, None):
+            point = parse(uwb(uwbLastReceivedElapsedMs=received))['uwbEvents'][0]
+            valid = type(received) is int and 0 <= received <= 1000
+            self.assertEqual(point['state']['uwbLastReceivedElapsedMs'], received if valid else None)
+            self.assertEqual(point['newDistanceReceived'], valid)
+
+    def test_uwb_session_open_and_peer_start_are_not_distance_measurements(self):
+        rows = [record(version=24, trialId=None, event=event,
+            wallMs=BASE+index, elapsedMs=1000+index,
+            state=dict(uwbStage='STARTING', uwbBackendOpened=True, uwbPeerCount=2,
+                uwbStartedPeerCount=1, uwbValidDistanceCount=0, uwbInvalidResultCount=0))
+            for index, event in enumerate(('TESLA_UWB_STARTED', 'TESLA_UWB_BACKEND_OPENED',
+                'TESLA_UWB_PEER_STARTED'))]
+        report = parse(*rows)
+        self.assertEqual(report['issues'], [])
+        self.assertEqual(len(report['uwbEvents']), 3)
+        for point in report['uwbEvents']:
+            self.assertFalse(point['newDistanceReceived'])
+            self.assertIsNone(point['state']['uwbLastDistanceMeters'])
+
+    def test_uwb_repeated_past_snapshots_only_mark_distance_event_as_new(self):
+        events = ('TESLA_UWB_DISTANCE_RECEIVED', 'TESLA_UWB_PEER_STARTED',
+            'TESLA_UWB_BACKEND_OPENED', 'TESLA_UWB_CLEANING_UP', 'TESLA_UWB_COMPLETE',
+            'TESLA_UWB_LOCAL_CLOSED', 'TESLA_UWB_CAPABILITIES_RECEIVED',
+            'TESLA_UWB_PEER_STOPPED', 'TESLA_UWB_PEERS_ENDED', 'TESLA_UWB_ENDPOINT_CLOSING',
+            'TESLA_UWB_BACKEND_CLOSED', 'TESLA_UWB_GATT_OBSERVATION',
+            'TESLA_UWB_CAPABILITIES_UNSPECIFIED')
+        report = parse(*(dict(uwb(event, index, uwbClosedReason=999), version=25)
+            for index, event in enumerate(events)))
+        self.assertEqual([point['newDistanceReceived'] for point in report['uwbEvents']],
+            [True] + [False] * (len(events) - 1))
+        self.assertTrue(all(point['state']['uwbLastDistanceMeters'] == 1.25
+            for point in report['uwbEvents']))
+        self.assertTrue(all(point['state'] == uwb(uwbClosedReason=999)['state']
+            for point in report['uwbEvents']))
+
+    def test_v23_and_v24_keep_v22_ble_and_recognition_results_unchanged(self):
+        payload = {'candidates': [{'text': '취소', 'confidence': 0.9}],
+            'policy': {'accepted': False, 'reason': 'FRUNK_VOICE_CANCELED'}}
+        reports = []
+        for version in (22, 23, 24, 25):
+            report = parse(record(version=version, event='BLE_FIELD_TRIAL_FINISHED',
+                bleTrial={'attempt': 1, 'status': 'COMPLETE', 'notificationCount': 0},
+                bleEvidence={'kind': 'CANDIDATE_SIGNAL', 'candidate': 1, 'receivedElapsedMs': 990}),
+                record(version=version, trialId=None, event='FRUNK_VOICE_RECOGNITION_RESULT',
+                    frunkVoiceRecognition=payload))
+            self.assertEqual(report['issues'], [])
+            self.assertEqual(report['trials'][0]['completeAttemptCount'], 1)
+            self.assertEqual(report['trials'][0]['candidateTypedCount'], 1)
+            self.assertEqual(report['uwbEvents'], [])
+            # 버전 표식 이외에는 기존 소비자 보고서 계약이 동일해야 한다.
+            report.pop('versions')
+            report['trials'][0].pop('versions')
+            reports.append(report)
+        self.assertEqual(reports[0], reports[1])
+        self.assertEqual(reports[0], reports[2])
+        self.assertEqual(reports[0], reports[3])
+
+    def test_uwb_json_cli_exports_sanitized_typed_state_and_fixed_event_only(self):
+        rows = [uwb(uwbLastDistanceMeters=float('inf'), uwbOpenFailedReason=999,
+            uwbLastAzimuthRaw=float('nan'), uwbLastAzimuthConfidence='private-confidence',
+            uwbLastElevationRaw='private-elevation', uwbLastElevationConfidence=3,
+            uwbAzimuthSupported=1, uwbElevationSupported='private-capability',
+            uwbReason='NO_DISTANCE_RECEIVED', uwbAddress='private-address'),
+            dict(uwb(offset=1), event='TESLA_UWB_PRIVATE_VIN'),
+            uwb(offset=2), uwb('TESLA_UWB_PEER_STOPPED', offset=3)]
+        payload = ''.join(json.dumps(row)+'\n' for row in rows).encode('utf-8')
+        out = io.StringIO()
+        with patch('builtins.open', return_value=io.BytesIO(payload)), contextlib.redirect_stdout(out):
+            code = main(['synthetic-input.jsonl', '--json'])
+        self.assertEqual(code, 0)
+        report = json.loads(out.getvalue())
+        self.assertEqual(len(report['uwbEvents']), 3)
+        point = report['uwbEvents'][0]
+        self.assertFalse(point['newDistanceReceived'])
+        self.assertIsNone(point['state']['uwbLastDistanceMeters'])
+        self.assertEqual(point['state']['uwbOpenFailedReason'], 999)
+        self.assertEqual(point['state']['uwbReason'], 'NO_DISTANCE_RECEIVED')
+        for key in ('uwbLastAzimuthRaw', 'uwbLastAzimuthConfidence',
+                    'uwbLastElevationRaw', 'uwbLastElevationConfidence',
+                    'uwbAzimuthSupported', 'uwbElevationSupported'):
+            self.assertIsNone(point['state'][key])
+        self.assertEqual(report['uwbEvents'][1]['state'], rows[2]['state'])
+        self.assertEqual(report['uwbEvents'][2]['state'], rows[3]['state'])
+        self.assertEqual([point['newDistanceReceived'] for point in report['uwbEvents']],
+            [False, True, False])
+        self.assertNotIn('private-', out.getvalue())
+        self.assertNotIn('private-address', out.getvalue())
+        self.assertNotIn('PRIVATE_VIN', out.getvalue())
+
+    def test_uwb_text_cli_keeps_same_sample_raw_observations_including_past_snapshots(self):
+        rows = [uwb(), uwb('TESLA_UWB_CAPABILITIES_RECEIVED', offset=1),
+            uwb('TESLA_UWB_PEER_STOPPED', offset=2), uwb('TESLA_UWB_COMPLETE', offset=3),
+            uwb(offset=4, uwbLastPeerIndex=1, uwbLastDistanceMeters=2.5,
+                uwbLastFrameworkTimestampMs=456, uwbLastReceivedElapsedMs=1004,
+                uwbLastAzimuthRaw=None, uwbLastAzimuthConfidence=None,
+                uwbLastElevationRaw=-0.75, uwbLastElevationConfidence=0)]
+        payload = ''.join(json.dumps(row)+'\n' for row in rows).encode('utf-8')
+        out = io.StringIO()
+        with patch('builtins.open', return_value=io.BytesIO(payload)), contextlib.redirect_stdout(out):
+            code = main(['synthetic-input.jsonl'])
+        self.assertEqual(code, 0)
+        objects = [json.loads(line[line.index('{'):])
+            for line in out.getvalue().splitlines() if '{' in line]
+        samples = [value for value in objects if 'uwbLastPeerIndex' in value]
+        keys = ('uwbLastPeerIndex', 'uwbLastDistanceMeters', 'uwbLastConfidence',
+            'uwbLastFrameworkTimestampMs', 'uwbLastReceivedElapsedMs',
+            'uwbLastAzimuthRaw', 'uwbLastAzimuthConfidence',
+            'uwbLastElevationRaw', 'uwbLastElevationConfidence',
+            'uwbAzimuthSupported', 'uwbElevationSupported')
+        self.assertEqual(samples, [{key: row['state'][key] for key in keys} for row in rows])
+
+    def test_v25_gatt_keeps_raw_status_admission_and_completion_as_independent_observations(self):
+        for status in (133, 8, 0, -9876, -(2**31), 2**31-1):
+            for accepted in (False, True, None):
+                with self.subTest(status=status, accepted=accepted):
+                    row = uwb_gatt(uwbGattConnectionStatus=status, uwbGattConnectionState=0,
+                        uwbGattConnectAccepted=accepted, uwbGattDescriptorRequestStatus=201,
+                        uwbGattDescriptorCallbackStatus=0)
+                    point = parse(row)['uwbEvents'][0]
+                    self.assertEqual(point['state'], row['state'])
+                    self.assertIs(point['state']['uwbGattConnectAccepted'], accepted)
+                    self.assertIs(point['state']['uwbGattConnectedObserved'], False)
+                    self.assertEqual(point['state']['uwbGattRxNotificationCount'], 0)
+                    self.assertFalse(point['newDistanceReceived'])
+                    self.assertEqual(point['gattTimingMs']['operationElapsedMs'], 800)
+                    self.assertEqual(point['gattTimingMs']['stageElapsedMs'], 700)
+                    self.assertEqual(point['gattTimingMs']['snapshotAgeMs'], 100)
+                    self.assertEqual(point['gattTimingMs']['connectCallElapsedMs'], 10)
+                    self.assertIsNone(point['gattTimingMs']['connectionCallbackSinceStartMs'])
+
+    def test_v25_gatt_strict_booleans_and_int32_native_codes_preserve_unknown_values(self):
+        for key in GATT_BOOLS:
+            for value in (False, True, None, 0, 1, 0.0, 'false', [], {'private-value': True}):
+                safe = parse(uwb_gatt(**{key: value}))['uwbEvents'][0]['state']
+                self.assertIs(safe[key], value if type(value) is bool else None)
+        for key in GATT_INTS:
+            for value in (133, 8, 0, -1, 201, 999999, -(2**31), 2**31-1,
+                          -(2**31)-1, 2**31, 2**63, True, False, 0.0, '133', None):
+                safe = parse(uwb_gatt(**{key: value}))['uwbEvents'][0]['state']
+                expected = value if type(value) is int and -(2**31) <= value < 2**31 else None
+                self.assertEqual(safe[key], expected)
+
+    def test_v25_gatt_times_reject_negative_future_and_wrong_types_without_filling_gaps(self):
+        for key in GATT_TIMES:
+            for value in (0, 1000, -1, 1001, 2**63-1, 2**63, True, False,
+                          100.0, '100', None, ['private-time'], {'private-time': 1}):
+                point = parse(uwb_gatt(**{key: value}))['uwbEvents'][0]
+                expected = value if type(value) is int and 0 <= value <= 1000 else None
+                self.assertEqual(point['state'][key], expected)
+                self.assertNotIn('private-time', json.dumps(point, allow_nan=False))
+        for count in (0, 1001, 2**63-1, -1, 2**63, True, False, 0.0, '0', None):
+            safe = parse(uwb_gatt(uwbGattRxNotificationCount=count))['uwbEvents'][0]['state']
+            expected = count if type(count) is int and 0 <= count < 2**63 else None
+            self.assertEqual(safe['uwbGattRxNotificationCount'], expected)
+        point = parse(uwb_gatt(uwbGattConnectReturnedElapsedMs=199,
+            uwbGattStageStartedElapsedMs=950, uwbGattOperationStartedElapsedMs=None))['uwbEvents'][0]
+        self.assertIsNone(point['gattTimingMs']['connectCallElapsedMs'])
+        self.assertIsNone(point['gattTimingMs']['stageElapsedMs'])
+        self.assertIsNone(point['gattTimingMs']['operationElapsedMs'])
+
+    def test_v25_gatt_enum_allowlists_and_legacy_absence_never_invent_measurements(self):
+        cases = (
+            ('uwbGattStage', ('IDLE', 'PREPARING_KEY', 'CONNECTING', 'DISCOVERING', 'NEGOTIATING_MTU',
+                'SUBSCRIBING', 'WAITING_FOR_CARD', 'HANDSHAKING', 'READING_STATUS', 'CLEANING_UP',
+                'COMPLETE', 'BLOCKED', 'CANCELED', 'TIMED_OUT', 'FAILED', 'CLEANUP_FAILED')),
+            ('uwbGattEvent', ('STAGE', 'CONNECT_RESULT', 'CONNECTION_CALLBACK', 'DESCRIPTOR_CALLBACK',
+                'RX', 'WRITE', 'RETRY_SCHEDULED', 'RETRY_STARTED', 'RETRY_CANCELED',
+                'LOCAL_CLOSED', 'CLEANUP_FAILED')),
+            ('uwbGattConnectAction', ('CREATE', 'RECONNECT')),
+        )
+        for key, values in cases:
+            for value in (*values, None, False, 0, 'private-value', ['CREATE']):
+                report = parse(uwb_gatt(**{key: value}))
+                expected = value if type(value) is str and value in values else None
+                self.assertEqual(report['uwbEvents'][0]['state'][key], expected)
+                self.assertFalse(report['uwbEvents'][0]['newDistanceReceived'])
+                self.assertNotIn('private-value', json.dumps(report, allow_nan=False))
+        for version in range(1, 25):
+            row = dict(uwb_gatt('TESLA_UWB_CAPABILITIES_RECEIVED'), version=version)
+            report = parse(row)
+            if version < 23:
+                self.assertEqual(report['uwbEvents'], [])
+            else:
+                safe = report['uwbEvents'][0]['state']
+                self.assertTrue(all(safe[key] is None for key in GATT_KEYS))
+            row['event'] = 'TESLA_UWB_GATT_OBSERVATION'
+            self.assertEqual(parse(row)['uwbEvents'], [])
+        first = uwb_gatt(uwbGattConnectedObserved=True, uwbGattConnectionStatus=0,
+            uwbGattConnectionCallbackElapsedMs=500, uwbGattFirstRxElapsedMs=600)
+        missing = dict(uwb(offset=1), version=25)
+        for key in GATT_KEYS:
+            del missing['state'][key]
+        report = parse(first, missing)
+        self.assertEqual(report['uwbEvents'][0]['gattTimingMs']['connectionCallbackSinceStartMs'], 400)
+        self.assertEqual(report['uwbEvents'][0]['gattTimingMs']['firstRxSinceStartMs'], 500)
+        self.assertTrue(all(report['uwbEvents'][1]['state'][key] is None for key in GATT_KEYS))
+        self.assertTrue(all(value is None for value in report['uwbEvents'][1]['gattTimingMs'].values()))
+
+    def test_v25_gatt_cli_json_and_text_retain_false_null_zero_status_and_relative_timing(self):
+        rows = [uwb_gatt(offset=index, uwbGattConnectionStatus=status, uwbGattConnectAccepted=accepted)
+            for index, (status, accepted) in enumerate(((133, False), (8, True), (0, None)))]
+        payload = ''.join(json.dumps(row)+'\n' for row in rows).encode('utf-8')
+        for args in (['synthetic-input.jsonl'], ['synthetic-input.jsonl', '--json']):
+            out = io.StringIO()
+            with patch('builtins.open', return_value=io.BytesIO(payload)), contextlib.redirect_stdout(out):
+                code = main(args)
+            self.assertEqual(code, 0)
+            if '--json' in args:
+                points = json.loads(out.getvalue())['uwbEvents']
+                self.assertEqual([point['state'] for point in points], [row['state'] for row in rows])
+                self.assertTrue(all(not point['newDistanceReceived'] for point in points))
+                timings = [point['gattTimingMs'] for point in points]
+            else:
+                objects = [json.loads(line[line.index('{'):])
+                    for line in out.getvalue().splitlines() if '{' in line]
+                observations = [value for value in objects if 'uwbGattStage' in value]
+                self.assertEqual(observations, [{key: row['state'][key] for key in GATT_KEYS}
+                    for row in rows])
+                timings = [value for value in objects if 'operationElapsedMs' in value]
+            self.assertEqual([timing['snapshotAgeMs'] for timing in timings], [100, 101, 102])
+            self.assertEqual([timing['connectCallElapsedMs'] for timing in timings], [10, 10, 10])
+
+    def test_v26_rx_strict_types_ranges_and_private_keys(self):
+        secret = 'PRIVATE-RAW-KEY-STS-VIN-MAC-UUID'
+        groups = (
+            (RX_BOOLS, (False, True, None, 0, 1, 0.0, 'false', secret, [], {})),
+            (RX_INTS, (0, -1, -(2**31), 2**31-1, -(2**31)-1, 2**31,
+                True, False, '0', 0.0, float('nan'), float('inf'), secret)),
+            (RX_COUNTS, (0, 2**63-1, -1, 2**63, True, False, '0', 0.0, float('nan'), float('inf'), secret)),
+            (RX_TIMES, (0, 1000, -1, 1001, True, False, '0', 0.0, float('nan'), float('inf'), secret)),
+            (('uwbRxNotificationFrameCount',), (0, 16, -1, 17, True, False, '0', 0.0, float('nan'), float('inf'), secret)),
+        )
+        for keys, values in groups:
+            for key in keys:
+                for value in values:
+                    row = uwb_rx(**{key: value, 'rawPayload': secret, 'key': secret,
+                        'sts': secret, 'vin': secret, 'mac': secret, 'uuid': secret})
+                    report = parse(row)
+                    safe = report['uwbEvents'][0]['state']
+                    if key in RX_BOOLS:
+                        expected = value if type(value) is bool else None
+                    else:
+                        lower = -(2**31) if key in RX_INTS else 0
+                        upper = (2**31-1 if key in RX_INTS else 2**63-1 if key in RX_COUNTS
+                                 else 1000 if key in RX_TIMES else 16)
+                        expected = value if type(value) is int and lower <= value <= upper else None
+                    self.assertEqual(safe[key], expected, (key, value))
+                    self.assertNotIn(secret, json.dumps(report, allow_nan=False))
+        for key, values in RX_ENUMS.items():
+            for value in (*values, None, 0, False, secret, [], {}):
+                safe = parse(uwb_rx(**{key: value}))['uwbEvents'][0]['state']
+                self.assertEqual(safe[key], value if type(value) is str and value in values else None)
+
+    def test_v26_only_protocol_and_rx_metadata_do_not_backfill_legacy_or_next_operation(self):
+        for version in range(23, 26):
+            row = dict(uwb_rx('TESLA_UWB_CAPABILITIES_RECEIVED',
+                uwbGattEvent='PROTOCOL', **{key: 0 for key in RX_KEYS}), version=version)
+            report = parse(row)
+            safe = report['uwbEvents'][0]['state']
+            self.assertTrue(all(safe[key] is None for key in RX_KEYS))
+            self.assertIsNone(safe['uwbGattEvent'])
+            self.assertFalse(report['uwbEvents'][0]['rxObservation']['newProtocol'])
+            gatt_report = parse(dict(row, event='TESLA_UWB_GATT_OBSERVATION'))
+            if version < 25:
+                self.assertEqual(gatt_report['uwbEvents'], [])
+            else:
+                self.assertIsNone(gatt_report['uwbEvents'][0]['state']['uwbGattEvent'])
+                self.assertTrue(all(gatt_report['uwbEvents'][0]['state'][key] is None for key in RX_KEYS))
+        row = uwb_rx(uwbGattEvent='PROTOCOL', uwbRxProtocolCount=1,
+            uwbRxStep='UWB_INPUT', uwbRxInputKind='RAW_FIRA', uwbRxAead='NOT_ATTEMPTED',
+            uwbRxFiraKind='REQUEST', uwbRxDisposition='FIRA_REQUEST')
+        missing = uwb_rx(offset=1, uwbGattEvent='STAGE', uwbGattOperationStartedElapsedMs=1001,
+            uwbGattRxNotificationCount=0, uwbRxFrameCount=0, uwbRxProtocolCount=0)
+        report = parse(row, missing)
+        points = report['uwbEvents']
+        self.assertEqual(points[0]['state']['uwbGattEvent'], 'PROTOCOL')
+        self.assertTrue(points[0]['rxObservation']['newProtocol'])
+        self.assertIsNone(points[1]['state']['uwbRxFiraKind'])
+        self.assertFalse(points[1]['rxObservation']['newProtocol'])
+        self.assertTrue(all(points[1]['state'][key] is None for key in RX_KEYS if key not in RX_COUNTS))
+        self.assertEqual(report['uwbRxOperations'][1]['counterTotals'],
+            {'notification': 0, 'frame': 0, 'protocol': 0})
+        self.assertEqual(report['uwbRxOperations'][1]['observedEvents'],
+            {'notification': 0, 'frame': None, 'protocol': 0})
+        self.assertEqual(report['uwbRxOperations'][1]['counterResetIndex'], 0)
+        self.assertNotEqual(points[0]['rxObservation']['operationIndex'],
+            points[1]['rxObservation']['operationIndex'])
+        self.assertTrue(all(not point['newDistanceReceived'] for point in points))
+
+    def test_rx_notification_frame_protocol_denominators_and_last_snapshot_deduplication(self):
+        rows = [
+            uwb_rx(uwbGattEvent='RX', uwbGattRxNotificationCount=1, uwbRxFrameCount=0,
+                uwbRxProtocolCount=0, uwbRxNotificationFrameCount=0,
+                uwbRxDecoderIncomplete=True, uwbRxDecoderFailed=False),
+            uwb_rx(offset=1, uwbGattEvent='RX', uwbGattRxNotificationCount=2,
+                uwbRxFrameCount=2, uwbRxProtocolCount=0, uwbRxNotificationFrameCount=2,
+                uwbRxDecoderIncomplete=False, uwbRxDecoderFailed=False),
+        ]
+        protocol = uwb_rx(offset=2, uwbGattEvent='PROTOCOL', uwbGattRxNotificationCount=2,
+            uwbRxFrameCount=2, uwbRxProtocolCount=1, uwbRxNotificationFrameCount=2,
+            uwbRxProtocolReceivedElapsedMs=700, uwbRxProtocolObservedElapsedMs=950,
+            uwbRxStep='UWB_INPUT', uwbRxInputKind='RAW_FIRA', uwbRxAead='NOT_ATTEMPTED',
+            uwbRxFiraKind='REQUEST', uwbRxDisposition='FIRA_REQUEST')
+        rows += [protocol, dict(protocol, wallMs=BASE+3, elapsedMs=1003),
+            dict(protocol, event='TESLA_UWB_AUTHENTICATED', wallMs=BASE+4, elapsedMs=1004),
+            dict(protocol, event='TESLA_UWB_DISTANCE_RECEIVED', wallMs=BASE+5, elapsedMs=1005),
+            dict(protocol, event='TESLA_UWB_COMPLETE', wallMs=BASE+6, elapsedMs=1006)]
+        second = uwb_rx(offset=7, uwbGattEvent='PROTOCOL', uwbGattRxNotificationCount=2,
+            uwbRxFrameCount=2, uwbRxProtocolCount=2, uwbRxStep='WAITING',
+            uwbRxInputKind='ENCRYPTED_RESPONSE', uwbRxAead='VERIFIED',
+            uwbRxFiraKind='UNRECOGNIZED', uwbRxDisposition='FIRA_UNRECOGNIZED',
+            uwbRxProtocolReceivedElapsedMs=900, uwbRxProtocolObservedElapsedMs=899)
+        rows.append(second)
+        report = parse(*rows)
+        op, = report['uwbRxOperations']
+        self.assertEqual(op['counterTotals'], {'notification': 2, 'frame': 2, 'protocol': 2})
+        self.assertEqual(op['observedEvents'], {'notification': 2, 'frame': 2, 'protocol': 2})
+        self.assertEqual(op['classifications']['uwbRxFiraKind'], {'REQUEST': 1, 'UNRECOGNIZED': 1})
+        self.assertEqual(op['classifications']['uwbRxAead'], {'NOT_ATTEMPTED': 1, 'VERIFIED': 1})
+        self.assertEqual(op['decoder']['uwbRxDecoderIncomplete'], {'true': 1, 'false': 1})
+        self.assertEqual([p['rxObservation']['newProtocol'] for p in report['uwbEvents']],
+            [False, False, True, False, False, False, False, True])
+        self.assertEqual([p['newDistanceReceived'] for p in report['uwbEvents']],
+            [False, False, False, False, False, True, False, False])
+        self.assertEqual(report['uwbEvents'][2]['gattTimingMs']['protocolQueueDelayMs'], 250)
+        self.assertIsNone(report['uwbEvents'][-1]['gattTimingMs']['protocolQueueDelayMs'])
+
+    def test_rx_snapshot_only_totals_operation_and_counter_reset_are_separate_scopes(self):
+        snapshot = uwb_rx('TESLA_UWB_COMPLETE', uwbGattEvent='PROTOCOL',
+            uwbGattRxNotificationCount=12, uwbRxFrameCount=4, uwbRxProtocolCount=3,
+            uwbRxDisposition='FIRA_REQUEST', uwbRxFiraKind='REQUEST')
+        reset = uwb_rx(offset=1, uwbGattEvent='RX', uwbGattRxNotificationCount=1,
+            uwbRxFrameCount=0, uwbRxProtocolCount=0, uwbRxNotificationFrameCount=0)
+        next_op = uwb_rx(offset=2, uwbGattOperationStartedElapsedMs=1002,
+            uwbGattRxNotificationCount=0, uwbRxFrameCount=0, uwbRxProtocolCount=0)
+        next_process = dict(next_op, processId=Q, wallMs=BASE+3, elapsedMs=1003)
+        report = parse(snapshot, reset, next_op, next_process)
+        ops = report['uwbRxOperations']
+        self.assertEqual(len(ops), 4)
+        self.assertEqual(ops[0]['counterTotals'], {'notification': 12, 'frame': 4, 'protocol': 3})
+        self.assertEqual(ops[0]['observedEvents'], {'notification': 0, 'frame': None, 'protocol': 0})
+        self.assertEqual(ops[0]['classifications']['uwbRxFiraKind'], {})
+        self.assertEqual(ops[1]['counterResetIndex'], 1)
+        self.assertTrue(ops[1]['counterResetObserved'])
+        self.assertEqual(ops[1]['observedEvents'], {'notification': 1, 'frame': 0, 'protocol': 0})
+        self.assertEqual(ops[2]['counterResetIndex'], 0)
+        self.assertEqual(ops[3]['processId'], Q)
+
+    def test_rx_missing_decoder_count_stays_unobserved_instead_of_zero(self):
+        rows = [
+            uwb_rx(uwbGattEvent='RX', uwbGattRxNotificationCount=1,
+                uwbRxFrameCount=0, uwbRxProtocolCount=0),
+            uwb_rx(offset=1, uwbGattEvent='RX', uwbGattRxNotificationCount=2,
+                uwbRxFrameCount=0, uwbRxProtocolCount=0, uwbRxNotificationFrameCount=0,
+                uwbRxDecoderIncomplete=False, uwbRxDecoderFailed=True),
+        ]
+        report = parse(*rows)
+        operation, = report['uwbRxOperations']
+        self.assertEqual(operation['observedEvents'], {'notification': 2, 'frame': 0, 'protocol': 0})
+        self.assertEqual(operation['notificationFrameCountUnobserved'], 1)
+        self.assertEqual(operation['decoder']['uwbRxDecoderFailed'], {'unobserved': 1, 'true': 1})
+        self.assertIsNone(report['uwbEvents'][0]['rxObservation']['newFrameCount'])
+        self.assertEqual(report['uwbEvents'][1]['rxObservation']['newFrameCount'], 0)
+
+    def test_v26_cli_rx_json_and_text_expose_data_not_success(self):
+        row = uwb_rx(uwbGattEvent='PROTOCOL', uwbGattRxNotificationCount=5,
+            uwbRxFrameCount=2, uwbRxProtocolCount=1, uwbRxStep='WAITING',
+            uwbRxInputKind='ROUTABLE_MESSAGE', uwbRxAuthEvidence='HMAC_MISMATCH',
+            uwbRxDisposition='DOMAIN_MISMATCH', uwbRxDomainMismatchReason='DOMAIN_DIFFERENT',
+            uwbRxExpectedDomain=0, uwbRxFromDomain=-1, uwbRxFromPresent=False,
+            uwbRxSignedStatusPresent=True, uwbRxSignedMessageFault=0, uwbRxOperationStatus=0,
+            uwbRxProtocolReceivedElapsedMs=800, uwbRxProtocolObservedElapsedMs=900)
+        payload = (json.dumps(row)+'\n').encode()
+        for args in (['synthetic-input.jsonl'], ['synthetic-input.jsonl', '--json']):
+            out = io.StringIO()
+            with patch('builtins.open', return_value=io.BytesIO(payload)), contextlib.redirect_stdout(out):
+                code = main(args)
+            self.assertEqual(code, 0)
+            if '--json' in args:
+                report = json.loads(out.getvalue())
+                op, = report['uwbRxOperations']
+                self.assertFalse(report['uwbEvents'][0]['newDistanceReceived'])
+            else:
+                objects = [json.loads(line[line.index('{'):])
+                    for line in out.getvalue().splitlines() if '{' in line]
+                op, = [value for value in objects if 'counterTotals' in value]
+                metadata, = [value for value in objects if 'uwbRxStep' in value]
+                self.assertEqual(metadata['uwbRxSignedMessageFault'], 0)
+                self.assertIs(metadata['uwbRxFromPresent'], False)
+            self.assertEqual(op['counterTotals'], {'notification': 5, 'frame': 2, 'protocol': 1})
+            self.assertEqual(op['observedEvents']['notification'], 0)
+            self.assertEqual(op['classifications']['uwbRxAuthEvidence'], {'HMAC_MISMATCH': 1})
+            self.assertEqual(op['classifications']['uwbRxDomainMismatchReason'], {'DOMAIN_DIFFERENT': 1})
+
+    def test_v27_body_numeric_shapes_empty_and_nonminimal_encoding_are_preserved(self):
+        cases = (
+            (0, 'COMPLETE', ''),
+            (2, 'COMPLETE', '1/0/1'),
+            (11, 'COMPLETE', '1/0/10'),
+            (9, 'COMPLETE', '2/1/8'),
+            (2, 'COMPLETE', '3/2/0'),
+            (4096, 'COMPLETE', '536870911/2/4089'),
+            (5, 'COMPLETE', '4/5/4'),
+            (24, 'COMPLETE', '1/0/1,2/1/8,3/2/0,4/5/4'),
+            (18, 'TRUNCATED', ','.join(['1/0/1'] * 8)),
+            (3, 'MALFORMED', '1/0/1'),
+            (1, 'UNSUPPORTED', ''),
+            # shape에는 원 tag/length varint의 비최소 encoding 길이가 없다.
+            (4, 'COMPLETE', '1/2/0'),
+        )
+        for byte_count, status, fields in cases:
+            with self.subTest(byte_count=byte_count, status=status, fields=fields):
+                row = uwb_rx_observation(uwbRxBodyBytes=byte_count,
+                    uwbRxBodyStatus=status, uwbRxBodyFields=fields)
+                safe = parse(row)['uwbEvents'][0]['state']
+                self.assertEqual({key: safe[key] for key in RX_BODY_KEYS},
+                    dict(zip(RX_BODY_KEYS, (byte_count, status, fields))))
+
+    def test_v27_body_partial_or_invalid_group_is_atomically_null_without_private_text(self):
+        secret = 'SYNTHETIC-PRIVATE-BODY-EXCEPTION-UUID-STS'
+        valid = dict(uwbRxBodyBytes=2, uwbRxBodyStatus='COMPLETE', uwbRxBodyFields='1/0/1')
+        mutations = []
+        for key in RX_BODY_KEYS:
+            mutations += [{key: None}, {key: secret}, {key: True}, {key: []}, {key: {}}]
+        mutations += [{'uwbRxBodyBytes': value} for value in (-1, 4097, 2.0, '2')]
+        mutations += [{'uwbRxBodyStatus': value} for value in ('complete', '', 0)]
+        mutations += [{'uwbRxBodyFields': value} for value in (
+            '0/0/1', '536870912/0/1', '01/0/1', '1/00/1', '1/0/01', '+1/0/1',
+            '-1/0/1', ' 1/0/1', '1/0/1 ', '１/0/1', '1/0/١', '1/0/1\n',
+            '1/0/0', '1/0/11', '1/1/7', '1/1/9', '1/2/4097', '1/5/3', '1/5/5',
+            '1/3/0', '1/4/0', '1/6/0', '1/7/0', '1/0/1,', ',1/0/1',
+            '1/0/1,,2/0/1', '1//1', '1/0/1/2', ','.join(['1/0/1'] * 9),
+            '1/2/0' * 136, secret)]
+        mutations += [
+            {'uwbRxBodyBytes': 0},
+            {'uwbRxBodyFields': ''},
+            {'uwbRxBodyBytes': 1, 'uwbRxBodyFields': '1/2/0'},
+            {'uwbRxBodyBytes': 9, 'uwbRxBodyFields': '536870911/1/8'},
+            {'uwbRxBodyStatus': 'TRUNCATED'},
+            {'uwbRxBodyStatus': 'MALFORMED'},
+            {'uwbRxBodyStatus': 'UNSUPPORTED'},
+            {'uwbRxBodyBytes': 0, 'uwbRxBodyStatus': 'MALFORMED', 'uwbRxBodyFields': ''},
+            {'uwbRxBodyBytes': 16, 'uwbRxBodyStatus': 'TRUNCATED',
+             'uwbRxBodyFields': ','.join(['1/0/1'] * 8)},
+            {'uwbRxBodyBytes': 17, 'uwbRxBodyStatus': 'MALFORMED',
+             'uwbRxBodyFields': ','.join(['1/0/1'] * 8)},
+            {'uwbRxBodyBytes': 17, 'uwbRxBodyStatus': 'UNSUPPORTED',
+             'uwbRxBodyFields': ','.join(['1/0/1'] * 8)},
+        ]
+        for changes in mutations:
+            with self.subTest(changes=changes):
+                row = uwb_rx_observation(**dict(valid, **changes),
+                    uwbRxRequestCorrelation='CURRENT', rawPayload=secret, exception=secret)
+                report = parse(row)
+                state = report['uwbEvents'][0]['state']
+                self.assertTrue(all(state[key] is None for key in RX_BODY_KEYS))
+                self.assertEqual(state['uwbRxRequestCorrelation'], 'CURRENT')
+                self.assertNotIn(secret, json.dumps(report, allow_nan=False))
+        for missing in RX_BODY_KEYS:
+            value = {key: item for key, item in valid.items() if key != missing}
+            state = uwb_rx_state(value, 1000, 27)
+            self.assertTrue(all(state[key] is None for key in RX_BODY_KEYS))
+
+    def test_v27_correlation_is_independent_strict_and_legacy_never_backfills(self):
+        valid = dict(uwbRxBodyBytes=0, uwbRxBodyStatus='COMPLETE', uwbRxBodyFields='',
+            uwbRxRequestCorrelation='PREVIOUS')
+        for version in range(1, 27):
+            safe = uwb_rx_state(valid, 1000, version)
+            self.assertTrue(all(safe[key] is None for key in RX_OBSERVATION_KEYS), version)
+        for value in ('CURRENT', 'PREVIOUS', 'UNMATCHED', None, 'current', '', 'PRIVATE-UUID',
+                      0, True, [], {}):
+            state = parse(uwb_rx_observation(**dict(valid,
+                uwbRxRequestCorrelation=value)))['uwbEvents'][0]['state']
+            self.assertEqual(state['uwbRxRequestCorrelation'],
+                value if type(value) is str and value in ('CURRENT', 'PREVIOUS', 'UNMATCHED') else None)
+            self.assertEqual(state['uwbRxBodyBytes'], 0)
+            self.assertEqual(state['uwbRxBodyFields'], '')
+
+    def test_v27_shape_and_correlation_count_only_distinct_new_protocol_events(self):
+        protocol = uwb_rx_observation(uwbGattEvent='PROTOCOL', uwbGattRxNotificationCount=2,
+            uwbRxFrameCount=1, uwbRxProtocolCount=1, uwbRxStep='WAITING',
+            uwbRxFiraKind='UNRECOGNIZED', uwbRxBodyBytes=0,
+            uwbRxBodyStatus='COMPLETE', uwbRxBodyFields='', uwbRxRequestCorrelation='CURRENT')
+        duplicate = dict(protocol, wallMs=BASE+1, elapsedMs=1001)
+        rx = dict(protocol, wallMs=BASE+2, elapsedMs=1002,
+            state=dict(protocol['state'], uwbGattEvent='RX', uwbGattRxNotificationCount=3,
+                uwbRxNotificationFrameCount=0))
+        # terminal은 마지막 RX의 누적 counter를 보존하며 이전 PROTOCOL snapshot으로 되돌리지 않는다.
+        terminal = dict(rx, event='TESLA_UWB_COMPLETE', wallMs=BASE+3, elapsedMs=1003)
+        previous = uwb_rx_observation(offset=4, uwbGattEvent='PROTOCOL',
+            uwbGattRxNotificationCount=3, uwbRxFrameCount=2, uwbRxProtocolCount=2,
+            uwbRxRequestCorrelation='PREVIOUS')
+        missing = uwb_rx_observation(offset=5, uwbGattEvent='PROTOCOL',
+            uwbGattRxNotificationCount=3, uwbRxFrameCount=3, uwbRxProtocolCount=3)
+        report = parse(protocol, duplicate, rx, terminal, previous, missing)
+        operation, = report['uwbRxOperations']
+        self.assertFalse(operation['counterResetObserved'])
+        self.assertEqual(operation['counterResetIndex'], 0)
+        self.assertEqual(operation['counterTotals'], {'notification': 3, 'frame': 3, 'protocol': 3})
+        self.assertEqual(operation['observedEvents'], {'notification': 1, 'frame': 0, 'protocol': 3})
+        self.assertEqual(operation['classifications']['uwbRxBodyStatus'],
+            {'COMPLETE': 1, 'unobserved': 2})
+        self.assertEqual(operation['classifications']['uwbRxRequestCorrelation'],
+            {'CURRENT': 1, 'PREVIOUS': 1, 'unobserved': 1})
+        self.assertEqual([point['rxObservation']['newProtocol'] for point in report['uwbEvents']],
+            [True, False, False, False, True, True])
+        self.assertTrue(all(not point['newDistanceReceived'] for point in report['uwbEvents']))
+        self.assertTrue(all(report['uwbEvents'][-1]['state'][key] is None
+            for key in RX_OBSERVATION_KEYS))
+        snapshot_only = parse(terminal)['uwbRxOperations'][0]
+        self.assertEqual(snapshot_only['classifications']['uwbRxBodyStatus'], {})
+        self.assertEqual(snapshot_only['classifications']['uwbRxRequestCorrelation'], {})
+
+    def test_v27_observation_counter_resets_and_new_operations_do_not_share_counts(self):
+        def point(offset, started, count, status):
+            return uwb_rx_observation(offset=offset, uwbGattEvent='PROTOCOL',
+                uwbGattOperationStartedElapsedMs=started, uwbGattRxNotificationCount=count,
+                uwbRxFrameCount=count, uwbRxProtocolCount=count, uwbRxBodyBytes=3,
+                uwbRxBodyStatus=status, uwbRxBodyFields='1/0/1',
+                uwbRxRequestCorrelation='UNMATCHED')
+        report = parse(point(0, 100, 2, 'COMPLETE'), point(1, 100, 1, 'MALFORMED'),
+            point(2, 1002, 1, 'UNSUPPORTED'))
+        operations = report['uwbRxOperations']
+        self.assertEqual(len(operations), 3)
+        self.assertEqual([op['counterResetIndex'] for op in operations], [0, 1, 0])
+        self.assertEqual([op['classifications']['uwbRxBodyStatus'] for op in operations],
+            [{'COMPLETE': 1}, {'MALFORMED': 1}, {'UNSUPPORTED': 1}])
+
+    def test_v27_cli_outputs_only_sanitized_numeric_body_fields(self):
+        rows = [
+            uwb_rx_observation(uwbGattEvent='PROTOCOL', uwbRxProtocolCount=1,
+                uwbRxBodyBytes=0, uwbRxBodyStatus='COMPLETE', uwbRxBodyFields='',
+                uwbRxRequestCorrelation='CURRENT'),
+            uwb_rx_observation(offset=1, uwbGattEvent='PROTOCOL', uwbRxProtocolCount=2,
+                uwbRxBodyBytes=20, uwbRxBodyStatus='MALFORMED',
+                uwbRxBodyFields='SYNTHETIC-PRIVATE-EXCEPTION', uwbRxRequestCorrelation='PREVIOUS'),
+        ]
+        payload = ''.join(json.dumps(row)+'\n' for row in rows).encode()
+        for args in (['synthetic-input.jsonl'], ['synthetic-input.jsonl', '--json']):
+            out = io.StringIO()
+            with patch('builtins.open', return_value=io.BytesIO(payload)), contextlib.redirect_stdout(out):
+                self.assertEqual(main(args), 0)
+            self.assertNotIn('SYNTHETIC-PRIVATE-EXCEPTION', out.getvalue())
+            if '--json' in args:
+                report = json.loads(out.getvalue())
+                metadata = [point['state'] for point in report['uwbEvents']]
+                operation, = report['uwbRxOperations']
+            else:
+                objects = [json.loads(line[line.index('{'):])
+                    for line in out.getvalue().splitlines() if '{' in line]
+                metadata = [value for value in objects if 'uwbRxBodyFields' in value]
+                operation, = [value for value in objects if 'counterTotals' in value]
+            self.assertEqual(metadata[0]['uwbRxBodyFields'], '')
+            self.assertTrue(all(metadata[1][key] is None for key in RX_BODY_KEYS))
+            self.assertEqual(operation['classifications']['uwbRxBodyStatus'],
+                {'COMPLETE': 1, 'unobserved': 1})
+
+    def test_v27_keeps_existing_approach_recovery_interpretation(self):
+        report = parse(*(dict(row, version=27) for row in recovery_rows()))
+        self.assertEqual(report['issues'], [])
+        self.assertEqual(report['trials'][0]['approachRecoveryReadCount'], 1)
+
     def test_v22_recognition_keeps_trial_confidence_and_block_reason_without_claiming_open(self):
         for trial in (T, None):
             for accepted, reason, score in (
@@ -270,7 +1112,7 @@ class AnalysisTests(unittest.TestCase):
                     self.assertIsNone(summary[key])
 
     def test_v19_recovery_and_independent_version_rounds_preserve_policy_boundaries(self):
-        for first_version, second_version in ((18, 18), (19, 19), (20, 20), (21, 21), (22, 22), (21, 22), (22, 21), (20, 21), (21, 20), (18, 20), (20, 19), (18, 19), (19, 18), (17, 17)):
+        for first_version, second_version in ((18, 18), (19, 19), (20, 20), (21, 21), (22, 22), (23, 23), (24, 24), (23, 24), (24, 23), (22, 23), (23, 22), (21, 22), (22, 21), (20, 21), (21, 20), (18, 20), (20, 19), (18, 19), (19, 18), (17, 17)):
             for second_start in (3699, 3700, 39700, 39701):
                 with self.subTest(versions=(first_version, second_version), start=second_start):
                     rows = recovery_rows(second_start=second_start)
@@ -1394,12 +2236,56 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(report['issues'][0]['code'], 'CLOCK_MISMATCH')
 
     def test_malformed_future_and_partial_do_not_hide_valid_rows(self):
-        text = '{bad}\n' + json.dumps(record(version=23))+'\n'+json.dumps(record())+'\n{"version":'
+        text = '{bad}\n' + json.dumps(record(version=28))+'\n'+json.dumps(record())+'\n{"version":'
         report = analyze(io.StringIO(text))
         self.assertEqual(report['counts']['analyzedRows'], 1)
         self.assertEqual(report['counts']['unsupportedRows'], 1)
         self.assertEqual(report['counts']['malformedRows'], 2)
         self.assertEqual([i['code'] for i in report['issues']], ['MALFORMED_JSON', 'UNSUPPORTED_VERSION', 'PARTIAL_LINE'])
+
+    def test_unhashable_event_and_evidence_kind_preserve_following_rows_without_leaks(self):
+        secret = 'SYNTHETIC-PRIVATE-VIN-ADDRESS-KEY'
+        for field, version in (('event', 21), ('event', 22), ('event', 23), ('event', 24),
+                               ('kind', 8), ('kind', 23), ('kind', 24)):
+            for invalid in ([secret], {secret: secret}):
+                with self.subTest(field=field, version=version, value=invalid):
+                    malformed = record(version=version)
+                    if field == 'event':
+                        malformed['event'] = invalid
+                    else:
+                        malformed['bleEvidence'] = {'kind': invalid}
+                    rows = [
+                        malformed,
+                        record(version=version, event='BLE_FIELD_TRIAL_FINISHED',
+                            wallMs=BASE+1, elapsedMs=1001,
+                            bleTrial={'attempt': 1, 'status': 'COMPLETE'},
+                            bleEvidence={'kind': 'CANDIDATE_SIGNAL', 'candidate': 1,
+                                'receivedElapsedMs': 1001}),
+                        uwb(offset=2),
+                        record(version=21, trialId=None, event='TESLA_FRUNK_COMMAND_SENT',
+                            wallMs=BASE+3, elapsedMs=1003,
+                            state={'frunkCommandSent': True}),
+                    ]
+                    report = parse(*rows)
+                    self.assertEqual(report['counts']['analyzedRows'], len(rows))
+                    self.assertEqual(report['issues'],
+                        [{'line': 1, 'code': 'INVALID_EVIDENCE_KIND'}] if field == 'kind' else [])
+                    self.assertEqual(report['trials'][0]['completeAttemptCount'], 1)
+                    self.assertEqual(report['trials'][0]['candidateTypedCount'], 1)
+                    self.assertEqual([point['line'] for point in report['uwbEvents']], [3])
+                    self.assertTrue(report['uwbEvents'][0]['newDistanceReceived'])
+                    self.assertEqual([point['line'] for point in report['frunkEvents']], [4])
+                    self.assertTrue(report['frunkEvents'][0]['state']['frunkCommandSent'])
+                    self.assertNotIn(secret, json.dumps(report, allow_nan=False))
+                    payload = ''.join(json.dumps(row)+'\n' for row in rows).encode('utf-8')
+                    for flags in ([], ['--json']):
+                        out, err = io.StringIO(), io.StringIO()
+                        with patch('builtins.open', return_value=io.BytesIO(payload)), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            code = main(['synthetic-input.jsonl'] + flags)
+                        self.assertEqual(code, 1 if field == 'kind' else 0)
+                        self.assertNotIn(secret, out.getvalue() + err.getvalue())
+                        if flags:
+                            self.assertEqual(json.loads(out.getvalue()), report)
 
     def test_exclusion_removes_trial_and_visit_denominator(self):
         report = parse(record(), record(trialId=U), exclude=(T, Q))

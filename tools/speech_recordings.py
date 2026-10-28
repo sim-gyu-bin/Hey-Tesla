@@ -65,7 +65,7 @@ MAX_INSTRUMENTATION_BYTES = 1_048_576
 
 # 메인 에이전트가 확정한 재시험 계측 대상. 기기 테스트는 load→decode→saveResult만 한다.
 REPLAY_TEST_CLASS = (
-    "com.heytesla.app.SpeechRecordingReplayDeviceTest#replaySavedRecording"
+    "com.heytesla.app.speech.SpeechRecordingReplayDeviceTest#replaySavedRecording"
 )
 REPLAY_RUNNER = "com.heytesla.app.test/androidx.test.runner.AndroidJUnitRunner"
 _OK_RESULT_RE = re.compile(r"^OK \(1 test\)$")

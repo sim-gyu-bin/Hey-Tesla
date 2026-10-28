@@ -24,21 +24,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.heytesla.app.BleProbeState
-import com.heytesla.app.BleProbeStatus
+import com.heytesla.app.BuildConfig
 import com.heytesla.app.DiagnosticState
-import com.heytesla.app.VehicleVinState
-import com.heytesla.app.VehicleVinStatus
+import com.heytesla.app.vehicle.uwb.TeslaUwbProbeState
+import com.heytesla.app.vehicle.key.VehicleVinState
+import com.heytesla.app.vehicle.key.VehicleVinStatus
+import com.heytesla.app.vehicle.navigation.VehicleNavigationPresentation
+import com.heytesla.app.vehicle.navigation.VehicleNavigationStatus
 
 private enum class SettingsDetail { VEHICLE, PERMISSIONS, ASSISTANT }
 
 @Composable
 internal fun SettingsScreen(
     state: DiagnosticState,
-    ble: BleProbeState,
     actions: AppActions,
     onOpenDiagnostics: () -> Unit,
     onOpenKeyRegistration: () -> Unit,
+    uwbRanging: TeslaUwbProbeState = TeslaUwbProbeState(),
+    navigation: VehicleNavigationPresentation = VehicleNavigationPresentation(VehicleNavigationStatus.OFF),
 ) {
     var expanded by remember { mutableStateOf<SettingsDetail?>(null) }
     val appSettings = Settings.ACTION_APPLICATION_DETAILS_SETTINGS
@@ -84,14 +87,23 @@ internal fun SettingsScreen(
             )
             AppRow(
                 title = "권한",
-                subtitle = permissionMenuSummary(state),
+                subtitle = permissionMenuSummary(state, uwbRanging.rangingPermission),
                 symbol = AppSymbol.PERMISSIONS,
                 expanded = expanded == SettingsDetail.PERMISSIONS,
                 onClick = { toggle(SettingsDetail.PERMISSIONS) },
             )
             if (expanded == SettingsDetail.PERMISSIONS) {
-                PermissionDetail(state, actions)
+                PermissionDetail(state, actions, uwbRanging.rangingPermission)
             }
+            AppRow(
+                title = "위치 안내 재개",
+                subtitle = vehicleNavigationText(navigation),
+                symbol = AppSymbol.PERMISSIONS,
+                enabled = state.bleFieldTrialActive && state.observationServiceRunning &&
+                    !state.bleFieldTrialStopping && (navigation.status == VehicleNavigationStatus.START_REQUIRED ||
+                    navigation.status == VehicleNavigationStatus.FOREGROUND_FAILED),
+                onClick = actions.resumeVehicleNavigation,
+            )
             AppRow(
                 title = "기본 비서",
                 subtitle = if (state.assistant) "기존 비서를 대체 중" else "현재 기본 비서 아님",
@@ -105,6 +117,10 @@ internal fun SettingsScreen(
         }
 
         AppSection(title = "앱 정보") {
+            DetailRow(
+                label = "앱 버전",
+                value = "${BuildConfig.VERSION_NAME} (빌드 ${BuildConfig.VERSION_CODE})",
+            )
             AppRow(
                 title = "앱 권한 설정",
                 subtitle = "허용한 권한 · 앱 정보",
@@ -115,33 +131,22 @@ internal fun SettingsScreen(
 
         AppSection(title = "개발자") {
             if (state.teslaKeyCleanupFailed) {
-                Text("차량 키 진단 정리 불명 · 예약 유지 · 앱 프로세스 재시작 필요", color = MaterialTheme.colorScheme.error)
+                Text("차량 연결 정리 불명 · 예약 유지 · 앱 프로세스 재시작 필요", color = MaterialTheme.colorScheme.error)
             } else if (state.teslaKeyDiagnosticActive) {
-                Text("차량 키 진단 정리 중 · 다른 진단 차단")
-                OutlinedButton(onClick = actions.cancelTeslaKey, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Text("차량 키 진단 취소")
+                Text(if (uwbRanging.serviceOwned) "서비스 UWB 작업 중 · 홈에서 서비스를 끌 수 있어요."
+                    else "차량 키 진단 진행·정리 중 · 다른 진단 차단")
+                OutlinedButton(
+                    onClick = if (uwbRanging.serviceOwned) {
+                        { actions.setVehicleServiceEnabled(false) }
+                    } else actions.cancelTeslaKey,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) {
+                    Text(if (uwbRanging.serviceOwned) "서비스 끄기" else "차량 키 진단 취소")
                 }
             }
-            if (ble.status == BleProbeStatus.CLEANUP_FAILED || (state.bleDiagnosticActive && !ble.active)) {
-                Text(
-                    "BLE 정리·예약 해제 미확인 · 앱 재시작 필요",
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            } else if (state.bleFieldBusy() || ble.active) {
-                Text(bleFieldStatus(state, ble), style = MaterialTheme.typography.bodyMedium)
-                OutlinedButton(
-                    onClick = actions.cancelBle,
-                    enabled = !state.bleFieldTrialStopping,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                ) { Text("주말 BLE 시험 중지") }
-            }
-            DetailRow("주말 BLE 시험", bleFieldStatus(state, ble))
-            DetailRow("시도 / 종료 회차", "${state.bleFieldTrialAttemptCount} / ${state.bleFieldTrialCompletedCount}")
-            DetailRow("로그 건강 · 상한", bleFieldLogStatus(state))
             AppRow(
                 title = "개발자 진단",
-                subtitle = "차량 키·읽기 전용 상태 · BLE·음성 시험",
+                subtitle = "수동 음성·마이크 · UWB 상세·수동 측정 · 차량 키·상태 조회 · 이벤트",
                 symbol = AppSymbol.DIAGNOSTICS,
                 onClick = onOpenDiagnostics,
             )
@@ -197,9 +202,10 @@ private fun VehicleDetail(
 private fun PermissionDetail(
     state: DiagnosticState,
     actions: AppActions,
+    rangingPermission: Boolean?,
 ) {
     PermissionRow(
-        title = "마이크",
+        title = "수동 음성·마이크 진단",
         granted = state.microphonePermission,
         requestPermission = Manifest.permission.RECORD_AUDIO,
         actions = actions,
@@ -211,19 +217,34 @@ private fun PermissionDetail(
         actions = actions,
     )
     PermissionRow(
-        title = "Bluetooth 보조 스캔",
+        title = "Bluetooth 차량 감지 스캔",
         granted = state.bluetoothScanPermission,
         requestPermission = Manifest.permission.BLUETOOTH_SCAN,
         actions = actions,
     )
     PermissionRow(
-        title = "AltBeacon 정확한 위치 권한",
+        title = "차량 감지·좌표 안내의 정확한 위치",
         granted = state.locationPermission,
         requestPermission = Manifest.permission.ACCESS_FINE_LOCATION,
         actions = actions,
     )
+    AppRow(
+        title = "항상 위치 허용 (선택)",
+        subtitle = if (state.backgroundLocationPermission) "허용됨 · 서비스 복원 때 새 위치 안내 시작 가능"
+            else "미허용 · 재부팅 후 좌표 안내만 앱에서 재개",
+        symbol = AppSymbol.PERMISSIONS,
+        onClick = { actions.openSystemSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS) },
+    )
+    RowNote("원하면 시스템 앱 권한 → 위치에서 ‘항상 허용’을 직접 선택하세요. 필수 권한이 아니며, 권한을 바꾸는 것만으로 꺼진 서비스나 위치 안내를 시작하지 않습니다.")
     PermissionRow(
-        title = "진단 알림",
+        title = "UWB 거리 측정",
+        granted = rangingPermission,
+        requestPermission = Manifest.permission.RANGING,
+        actions = actions,
+    )
+    RowNote("서비스 ON에서 차량 감지 후 UWB 자동 측정에 사용합니다. 권한은 이 항목에서 직접 승인하며, 별도 방향·센서 권한은 요청하지 않습니다.")
+    PermissionRow(
+        title = "서비스·진단 알림",
         granted = state.notificationPermission,
         requestPermission = Manifest.permission.POST_NOTIFICATIONS,
         actions = actions,
@@ -236,11 +257,11 @@ private fun PermissionDetail(
     )
     AppRow(
         title = "시스템 위치 서비스",
-        subtitle = if (state.locationEnabled) "켜짐 · AltBeacon FGS 조건" else "꺼짐 · AltBeacon 감지 시작 불가",
+        subtitle = if (state.locationEnabled) "켜짐 · 차량 감지 준비됨" else "꺼짐 · 차량 감지 시작 불가",
         symbol = AppSymbol.PERMISSIONS,
         onClick = { actions.openSystemSettings(Settings.ACTION_LOCATION_SOURCE_SETTINGS) },
     )
-    RowNote("AltBeacon 위치 유형 FGS에 위치 권한이 필요합니다. GPS 위치는 수집하지 않습니다.")
+    RowNote("휴대전화 위치·나침반은 차량 접근 회차에서 수집하고, 종료 후에는 유효한 차량 좌표의 안내 기한 안에서만 유지합니다. 좌표는 RAM 전용이며 저장·로그·클라우드 전송하지 않습니다. 항상 위치 미허용이어도 앱에서 시작한 안내는 잠금 후 유지할 수 있고, 재부팅 후에는 앱에서 재개해야 합니다.")
 }
 
 @Composable
@@ -253,9 +274,9 @@ private fun AssistantDetail(assistant: Boolean, actions: AppActions) {
     )
     RowNote(
         if (assistant) {
-            "일반 비서 인식은 제공하지 않고 시험에 필수도 아닙니다. 필요하면 이전 비서를 직접 복원하세요."
+            "일반 비서 인식은 제공하지 않으며 차량 감지·UWB 서비스에 필수도 아닙니다. 필요하면 이전 비서를 직접 복원하세요."
         } else {
-            "선택하면 기존 비서를 대체합니다. 일반 비서 인식은 제공하지 않고 시험에 필수도 아닙니다. 이후 이전 비서를 직접 복원하세요."
+            "선택하면 기존 비서를 대체합니다. 일반 비서 인식은 제공하지 않으며 차량 감지·UWB 서비스에 필수도 아닙니다. 이후 이전 비서를 직접 복원하세요."
         },
     )
 }
@@ -272,30 +293,35 @@ private fun RowNote(text: String) {
 @Composable
 private fun PermissionRow(
     title: String,
-    granted: Boolean,
+    granted: Boolean?,
     requestPermission: String,
     actions: AppActions,
 ) {
     AppRow(
         title = title,
-        subtitle = if (granted) "허용됨" else "허용 필요 · 직접 승인",
+        subtitle = when (granted) {
+            true -> "허용됨"
+            false -> "허용 필요 · 직접 승인"
+            null -> "권한 확인 전 · 직접 확인"
+        },
         symbol = AppSymbol.PERMISSIONS,
         onClick = {
-            if (granted) actions.openSystemSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            if (granted == true) actions.openSystemSettings(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
             else actions.requestPermission(requestPermission)
         },
     )
 }
 
-private fun permissionMenuSummary(state: DiagnosticState): String {
+private fun permissionMenuSummary(state: DiagnosticState, rangingPermission: Boolean?): String {
     val granted = (if (state.microphonePermission) 1 else 0) +
         (if (state.bluetoothPermission) 1 else 0) +
         (if (state.bluetoothScanPermission) 1 else 0) +
         (if (state.locationPermission) 1 else 0) +
-        (if (state.notificationPermission) 1 else 0)
+        (if (state.notificationPermission) 1 else 0) +
+        (if (rangingPermission == true) 1 else 0)
     return when (granted) {
-        5 -> "모두 허용됨"
+        6 -> "모두 허용됨"
         0 -> "허용 필요"
-        else -> "허용 $granted/5"
+        else -> "허용 $granted/6"
     }
 }

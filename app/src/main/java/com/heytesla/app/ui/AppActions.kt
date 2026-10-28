@@ -1,12 +1,8 @@
 package com.heytesla.app.ui
 
-import com.heytesla.app.BleFieldConfig
-import com.heytesla.app.SpeechTrialMode
-import com.heytesla.app.BleProbeState
-import com.heytesla.app.BleProbeStatus
+import com.heytesla.app.speech.SpeechTrialMode
 import com.heytesla.app.DiagnosticState
-import com.heytesla.app.FieldLogHealth
-import com.heytesla.app.TeslaBleQuery
+import com.heytesla.app.vehicle.protocol.TeslaBleQuery
 
 /** UI events only; the Activity and existing runtime retain ownership of side effects. */
 internal class AppActions(
@@ -15,9 +11,9 @@ internal class AppActions(
     val saveVehicleVin: (String) -> Unit,
     val vehicleVinChangeBlockedReason: () -> String?,
     val associateVehicle: () -> Unit,
-    val setApproachEnabled: (Boolean) -> Unit,
-    val setAutomaticMicrophone: (Boolean) -> Unit,
-    val observeVehicle: () -> Unit,
+    val setVehicleServiceEnabled: (Boolean) -> Unit,
+    val vehicleServiceBlockedReason: () -> String?,
+    val resumeVehicleNavigation: () -> Unit,
     val refresh: () -> Unit,
     val startMicrophone: () -> Unit,
     val stopSession: () -> Unit,
@@ -30,15 +26,16 @@ internal class AppActions(
     val finishCapture: () -> Unit,
     /** 인식·정리·TTS 어느 단계든 동일 소유권을 취소한다. 정리 불명 예약은 풀지 않는다. */
     val cancelTrial: () -> Unit,
-    val startBle: (BleFieldConfig) -> Unit,
-    val cancelBle: () -> Unit,
-    val bleFieldBlockedReason: (BleFieldConfig) -> String?,
     val startTeslaKey: (Boolean, TeslaBleQuery) -> Unit,
     val cancelTeslaKey: () -> Unit,
     val teslaKeyBlockedReason: () -> String?,
     val leaveDiagnostics: () -> Unit,
     /** 실차 동작을 허용하지 않는 계측 화면에는 이 capability를 제공하지 않는다. */
     val frunkVoice: FrunkVoiceActions? = null,
+    /** 수동 UWB 거리 진단 capability. 미제공 UI에는 실제 실행 버튼을 활성화하지 않는다. */
+    val startUwbRanging: (() -> Unit)? = null,
+    val cancelUwbRanging: (() -> Unit)? = null,
+    val uwbRangingBlockedReason: (() -> String?)? = null,
 )
 
 internal class FrunkVoiceActions(
@@ -50,32 +47,3 @@ internal class FrunkVoiceActions(
 
 internal fun DiagnosticState.bleFieldBusy(): Boolean =
     bleFieldTrialActive || bleFieldTrialStarting || bleFieldTrialStopping
-
-internal fun bleFieldStatus(state: DiagnosticState, ble: BleProbeState): String = when {
-    ble.status == BleProbeStatus.CLEANUP_FAILED -> "정리 실패 · 예약 유지 · 재시작 필요"
-    state.bleFieldTrialStopping -> "주말 BLE 반복 시험 정리 중"
-    state.bleFieldTrialStarting -> "주말 BLE 반복 시험 시작 중"
-    state.bleFieldTrialActive && ble.status == BleProbeStatus.CLEANING_UP -> "당회차 연결 정리 중"
-    state.bleFieldTrialActive && ble.active -> "주말 BLE 반복 시험 · 당회차 진단 중"
-    state.bleFieldTrialActive && state.bleFieldScanFailure != null -> "보조 스캔 실패 · 코드 ${state.bleFieldScanFailure}"
-    state.bleFieldTrialActive && state.bleFieldScanRecoveryAt != null -> "OS 스캔 오류 · 제한복구 대기 · 중지 가능"
-    state.bleFieldTrialActive && state.bleFieldConfig.observationOnly -> "감지만 모드 · 후보 관찰 중 · GATT 수행 안 함"
-    state.bleFieldTrialActive && state.bleFieldConfig.authenticatedReadOnly &&
-        state.teslaKeyDiagnosticActive -> "기존 앱 키로 BODY·DRIVE 읽기 조회 중"
-    state.bleFieldTrialActive && state.bleFieldTrialWaitingForDeparture -> "이탈 신호 후 다음 후보 대기"
-    state.bleFieldTrialActive && state.bleFieldConfig.authenticatedReadOnly && state.present &&
-        state.teslaApproachRead?.localClosed == true -> "연결 정리됨 · 새 광고에서 제한 재조회 대기"
-    state.bleFieldTrialActive -> "근접 신호 대기"
-    state.bleFieldTrialStopReason != null -> "주말 BLE 반복 시험 중지됨"
-    else -> "주말 BLE 반복 시험 꺼짐"
-}
-
-internal fun bleFieldLogStatus(state: DiagnosticState): String {
-    val health = when (state.fieldLog.health) {
-        FieldLogHealth.OK -> "기록 중"
-        FieldLogHealth.LIMIT_REACHED -> "상한 도달 · 기록 중단"
-        FieldLogHealth.QUEUE_OVERFLOW -> "큐 초과 · 기록 중단"
-        FieldLogHealth.WRITE_FAILED -> "쓰기 실패 · 기록 중단"
-    }
-    return "$health · ${state.fieldLog.fileBytes} / ${state.fieldLog.limitBytes} bytes"
-}

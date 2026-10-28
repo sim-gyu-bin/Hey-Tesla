@@ -26,9 +26,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.heytesla.app.VehicleVin
-import com.heytesla.app.VehicleVinState
-import com.heytesla.app.VehicleVinStatus
+import com.heytesla.app.vehicle.key.VehicleVin
+import com.heytesla.app.vehicle.key.VehicleVinState
+import com.heytesla.app.vehicle.key.VehicleVinStatus
 
 /** 편집 중 원문만 RAM에 둔다. 저장 상태와 마스킹 표시는 런타임이 유일한 원본이다. */
 @Composable

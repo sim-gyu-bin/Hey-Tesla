@@ -1,5 +1,6 @@
 package com.heytesla.app.ui
 
+import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,6 +16,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -24,12 +28,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
-import com.heytesla.app.BleProbeState
+import com.heytesla.app.vehicle.ble.BleProbeState
 import com.heytesla.app.DiagnosticState
-import com.heytesla.app.SpeechProbeState
-import com.heytesla.app.SpeechTrialState
-import com.heytesla.app.UwbProbeState
-import com.heytesla.app.TeslaKeyProbeState
+import com.heytesla.app.speech.SpeechProbeState
+import com.heytesla.app.speech.SpeechTrialState
+import com.heytesla.app.vehicle.uwb.UwbProbeState
+import com.heytesla.app.vehicle.key.TeslaKeyProbeState
+import com.heytesla.app.vehicle.uwb.TeslaUwbProbeState
+import com.heytesla.app.vehicle.uwb.TeslaUwbStage
+import com.heytesla.app.vehicle.navigation.VehicleNavigationPresentation
+import com.heytesla.app.vehicle.navigation.VehicleNavigationStatus
+import kotlinx.coroutines.delay
 
 private enum class Destination { HOME, SETTINGS, DIAGNOSTICS, KEY_REGISTRATION }
 
@@ -42,8 +51,11 @@ internal fun HeyTeslaApp(
     uwb: UwbProbeState,
     teslaKey: TeslaKeyProbeState,
     actions: AppActions,
+    uwbRanging: TeslaUwbProbeState = TeslaUwbProbeState(),
+    navigation: VehicleNavigationPresentation = VehicleNavigationPresentation(VehicleNavigationStatus.OFF),
 ) {
     var destination by rememberSaveable { mutableStateOf(Destination.HOME) }
+    val nowElapsedMs = uwbPresentationTime(uwbRanging)
 
     fun navigate(next: Destination) {
         if (destination == next) return
@@ -103,7 +115,16 @@ internal fun HeyTeslaApp(
                     destination != Destination.KEY_REGISTRATION
                 ) {
                     Text(
-                        "차량 키 진단 정리 불명 · 새 진단 차단 · 앱 프로세스 재시작 필요",
+                        "차량 연결 정리 불명 · 새 작업 차단 · 앱 프로세스 재시작 필요",
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                    )
+                }
+                if (uwbRanging.stage == TeslaUwbStage.CLEANUP_FAILED &&
+                    destination != Destination.DIAGNOSTICS
+                ) {
+                    Text(
+                        "차량 UWB 종료 불명 · 새 작업 차단 · 앱 프로세스 재시작 필요",
                         color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
                     )
@@ -112,26 +133,59 @@ internal fun HeyTeslaApp(
                     when (destination) {
                         Destination.HOME -> HomeScreen(
                             state = state,
-                            support = support,
                             trial = trial,
                             ble = ble,
                             onOpenSettings = { navigate(Destination.SETTINGS) },
                             onOpenDiagnostics = { navigate(Destination.DIAGNOSTICS) },
                             onStopSession = actions.stopSession,
-                            onStopBle = actions.cancelBle,
+                            onSetServiceEnabled = actions.setVehicleServiceEnabled,
+                            serviceBlockedReason = actions.vehicleServiceBlockedReason(),
+                            uwbRanging = uwbRanging,
+                            nowElapsedMs = nowElapsedMs,
+                            navigation = navigation,
+                            onResumeNavigation = actions.resumeVehicleNavigation,
                         )
                         Destination.SETTINGS -> SettingsScreen(
                             state = state,
-                            ble = ble,
                             actions = actions,
                             onOpenDiagnostics = { navigate(Destination.DIAGNOSTICS) },
                             onOpenKeyRegistration = { navigate(Destination.KEY_REGISTRATION) },
+                            uwbRanging = uwbRanging,
+                            navigation = navigation,
                         )
-                        Destination.DIAGNOSTICS -> DiagnosticsScreen(state, support, trial, ble, uwb, teslaKey, actions)
-                        Destination.KEY_REGISTRATION -> TeslaKeyRegistrationScreen(state, support, teslaKey, actions)
+                        Destination.DIAGNOSTICS -> DiagnosticsScreen(
+                            state, support, trial, uwb, teslaKey, actions,
+                            uwbRanging = uwbRanging, nowElapsedMs = nowElapsedMs,
+                        )
+                        Destination.KEY_REGISTRATION -> TeslaKeyRegistrationScreen(
+                            state, support, teslaKey, actions, serviceOwned = uwbRanging.serviceOwned,
+                        )
                     }
                 }
             }
         }
     }
+}
+
+/** Expire visible samples without polling or waiting for another ranging callback. */
+@Composable
+private fun uwbPresentationTime(probe: TeslaUwbProbeState): Long {
+    var lastExpiryElapsedMs by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(probe.stage, probe.samples, probe.livePeerIndices) {
+        if (probe.stage != TeslaUwbStage.RANGING) return@LaunchedEffect
+        while (true) {
+            val now = SystemClock.elapsedRealtime()
+            var untilExpiryMs = Long.MAX_VALUE
+            for (sample in probe.samples) {
+                if (teslaUwbSampleIsRecent(probe, sample, now)) {
+                    untilExpiryMs = minOf(untilExpiryMs,
+                        VEHICLE_UWB_SAMPLE_TTL_MS - (now - sample.receivedAtElapsedMs) + 1)
+                }
+            }
+            if (untilExpiryMs == Long.MAX_VALUE) return@LaunchedEffect
+            delay(untilExpiryMs)
+            lastExpiryElapsedMs = SystemClock.elapsedRealtime()
+        }
+    }
+    return maxOf(lastExpiryElapsedMs, SystemClock.elapsedRealtime())
 }

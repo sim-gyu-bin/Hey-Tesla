@@ -2,16 +2,19 @@
     <uses-feature android:name="android.software.companion_device_setup" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature android:name="android.hardware.uwb" android:required="false" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.RANGING" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE" />
@@ -22,7 +25,7 @@
     </queries>
     <application android:name=".DiagnosticApp" android:label="Hey Tesla"
         android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules"
-        android:icon="@android:drawable/ic_btn_speak_now"
+        android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Material.NoActionBar" android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
