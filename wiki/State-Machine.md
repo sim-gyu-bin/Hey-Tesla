@@ -1,6 +1,6 @@
 # 상태 머신
 
-> 이 페이지는 음성 명령·차량 제어를 포함한 제품 전체 상태 머신 계약이다. 현재 v66 소스·생성 APK(`0.66.0`/66)는 BLE 감지·자동 UWB와 별도 좌표 기반 대략적 안내를 병행하며 자동 마이크·프렁크는 미연결이다. 마지막 확인 설치본은`0.65.0`/65·사용자 OFF·실제 서비스 실행0이고 USB 분리 뒤66 설치·기기/실차 검증은 미실행이다. [v66 정본](Tesla-Integration.md#v66-좌표-기반-나침반uwb-병행)의 FGS IPC 최종 보완은 편집 중 계약으로 통과를 주장하지 않는다. 아래 음성 전이표와 버전별 관측은 제품 목표/당시 근거이며 현재 기기·실차 성공과 구분한다. [실측 기록](Device-Validation.md)
+> 실제 `TeslaConnectionStage`·`ProductVoiceStage`와 단발 프렁크 계약을 정의한다. 연결 준비는 [v80 통합 정본](Tesla-Integration.md#v80-인증된-수면-상태의-단발-ble-깨움), 음성은 [v78 모델 연결](Tesla-Integration.md#v78-검증-모델-연결)을 따른다. 버전·설치·저장 ON/OFF·실행검증 수치는 [기기 검증 단일 정본](Device-Validation.md#현재-소스설치검증-상태)에만 둔다. 기존 v76/v78 전이표와 UWB·좌표 전이는 역사로 보존한다. 최신 실행 결과는 기기 검증 정본을 따르며 실차는 미검증이고 v79 sleep 원인·실차 해결은 미확정이다.
 
 [Wiki 홈](Home.md) · [요구사항](Requirements.md) · [네이티브 아키텍처](Native-Architecture.md)
 
@@ -8,21 +8,48 @@
 
 Kotlin domain 계층이 정책 전이를 정의하고, Android 서비스가 단일 활성 세션·이벤트 처리·오디오 수명을 소유한다. UI 재생성은 세션을 새로 시작하거나 차량 명령을 다시 보내는 사건이 아니다.
 
-| 상태 | 의미 |
-| --- | --- |
-| `DISABLED` | 사용자가 기능을 끄거나 필수 초기 설정·권한 조건이 충족되지 않음 |
-| `WAITING_FOR_VEHICLE` | 저전력 접근 신호만 관찰, 마이크와 STT는 OFF |
-| `WAKE_WORD_LISTENING` | 유효 접근 뒤 제한 시간 동안 호출어 감지 |
-| `COMMAND_LISTENING` | 같은 세션의 짧은 명령을 수집하고 최종 인식 대기 |
-| `CONFIRMING` | 정책상 필요한 음성 확인 수집. 화면·지문 인증으로 대체하지 않음 |
-| `VALIDATING` | 전송 직전 권한·상태·근접·만료·중복 조건 검사 |
-| `EXECUTING` | 한 번의 요청 전송 시도가 시작되었고 결과를 기다림 |
-| `COOLDOWN` | 오디오 종료 후 재활성화 억제, 실제 이탈과 cooldown을 관찰 |
-| `ERROR` | 원인과 복구 조건을 기록하고 자원을 정리하는 상태 |
+| 상태 출처 | 실제 enum | 의미 |
+| --- | --- | --- |
+| `TeslaConnectionStage` | `IDLE`, `PREPARING`, `CONNECTING`, `AUTHENTICATING` | 감지 대기/연결 준비·실제 GATT 연결·기존 키 인증/새 domain3 인증. 이 상태만으로 마이크를 허용하지 않음 |
+| `TeslaConnectionStage` | `CHECKING_VEHICLE` | 인증된 READ_ONLY BODY로 수면 상태 확인. P·음성 준비가 아님 |
+| `TeslaConnectionStage` | `WAKING_VEHICLE` | fresh ASLEEP에 한해 같은 GATT 단발 깨움 진행. 물리 기상·P 확인이 아님 |
+| `TeslaConnectionStage` | `MONITORING` | 같은 GATT에서 인증된 DRIVE P를 순차 갱신. `parkFresh`와 현재 owner/권한도 별도 검사 |
+| `TeslaConnectionStage` | `EXECUTING` | 단발 음성 gate 인계 후 새 DRIVE→ACTION→BODY 진행. 명령 접수/ACK/OPEN은 각각 별도 필드 |
+| `TeslaConnectionStage` | `STOPPED`, `BLOCKED`, `FAILED` | 중단·입장 차단·실패. 정리 완료나 물리 미실행을 뜻하지 않음 |
+| `ProductVoiceStage` | `IDLE`, `PREPARING`, `LISTENING` | RAM lease와 실제 microphone FGS 준비, fresh P 동안 발화 대기 |
+| `ProductVoiceStage` | `RECOGNIZING` | 마이크 실제 해제 후 external PCM 인식. 수집 중으로 표시하지 않음 |
+| `ProductVoiceStage` | `STOPPING`, `COMMAND_READY` | 음성 봉인·정리 중, 또는 정리 확인 후 인정된 단발 명령. 차량 완료가 아님 |
+| `ProductVoiceStage` | `STOPPED`, `BLOCKED`, `FAILED` | 종료·준비 조건 차단·오디오/인식 실패. 정리 불명은 예약 유지·재시작 필요 |
 
-`UNKNOWN`은 세션 상태가 아니라 **명령 결과 불명**이다. 요청 미전송, 명시적 거절, 차량의 요청 승인, 관측된 물리 완료와 구분한다. 취소·만료가 전송 후 발생하면 “실행되지 않았다”는 뜻의 취소 완료로 표시하지 않는다.
+기어 `UNKNOWN`은 명시 P가 아니며 음성을 봉인한다. 차량 명령 결과의 `UNKNOWN`은 별도로 **결과 불명**을 뜻한다. 전송 후 취소·만료를 미실행 보장으로 표시하지 않는다. 제품은 기본 false 별도 영속 동의와 사용자가 직접 선택한 ready 기본 비서를 요구하며 일반 진단 dry-run·수동 실차 시험과 분리한다.
 
-플랫폼 검증·mock 모드는 Tesla 계정 없이 시작할 수 있다. 실차 모드에는 별도 초기 인증·가상 키·사용자 승인 조건이 적용된다. 운영 중 음성 확인과 개발자의 실차 시험 승인은 서로 다른 경계다.
+## 현재 연결 준비와 음성 진입
+
+| 현재 상태 | 이벤트·조건 | 다음 상태·필수 동작 |
+| --- | --- | --- |
+| 감지 대기 | 저장 ON·새 owner/token·빈 후보·fresh 정확 광고·기존 키·native scan pause 확인 | 단일 GATT 연결·기존 own-key 인증 후 `CHECKING_VEHICLE`, READ_ONLY BODY 읽기. 이전 후보/P/음성/명령 복원 금지 |
+| `CHECKING_VEHICLE` | 인증된 BODY·원 ingress receipt 유효·5초 이내·수면 상태 `ASLEEP` | `WAKING_VEHICLE`, 같은 GATT의 새 깨움 전용 conversation으로 RKE 30 단발 |
+| `CHECKING_VEHICLE` | 인증된 fresh BODY·수면 상태 `AWAKE` 또는 `UNKNOWN` | 깨움 생략, 새 domain3 인증·READ_ONLY DRIVE 조회 |
+| `CHECKING_VEHICLE` | BODY 인증 오류·receipt 없음/음수/미래/stale | 중단·정리. 수면 추정·mic·프렁크 ACTION 없음 |
+| `WAKING_VEHICLE` | 검증된 encrypted ACK | 새 domain3 인증·READ_ONLY DRIVE 조회. 물리 기상·P·프렁크 성공으로 승격 금지 |
+| `WAKING_VEHICLE` | 현재 요청 상관 일치·signature/payload 없음·명시 status OK/fault 0의 `NOMINAL_ACK` | 인증된 깨움 성공 없이 새 domain3 인증·독립 READ_ONLY DRIVE만 조회. 새 fresh P까지 mic/ACTION 0, 재깨움 없음 |
+| `WAKING_VEHICLE` | `REJECTED`·기타 `UNCONFIRMED`(unknown status/payload)·접수 후 timeout/결과 불명 | 중단·정리, 재깨움 없음 |
+| 최초 fresh P 전 새 DRIVE | wake ACK/nominal 뒤 인증된 명시 INVALID·gear UNKNOWN, 추가3회 미만·고정 준비창/원기한 이내 | 음성/명령 없이 준비 유지,2초 뒤 새 독립 인증 READ_ONLY DRIVE. ACK부터25초·원 global의 min 고정, wake 재실행 없음 |
+| 최초 준비 외 DRIVE 또는 새 DRIVE의 다른 비P/불량 시각 P | 생략/빈/SNA/미지원/D/R/N·인증 오류, 성공 후 monitor/command INVALID, 횟수/기한 초과 | 기존 중단·정리. Invalid/과거 P/source 시각을 제어 허가로 승격하지 않음 |
+| 새 DRIVE 확인 | 인증된 fresh 명시 P·동의·선택/ready 비서·권한·owner/lease 유효 | `MONITORING`, 음성 `PREPARING → LISTENING`. 이 전까지 mic와 프렁크 ACTION 0 |
+| `MONITORING` / `EXECUTING` | 후속2초 P poll / 오디오 정리 뒤 명령 인계 | 같은 GATT의 새 DRIVE / DRIVE→ACTION→BODY. BODY/wake preflight 재실행 없음 |
+| 모든 활성 단계 | OFF·동의 철회·owner/권한 상실·기한 | 새 결과/TX 봉인 후 실제 정리. OFF 항상 가능, 정리 불명은 예약 유지·재시작 필요 |
+
+- 모든 실제 write 직전 owner·OFF·권한·consent·기한을 재검사한다. 깨움 write의 각 조각과 SDK201 미접수 재발급은 원 ASLEEP ingress의 5초 freshness도 재검사한다. 기존 BUSY 제한의 동일 frame 외 재발급·새 깨움 conversation 재시도는 없다.
+- 기존 global 기한과 각 실제 protocol 단계 고정10초를 유지한다. BODY→WAKE→DRIVE 및 실제 인증→조회 전이는 별도 단계이며, 같은 단계의 `Waiting`이나 반복 ACK는 기한을 연장하지 않는다.
+- 초기 INVALID의 다음 조회는 새 실제 거래지만 ACK 기준 준비창·원 global을 갱신하지 않는다. 회차 전체 monotonic 역행을 감시하며 예약·실제 발급·SDK201·queue drain·late RX에서 검사한다. 새 fresh P를 수용하면 초기 예외를 영구 해제하고 이후 UNKNOWN은 즉시 봉인한다. 재조회 사건은 새 시작 시도이지 SDK 접수·P 증거가 아니다.
+- 이후 음성·단발 명령·정리는 기존 v78 모델 및 아래 불변식을 유지한다. DRIVE의 `UNKNOWN`은 P가 아니지만 위 BODY 수면 상태의 `UNKNOWN`은 깨움 생략 후 DRIVE 조회라는 차이를 보존한다.
+- 음성은 [v84 prepared owner](Tesla-Integration.md#v84-음성-발화-확인lease별-모델-준비비민감-진단)를 적용한다. `PREPARING`에서 lease 전용 모델 준비 뒤 마이크를 열고 연속120ms 유성을 확인한다. 비명령은 stream 실제 해제 뒤 같은 모델로 `PREPARING → LISTENING`하며 recognizer 보유 중 full cleanup은 false다. `RECOGNIZING`은 실제 마이크 해제 구간이다. 인정/종료에는 JNI 반환·owner full-close 확인 전 명령 인계·lease 반환을 금지한다. schema39 진단은 이 전이를 관측할 뿐 제어 권한이 아니다.
+
+
+## 과거 UWB·좌표 및 진단 전이
+
+다음 버전별 절들(「v44 화면 표시 실차 음성 전이」 전까지)은 당시 UWB·좌표 서비스와 로그/REA 해석을 보존한다. **아래의 “현재”, 음성 미연결, `RANGING` 권한, 거리 기한·좌표 sidecar는 그 버전 당시 범위이며 v76 운영 전이가 아니다.** 해당 실행 코드·전용 테스트는 제거했고 공유 보안·GATT 경계는 connection으로 이관했다.
 
 ### v55 제품 서비스 UWB 전이
 
@@ -53,8 +80,41 @@ Kotlin domain 계층이 정책 전이를 정의하고, Android 서비스가 단�
 - armed idle에서는 센서 OFF다. 위치 읽기 거절/15초 timeout/null 또는 좌표 없이 operation 종료 시 source를 해제한다. 유효 차량 fix가 있으면 원 나이를 반영한60초 이내 남은 기간만 유지하고 만료/clock invalid에는 UWB 회차 중에도 해제한다. 정상 해제 후 lease만 armed로 유지해 다음 새 접근에 재사용하며 같은 접근 재수집/poll/retry는 없다.
 - 위치 실패는 UWB를 실패시키지 않고 실제 공유 SDK/transport 오류는 전체 정리로 보낸다. domain2/3의 crypto·identity·replay를 분리하고 primary 전송/입력을 우선한다.
 - heading2초 만료는 화살표만, 폰15초/차량60초 만료는 해당 숫자/방향을 숨긴다.100ms 초과 시계 샘플은 `CLOCK_SAMPLE_DELAYED`로 anchor를 유지한 일시 숨김이며 실제 후퇴는 `CLOCK_INVALID`로 봉인한다. 만료된 값을 새 callback 처리/화면 복귀로 부활시키지 않는다.
+- v73은 `시각 불명/미래/모순 → VEHICLE_LOCATION_TIME_INVALID → 수집 중지·raw RAM clear`와 `실제60초 초과 → STALE`을 구분한다. 존재하지만 형식이 잘못된 Timestamp는 parser에서 거부한다. 어느 쪽도 UWB primary 종료·재조회·기한 연장으로 이어지지 않는다. [시각 분류 정본](Tesla-Integration.md#v73-좌표-시각-분류와-v72-uwb-대조)을 따른다.
 - OFF·VIN/owner/권한 상실 → 입력/TX·late callback 봉인·raw RAM clear → source/FGS 정리다. 해제 불명은 예약·FGS를 유지하며 새 접근을 차단한다. fieldToken과 leaseId·단조 sequence·terminal ledger·death owner generation·단발 close callback의 최종 IPC 계약은 정본을 따른다.
 - background 권한 없는 boot/복원은 BLE/UWB 감지와 좌표 명시 재개를 분리한다. 권한이 있어도 새 owner·빈 좌표로만 복원한다. 권한 결과/팝업 복귀·Activity 재생성은 죽은 서비스·이전 위치 회차를 재시작하는 사건이 아니다.
+
+### v67 관측 전이와 metadata 주소 분리
+
+- 상세는 [v67 정본](Tesla-Integration.md#v67-metadata-주소-처리위치-관측-정본)을 따른다. unsigned field44에 한정해 주소 검사 → body semantic decode → 기존 metadata consumer로 분리한다. to 없음/DOMAIN0·2는 synthetic allowlist이고 명시 route/UUID 불일치는 decode 전에 제외한다. signed 응답·FiRa/stop·AEAD/replay 전이는 유지하며 field3 grant/rejection 전이는 추가하지 않는다.
+- schema28의 `navigationObservation` / `VEHICLE_NAVIGATION_OBSERVATION`은 대기·실제 sidecar 시작·HELLO/QUERY 생성과 실제 frame TX·sidecar 수신 판정/authEvidence·최종 reason·terminal을 분리한다. source/FGS는 실제 등록/해제 결과, UI는 presentation status가 바뀔 때만 관측한다. 반복 snapshot이나 센서 매표본을 새 사건·거리 수신으로 세지 않는다.
+- raw GPS/heading·절대 GPS/state 시각·키·주소·ID·token은 금지하고 기존1..27 해석·primary RX 분모를 유지한다. owner 소거 전 terminal 관측은 늦은 callback 재입장·위치/세션 재생 허가가 아니다. 관측으로 RF·수집·TTL·기한·retry·권한·마이크/프렁크 전이를 바꾸지 않는다.
+
+### v68 초기 실제 단말정보 전이
+
+- `기존 키 HMAC 검증 성공 → UWB operation의 실제 source.snapshot(false) 한 번 → 암호화 field40 → 기존 field58`이다. field44 수신을 기다리지 않는 초기 전송이며 일반 field1 반복으로 이 전이를 재실행하지 않는다. 초기 배터리/thermal 조회·구독은 없고 명시 GET_MODEL/ONCHANGE 전이는 그대로다.
+- `field40 전체 BE16 frame의 모든 조각 성공 callback 완료 → TESLA_UWB_INITIAL_DEVICE_INFO_SENT`만 허용한다. queue/SDK 접수만으로 이벤트를 발행하지 않고 이벤트를 native RF 시작·차량 수락·거리 수신 전이로 해석하지 않는다. v68 당시 schema28 유지·모델/버전 hash·raw값 미기록 계약을 v69의 고정 enum 확장과 구분한다.
+- 공식은 onWhitelist 연결 약1초 뒤이고 우리는 HMAC 검증 직후다. 동등한 보안/시점이나 실차 해결로 표시하지 않는다. 기존 single pump·AEAD·route/UUID·counter/replay·owner/OFF/권한·협상30초·sidecar15초·첫 거리60초는 유지하며 field19 재송신·passive-auth DRIVE·field3 grant/rejection·legacy GET_STATUS 전이는 추가하지 않는다.
+
+### v69 선행 RX의 무승격 전이
+
+- `수신별 관측 reset → 기존 활성/크기/시각/기한 거부 → 시작 전 ingress만 parse 전 Ignored → 판정 관측 기록`이다. `receivedAt == startedAt`는 기존 정상 경로를 유지하고 ingress를 처리 시각으로 바꾸지 않는다. 상세 순서와 schema29 계약은 [정본](Tesla-Integration.md#v69-선행-rx-수신-경계-정본)을 따른다.
+- primary·sidecar·frunk의 `Ignored`는 phase·기한·request identity·counter/replay·HMAC/AEAD·domain/route/UUID를 바꾸지 않는다. 인증·metadata·FiRa·좌표·성공·새 BODY fallback·actuator로 전이하지 않고 후속 정상 입력은 기존 검증을 모두 통과해야 한다.
+- `IGNORED` / `RESPONSE_BEFORE_START`와 실제 protocol 소비 관측은 거리·freshness·기한·wake lock 갱신이 아니다. 반복 snapshot은 새 수신이 아니며 기존1..28 해석과 원문·새 시각·PII 미추가를 유지한다.
+
+### v70 FiRa 재요청의 세대별 전이
+
+상세 순서·공식 근거·REA 원문 누락과 원 DEX 보완의 한계는 [통합 정본](Tesla-Integration.md#v70-fira-재요청-교체유지-정본)을 따른다. 단발 협상 guard 대신 같은 ID의 교체와 다른 ID의 유지/추가를 적용한다. 실제 old close·새 response 전체 TX·new native 시작을 구분하고 이전 endpoint callback이 같은 숫자 ID의 새 세대를 바꾸지 못하게 한다.
+
+재요청은 원 첫 거리 기한을 재발급하지 않으며 거리 freshness·무수신·wake lock 갱신도 아니다. 기존 owner/OFF/권한·암호/route/replay·정리 실패 봉인과 예약 보존을 유지한다. metadata/source·좌표 sidecar 재시작·음성/프렁크·새 제어 허가로 전이하지 않는다. 종료 세대 표본은 현재 알림에서 제외하되 최종 historical 관측과 과거 실패는 보존한다.
+
+### v71 기한 만료의 관측
+
+기존 만료 전이 직전에 실제 최초 만료 기한을 기록하고 `TIMED_OUT / DEADLINE_EXPIRED`로 종료한다. cleanup·재진입이 최초 원인 또는 null을 덮어쓰지 않으며 새 회차는 미관측으로 시작한다. 원인 표시는 새로운 상태 전이·기한 연장·재시도·성공 판정이 아니다. 정확 판정·동률 규칙은 [정본](Tesla-Integration.md#v71-기한-만료-원인-관측)을 따른다.
+
+
+
+
 
 
 ### v61 FiRa request 세션과 stop 전이
@@ -84,9 +144,11 @@ wire 상세는 [단말 정보 응답·거리 receipt 정본](Tesla-Integration.m
 
 
 
+## 수동·진단 경로와 역사
+
 ### v44 화면 표시 실차 음성 전이
 
-`RAM 동의 → DIRECT_MIC COMMAND → ACCEPTED → 입력 정상 해제 → 한 번만 DISPATCHED handoff → 같은 차량 작업의 DRIVE P → fresh VCSEC 프렁크 → 후속 BODY 관측 → bounded 정리`다. 별도 확인 발화는 없다. 기존 dry-run 전이는 그대로 차량 미전송이며 자동 접근 음성과도 아직 결합하지 않았다.
+`RAM 동의 → DIRECT_MIC COMMAND → ACCEPTED → 입력 정상 해제 → 한 번만 DISPATCHED handoff → 같은 차량 작업의 DRIVE P → fresh VCSEC 프렁크 → 후속 BODY 관측 → bounded 정리`다. 별도 확인 발화는 없다. 이 수동 시작 경로는 현재도 별도이며 일반 dry-run은 차량 미전송이다. v76 제품 음성은 위·아래의 별도 연결 소유권을 사용한다.
 
 - 명령10초·handoff5초, 전체 음성 세션40초를 유지한다. 현재 승인 정책은 최종 n-best 중 정확한 전체 문법 후보를 허용하고 모든 후보의 취소어를 우선한다. 실제 점수가 있으면 채택 후보0.85 이상을 요구하며 승인된 점수 미제공은 점수 gate만 생략한다. 마이크 입력 해제와 인식기/pipe 정리 확인이 모두 끝나야 DISPATCHED로 넘어간다. 어느 쪽이든 불명이면 예약을 유지하고 음성 lease 반환·차량 core 입장을 막는다. UI 단계는 runtime에서 도출하며 재구성·화면 복귀로 새 작업을 만들지 않는다.
 - 실차 명령은 명령 인정부터40초 기한 안에서 fresh P와 권한을 검사한다. SDK201 미접수 조각 외 동일 요청의 자동 재발급은 금지한다. 전송 이후 취소·timeout은 UNKNOWN이며 차량 철회를 보장하지 않는다.
@@ -101,7 +163,11 @@ wire 상세는 [단말 정보 응답·거리 receipt 정본](Tesla-Integration.m
 - `CLEANING → RESPONSE_INITIALIZING → RESPONDING`: 인식기·writer·FD·RAM 입력의 해제가 확인된 뒤에만 설치된 한국어 오프라인 voice로 안내한다. TTS가 끝날 때까지 같은 current·예약을 유지하며 입력을 다시 시작하지 않는다.
 - 입력/출력·포커스 해제 확인 후 소유자가 current·예약을 해제한다. 외부 중지는 소유권을 먼저 풀지 않고 취소를 전달한다. 해제 불명은 재시작 요구와 예약 유지다.
 - 처리 전 취소는 `CANCELED`로 처리 차단한다. 로컬 처리 후 취소는 `PROCESSED`/`UNKNOWN`을 보존하고 안내만 중단한다. 처리된 일을 미처리로 가장하지 않는다.
-- 신뢰도 제외는 승인된 로컬 진단에만 해당한다. 아래 실차용 신선한 P·계정/차량 권한·근접·동의·음성 정책·만료 게이트를 생략하지 않는다.
+- 이 절의 로컬 dry-run 판정과 차량 제어 게이트를 구분한다. 현재 제품/수동 프렁크는 기존 점수 미제공 정책을 함께 사용하지만 fresh P·기존 키 권한·동의·정확 명령·정리·만료 gate는 생략하지 않는다.
+
+## 과거 감지·접근 읽기 전이
+
+다음 절부터 「수동 차량 키 등록·읽기 전이」 전까지는 당시 버전의 감지·복원·예약 이력이다. `VEHICLE_SERVICE_UWB`·UWB 예약·주기 조회 없음·이전 자동 마이크 등의 서술은 현재 소스 존재나 v76 연결 음성 계약이 아니다. VIN 보존·late callback 봉인·정리 불명 차단의 공용 안전 경계는 유지한다.
 
 ### 과거 주말 BLE 반복 시험 전이
 
@@ -170,7 +236,7 @@ wire 상세는 [단말 정보 응답·거리 receipt 정본](Tesla-Integration.m
 
 
 
-### 수동 차량 키 등록·읽기 전이
+## 수동 차량 키 등록·읽기 전이
 
 `0.16.0-probe`에서 도입한 경로를 `0.18.0-probe`에서도 유지한다. Application 소유의 단일 예약·token으로 `PREPARING_KEY → CONNECTING → DISCOVERING → NEGOTIATING_MTU → SUBSCRIBING`을 실행한다. 등록 요청은 `CARD → HANDSHAKING → READING_STATUS`, 이미 등록한 키의 조회는 `HANDSHAKING → READING_STATUS`로 진행한다. 키카드 대기는 120초, 전체는 180초 이내이며 기존 음성 세션의 40초 정책을 늘리지 않는다.
 
@@ -181,79 +247,75 @@ wire 상세는 [단말 정보 응답·거리 receipt 정본](Tesla-Integration.m
 - 등록 전송 뒤 취소·시간 초과는 `UNKNOWN`과 등록 불명을 보존한다. GATT close 성공은 로컬 해제이며 원격 등록 철회·구독 해제 증거가 아니다. close 실패는 `CLEANUP_FAILED`와 예약을 유지하고 다른 진단을 차단한다.
 - 늦은 이전 token/GATT 응답·재전송·재사용 counter·기한 경계 `now >= deadline`은 새 상태나 전송을 만들지 않는다. 완료/실패는 `CLEANING` 뒤 봉인하며 키·VIN·응답 버퍼를 로그에 복사하지 않는다.
 
-## 전이표
+## v76 연결·v78 로컬 음성 전이표
+
+**역사:** 아래는 당시 전이표다. 현재 최초 연결의 BODY 확인·조건부 단발 깨움은 위 「현재 연결 준비와 음성 진입」이 대체하며 기존 로컬 모델·음성/정리 안전 계약은 유지한다.
 
 | 현재 상태 | 이벤트·조건 | 다음 상태 | 필수 동작 |
 | --- | --- | --- | --- |
-| `DISABLED` | 해당 모드의 초기 설정·필수 권한·사용자 활성화 충족 | `WAITING_FOR_VEHICLE` | 오디오 없이 접근 관찰 준비 |
-| `WAITING_FOR_VEHICLE` | 신선한 목표 차량 접근 신호, debounce 통과 | `WAKE_WORD_LISTENING` | 새 세션 ID·monotonic 만료 시각 발급, 단일 오디오 캡처 시작 |
-| `WAITING_FOR_VEHICLE` | 불명확·오래된 신호 또는 조건 미충족 | 유지 | 마이크·STT 시작 금지 |
-| `WAKE_WORD_LISTENING` | 호출어 감지, 세션 유효 | `COMMAND_LISTENING` | 동일 세션 스트림·버퍼를 지원 경로로 인계 |
-| `COMMAND_LISTENING` | 최종 허용 명령, 음성 확인 필요 | `CONFIRMING` | 확인 질문 후 유효한 긍정 응답만 수집 |
-| `COMMAND_LISTENING` | 최종 허용 명령, 정책상 추가 확인 불필요 | `VALIDATING` | 음성 확인 생략과 권한·안전 검사 생략을 혼동하지 않음 |
-| `COMMAND_LISTENING` | 취소·부정·회상·모호·낮은/미제공 신뢰도 | `COOLDOWN` | 미전송으로 종료 |
-| `CONFIRMING` | 허용된 긍정 확인, 세션 유효 | `VALIDATING` | 계정·차량 상태 등을 전송 직전 검사 |
-| 전송 전의 활성 상태 | 취소·만료·실제 이탈 | `COOLDOWN` | 전송 차단, 세션 오디오·작업 해제 |
-| `VALIDATING` | 필요한 권한·신선한 명시적 P·근접·만료·중복 검사 통과 | `EXECUTING` | 취소 여부와 전송 시작을 직렬화하고 한 번만 전송 |
-| `VALIDATING` | 안전 상태·권한 부족 또는 불명 | `COOLDOWN` 또는 `DISABLED` | 이유를 음성 안내하고 미전송 종료 |
-| `EXECUTING` | 요청 승인·관측 완료·명시적 실패 | `COOLDOWN` | 실제 확인한 수준의 결과만 안내 |
-| `EXECUTING` | 응답 시간 초과·네트워크 단절·취소·이탈로 결과 확인 불가 | `COOLDOWN` | `UNKNOWN`, 철회·미실행을 보장하지 않고 재전송 금지 |
-| 활성 상태 | 캡처 오류·정책에 의한 입력 차단·예외 | `ERROR` | 자원 해제. 이미 전송되었다면 미확인 결과는 `UNKNOWN` 보존 |
-| 어느 상태 | 사용자 비활성화·필수 권한 철회 | `DISABLED` | 세션 종료, 전송 후 결과가 불명이면 그 사실 유지 |
-| `ERROR` | 원인 정리·안내 완료 | `COOLDOWN` 또는 `DISABLED` | 자동 명령 재실행 금지 |
-| `COOLDOWN` | 실제 이탈 관측과 cooldown 종료 | `WAITING_FOR_VEHICLE` | 다음 새로운 접근 이벤트를 기다림 |
+| 연결 `IDLE` / 음성 `IDLE` | 저장 ON·새 owner/token·빈 후보 | 감지 대기 | 이전 후보·P·음성·명령 복원 금지, 오디오 OFF |
+| 감지 대기 | fresh 정확 광고·기존 키·입장 조건·native scan pause 확인 | 연결 `PREPARING → CONNECTING → AUTHENTICATING` | 같은 request/단일 GATT 소유. 광고10초는 최초 SDK 발급까지 검사 |
+| 연결 `AUTHENTICATING` | 인증된 fresh 명시 P | 연결 `MONITORING`, 음성 `PREPARING → LISTENING` | 별도 동의·선택/ready 비서·권한·정확 RAM lease 확인 후 microphone FGS 시작 |
+| 연결 `MONITORING` | 유효 DRIVE 응답 | `MONITORING` | 응답 후2초에 새 READ_ONLY conversation 조회. 한 outstanding만, RX5초/source10초/future2초 적용 |
+| 음성 `LISTENING` | 완전한 bounded 발화 | `RECOGNIZING` | 마이크 실제 해제 후 기존 튜닝 zipformer 인식. 발화 시작부터 모델 로드·최종 판정까지10초, 잘린 발화/부분 결과 불허 |
+| 음성 `RECOGNIZING` | 단일 최종 원문의 문법 불일치 | `PREPARING → LISTENING` | native stream/recognizer 정리·PCM 소거·readiness 재확인 후 새 발화. 취소/오류를 이 전이로 재시도하지 않음 |
+| 음성 `RECOGNIZING` | 기존 wholephrase·취소 우선 정책 통과 | `COMMAND_READY`, 연결 `EXECUTING` | 실제 mic/native stream/recognizer/FGS 정리 확인 후 handoff5초 내 gate 단발 소진 |
+| 연결 `EXECUTING` | monitor 요청 outstanding | `EXECUTING` | 원 응답 drain·검증 후 같은 GATT 새 DRIVE→ACTION→BODY. monitor P 재사용·두 번째 GATT 금지 |
+| 연결 `EXECUTING` | 새 명령용 fresh P·SDK 직전 검사 통과 | `EXECUTING` | 명령 인정부터40초 안에 단발 ACTION. SDK 접수 후 결과 불명 재전송 금지 |
+| 연결 `EXECUTING` | ACK·후속 BODY 또는 실패/만료 | 종료·정리 | SDK 접수/ACK/OPEN/물리 개방을 분리하고 결과 불명 보존 |
+| 모든 활성 단계 | D/R/N/UNKNOWN·stale·disconnect·권한/owner/비서 상실·통화/silenced·음성 취소/실패/기한 | 음성 `STOPPING`, 연결 종료 | 새 음성 결과/TX 즉시 로컬 봉인 후 실제 정리. 기어 감지는 BLE 조회 지연이 있음 |
+| 모든 활성 단계 | OFF·동의 철회 | 종료·정리 | false 저장 실패도 RAM 철회, `productVoiceConsentSaveFailed` 유지 |
+| 종료·정리 | audio와 BLE 실제 정리 모두 확인 | 음성 `STOPPED`, 다음 새 접근 대기 | 회차 예약 반환·감지 재개. 실제 후보 철회/만료와 새 광고 전 재입장 금지 |
+| 종료·정리 | 어느 자원이든 정리 불명 | 실패·재시작 필요 | 예약·참조/필요 FGS 유지, 재입장 차단. 성공/정상 종료로 위장 금지 |
 
-이탈을 관측했더라도 cooldown이 끝나기 전에는 재활성화하지 않는다. cooldown 중 재연결만으로 음성 창을 연장하거나 새 세션을 만들지 않는다. 오류의 종류에 따라 재설정이 필요할 수 있으며, 알림 터치가 필요한 복구를 정상 무터치 사용으로 보고하지 않는다.
+연결 대기에 고정10초/90초 상한은 없다. 유한 초기 연결 이후 fresh P가 계속 필요하며 타이머·일반 트래픽·과거 `connectedObserved`는 P 갱신 근거가 아니다. pause·GATT·정리 시간은 이탈로 세지 않는다.
 
 ## 불변식
 
 1. 활성 세션은 최대 하나다. 비동기 이벤트는 세션 ID에 귀속시키고 종료된 세션의 늦은 결과가 새 세션을 전이시키거나 요청을 전송하지 못하게 한다.
-2. 세션·확인·요청 만료는 monotonic 경과 시간으로 판단한다. 프로세스 재시작 시 기존 실행 의도를 복원하지 않는다. 차량 데이터의 신선도는 이 타이머와 별도로 출처·차량 관측 시각·유효성을 검증한다.
-3. 오디오 소유자는 하나다. 호출어→명령처럼 같은 세션 안에서 필요한 스트림은 인계하되, 세션 종료에서는 마이크·STT·버퍼·작업을 반드시 해제한다. TTS가 필요하면 제한된 안내만 끝내고 TTS·포커스도 정리한다. 정상적인 침묵 자체를 권한 차단으로 오인하지 않는다.
-4. 음성 확인을 했더라도 **전송 직전** 신선한 명시적 P, 계정·차량 권한, 근접, 만료, 중복을 다시 검사한다. `null`, 오래된 P, `UNKNOWN`, 속도 0은 P를 대체하지 못한다.
+2. 발화10초·handoff5초·명령40초는 monotonic으로 판단한다. 연결 대기의 고정 종료와 다르다. 차량 source wall 시각·RX monotonic 신선도는 별도 검증하고 프로세스 복원으로 실행 의도를 재생하지 않는다.
+3. 오디오 소유자는 하나다. 제품은 idle capture→완전한 발화→마이크 해제→로컬 PCM 인식 순서이며 native stream/recognizer·버퍼까지 실제 정리한 뒤에만 gate를 넘긴다. 정상 침묵은 입력 차단이나10초 주기 재시작 사유가 아니다. 수동 Android 경로는 writer/FD 정리도 요구한다.
+4. 음성 명령을 인정했더라도 **같은 GATT의 새 DRIVE와 SDK 전송 직전**에 fresh 명시 P·기존 앱 키 권한·owner/대상·만료·단발을 검사한다. `null`, 오래된 P, `UNKNOWN`, 속도0·UWB/좌표 거리는 P를 대체하지 못한다.
 5. 최종 인식 결과 전체만 실행 후보가 된다. 단어 포함 여부, 부분 결과, 호출어만으로 실행하지 않는다. 음성 확인은 발화자의 신원 인증이 아니다.
 6. 취소 이벤트가 전송 시작보다 먼저 처리되면 전송하지 않는다. 검사와 전송 시작의 경쟁은 하나의 직렬 처리 경계로 관리한다. 네트워크 요청 취소가 이미 차량에 전달된 명령을 되돌린다는 보장은 없다.
 7. 만료·취소된 명령의 영구 큐는 없다. 결과 불명 요청을 자동 재전송하지 않는다. 로컬 중복 방지는 외부 차량의 exactly-once 실행 보장과 다르다.
-8. `WAITING_FOR_VEHICLE`, `COOLDOWN`, `DISABLED`에서는 마이크·STT가 OFF다. 접근 감시 또는 기본 비서 서비스가 남아 있는 것과 녹음 지속은 구분한다.
+8. 인증된 연결·fresh P·동의·비서/권한 조건 밖에서는 제품 마이크/STT를 허용하지 않는다. 봉인과 실제 정리 완료를 구분하고 해제 불명에서는 예약을 유지한다. 감지 서비스 상주 자체는 녹음이 아니다.
 
-## 명령 파서와 확인 정책
+## 기존 명령 파서 정책
 
-파서는 자유 문장 추론 대신 허용 문법을 사용한다. 공백·명시적으로 허용한 문장부호만 정규화하며 부정어·시제·나머지 발화를 지워서 허용 문구를 만들지 않는다.
+제품은 `FrunkVoicePolicy`의 **기존** 정책을 재사용한다. v78 제품은 로컬 모델의 단일 최종 원문·confidence `null`을 전달하며 수동 Android 경로의 n-best/점수 계약도 보존한다. 자유 문장 추론·앞 트렁크 동의어·분리 호출어 세션을 추가하지 않는다. 공백·허용 구두점 정규화 뒤 전체가 `헤이테슬라프렁크열어줘`와 일치해야 한다. 어느 후보든 `취소`/`열지마`가 있으면 일치 후보보다 취소를 우선한다.
 
 | 최종 입력 예 | 처리 |
 | --- | --- |
-| `헤이 테슬라 프렁크 열어줘` | 호출어와 명령을 한 번에 받은 세션에서 프렁크 요청 후보 |
-| `헤이 테슬라 앞 트렁크 열어` | 같은 조건의 프렁크 요청 후보 |
-| `프렁크 열어줘` / `앞 트렁크 열어` | 현재 세션에서 호출어를 이미 감지한 경우에만 명령 부분으로 허용 |
-| `취소` / `아니, 열지 마` | 전송 전 취소, 전송 뒤에는 철회 불보장을 안내 |
-| `프렁크 열지 마` / `프렁크 열면 안 돼` | 부정으로 비실행 |
-| `아까 프렁크 열어달라고 했잖아` | 회상으로 비실행 |
-| `문 열어줘` | MVP 범위 밖·모호한 명령으로 비실행 |
-| `프렁크 열어… 아니, 열지 마` | 최종 전체 발화의 취소·부정을 우선, 앞부분으로 실행 금지 |
-| 인식 결과가 없거나 후보가 충돌하거나 신뢰도가 낮음·미제공 | 비실행. 고정 임계값을 모든 엔진에 보편적인 값으로 가정하지 않음 |
+| `헤이 테슬라 프렁크 열어줘` | 전체 정확 문법 후보. 다른 안전 게이트까지 통과해야 전송 가능 |
+| `헤이 테슬라 앞 트렁크 열어` | 허용 wholephrase 아님, 미전송 |
+| `헤이 테슬라` 뒤 별도 결과의 `프렁크 열어줘` | 분리 결과를 이어 승인하지 않음 |
+| `취소` / `아니, 열지 마` 또는 n-best 다른 후보에 해당 취소어 | 회차 종료. 전송 후에는 철회 보장 없음 |
+| `프렁크 열면 안 돼` / `아까 프렁크 열어달라고 했잖아` / `문 열어줘` | 전체 문법 불일치, 미전송 |
+| 정확 후보와 비명령 후보가 함께 있고 취소어 없음 | 첫 정확 후보를 기존 n-best 정책으로 판정. 후보 차이만으로 일괄 거부하지 않음 |
+| 실제 양수 유한 점수가 제공됨 | 후보 수와 score 배열 일치 및 채택 후보0.85..1 검사. 미달/부적합은 미전송 |
+| 실제 점수 미제공(양수 유한 점수가 없는 null/0.0/−1 등) | 점수 gate만 생략. 정확 문법·취소 우선·동의·P·정리·기한·단발은 유지 |
+| 부분 결과·잘린 발화·PCM 미완료·제품 native decode 미완료 / 수동 Android segmented end 미확인 | 명령으로 인정하지 않음 |
 
-호출어 대기 밖에서 명령 문구만 들렸다는 이유로 마이크를 켜거나 실행하지 않는다. 실제 허용 표현의 추가는 파서 테스트와 함께 한다.
-
-확인을 요구하는 제품 정책에서는 음성 확인을 현재 명령·세션·만료 시각에 귀속시킨다. 명시적 긍정만 허용하고 침묵·모호한 결과·앱 자신의 TTS를 긍정 응답으로 사용하지 않는다. 명시 승인된 v44 화면 표시 1회 실차 시험은 이 추가 발화를 사용하지 않고 동의·직접 시작 후 인정된 명령을 안전 검사로 전달한다.
+제품에서 문법 불일치는 readiness와 실제 정리 확인 후 새 발화 대기다. 취소·모델 누락/인식 실패·기한 만료는 회차를 끝낸다. JNI 실행 중에는 먼저 결과를 봉인하고 실제 반환·두 release 뒤 완료하며 늦은 성공은 명령을 부활시키지 않는다. 별도 확인 발화는 없으며 음성은 화자 인증이 아니다.
 
 ## Kotlin/JVM 검증 계획
 
-아래는 제품 전체의 테스트 계약이다. `0.11.0-probe`의 로컬 진단에서는 취소·만료 경계·중복·최종 없음·거절·UNKNOWN 재시도 방지 및 세션 소유권 회귀를 작성·실행했다. 계정·P·실차 전송을 포함한 나머지 계약의 완료는 주장하지 않는다. 실제 차량 호출은 단위 테스트에 포함하지 않는다.
+아래는 현재 제품 회귀가 지켜야 할 계약이며 이 문서 변경에서 실행한 검증 결과가 아니다. 실제 실행 결과는 [기기 검증 정본](Device-Validation.md#현재-소스설치검증-상태)에만 기록한다.
 
 | Given | When | Then |
 | --- | --- | --- |
-| 유효 호출어 세션과 신선한 P·권한·근접 | 최종 허용 명령, 필요한 긍정 확인 | 전송 직전 검사 후 한 번 전송 |
-| 호출어가 없는 세션 | 명령 부분만 입력 | 전송 없음 |
-| 명령 수집 중 | 각 부정·회상·범위 밖·혼합 취소 예문 | 전송 없음 |
-| 허용 문구의 부분 결과만 있음 | 뒤에 부정이 추가되거나 최종 결과가 오지 않음 | 조기 전송 없음 |
-| 최종 인식은 허용 문구 | 신뢰도가 낮거나 미제공, 후보 충돌 | 전송 없음 |
-| `CONFIRMING` | 앱의 TTS·모호한 응답·침묵·만료 뒤 긍정 | 전송 없음 |
-| 음성 확인을 완료함 | 검사 시 상태가 P에서 D로 변경되거나 P가 오래됨·null | 전송 없음 |
-| 검증 결과를 기다림 | 취소가 전송 시작보다 먼저 처리됨 | 요청 전송 없음 |
-| 전송 시작 뒤 | 취소·타임아웃·응답 유실 | 결과 불명 시 UNKNOWN, 미실행 보장·재전송 없음 |
-| 활성 세션 또는 cooldown | 중복 접근·연결 재시도·반복 명령 | 세션 중복·동일 요청 재전송 없음 |
-| 종료된 세션 | 늦은 STT·네트워크 응답 도착 | 새 세션 변경·명령 전송 없음 |
-| 세션 종료 조건 각각 | 취소·이탈·권한 철회·예외·만료 | 오디오 종료, 대기 상태에서 STT OFF |
-| 프로세스 복구 | 이전에 실행 중이던 의도 기록이 있음 | 차량 명령 자동 복원·전송 없음 |
+| 새 광고·기존 키 인증·명시 동의 | fresh P 수신 | 정확 owner/lease의 제품 음성만 시작 |
+| 연결/P 유지·긴 무음 |10초/90초 경과 | 고정 대기 종료·무음 반복 재시작·파일 저장 없음 |
+| 완전한 발화 | 정확 wholephrase/n-best 취소/실제 점수·미제공 | 위 기존 정책과 동일한 판정 |
+| 제품 음성 | 비명령/낮은 점수 | 정리·readiness 확인 후 새 발화 대기 |
+| 제품 음성 | 취소·실패·절단·기한 만료 | 회차 종료·명령 없음 |
+| 인정된 명령 | mic 또는 recognizer/pipe 정리 불명 | dispatch·예약 반환 금지, 재시작 필요 |
+| monitor outstanding | 오디오 정리 후 명령 인계 | 원 응답 검증 뒤 같은 GATT의 새 DRIVE P, 단발 ACTION→BODY |
+| 활성 회차 | D/R/N/UNKNOWN·stale·disconnect·OFF·동의 철회 | 즉시 로컬 봉인·정리, 이전 명령 재생 없음 |
+| false 동의 저장 실패 | 철회 요청 | RAM false·오류 유지·현재 회차 종료 |
+| SDK 접수 후 | 취소·timeout·응답 유실 | 결과 불명 보존·재전송 없음 |
+| 종료된 lease/프로세스 | late callback·재생 Intent·복원 | 이전 음성/명령 시작 없음 |
+| BLE 정리 완료·오디오 미완료 또는 반대 | 종료 callback | 전체 회차 예약 반환·감지 재개 금지 |
 
 단위 테스트는 OS 권한과 실제 마이크 동작을 증명하지 못한다. 오디오 자원 해제·실제 잠금·접근·연속 발화는 [실기기 검증](Device-Validation.md), 게이트웨이 계약은 [Tesla 연동](Tesla-Integration.md)을 함께 따른다.

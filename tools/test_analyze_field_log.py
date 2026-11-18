@@ -1,11 +1,15 @@
 """파일 생성/삭제 없이 StringIO로 검증하는 소비자 계약 회귀."""
 import contextlib
+import hashlib
 import io
 import json
 import unittest
 from unittest.mock import patch
 
-from analyze_field_log import MAX_LINE, analyze, compare_visits, main, uwb_rx_state
+from analyze_field_log import (MAX_LINE, UWB_NATIVE_KEYS, PRODUCT_KEYS, PRODUCT_ENUMS, PRODUCT_BOOLS,
+                               FRUNK_STATE_KEYS, PRODUCT_EVENTS, product_state,
+                               analyze, compare_visits, main, match_uwb_system,
+                               uwb_native_state, uwb_rx_state, uwb_session_tag)
 
 P = '11111111-1111-4111-8111-111111111111'
 Q = '22222222-2222-4222-8222-222222222222'
@@ -21,7 +25,7 @@ GATT_TIMES = ('uwbGattOperationStartedElapsedMs', 'uwbGattStageStartedElapsedMs'
     'uwbGattObservedElapsedMs', 'uwbGattConnectIssuedElapsedMs', 'uwbGattConnectReturnedElapsedMs',
     'uwbGattAdvertisementAgeAtConnectMs', 'uwbGattConnectionCallbackElapsedMs',
     'uwbGattDescriptorCallbackElapsedMs', 'uwbGattFirstRxElapsedMs', 'uwbGattLastRxElapsedMs')
-GATT_KEYS = ('uwbGattStage', 'uwbGattEvent', 'uwbGattConnectAction',
+GATT_KEYS = ('uwbGattStage', 'uwbGattEvent', 'uwbGattConnectAction', 'uwbDeadlineCause',
     *GATT_BOOLS, *GATT_INTS, *GATT_TIMES, 'uwbGattRxNotificationCount')
 RX_BOOLS = ('uwbRxDecoderIncomplete', 'uwbRxDecoderFailed', 'uwbRxFromPresent',
     'uwbRxToPresent', 'uwbRxRequestUuidPresent', 'uwbRxRequestUuidMatches',
@@ -50,6 +54,11 @@ RX_ENUMS = {
 RX_KEYS = (*RX_COUNTS, 'uwbRxNotificationFrameCount', *RX_BOOLS, *RX_TIMES, *RX_INTS, *RX_ENUMS)
 RX_BODY_KEYS = ('uwbRxBodyBytes', 'uwbRxBodyStatus', 'uwbRxBodyFields')
 RX_OBSERVATION_KEYS = (*RX_BODY_KEYS, 'uwbRxRequestCorrelation')
+NAVIGATION_BOOL_KEYS = ('fineLocationGranted', 'backgroundLocationGranted', 'locationEnabled',
+    'foregroundArmed', 'collecting', 'locationUpdatesRegistered', 'headingSensorRegistered',
+    'cleanupSucceeded', 'requestUuidMatches', 'toRouteMatches', 'vehicleFixPresent')
+NAVIGATION_KEYS = ('kind', 'reason', 'candidate', 'attempt', *NAVIGATION_BOOL_KEYS,
+    'status', 'disposition', 'authEvidence')
 
 
 def record(**changes):
@@ -103,6 +112,14 @@ def uwb_rx_observation(event='TESLA_UWB_GATT_OBSERVATION', offset=0, **changes):
     return dict(uwb_rx(event, offset, **changes), version=27)
 
 
+def navigation(kind='SIDECAR_STARTED', offset=0, **changes):
+    observation = dict.fromkeys(NAVIGATION_KEYS)
+    observation.update(kind=kind, candidate=1, attempt=1)
+    observation.update(changes)
+    return record(version=28, event='VEHICLE_NAVIGATION_OBSERVATION',
+        wallMs=BASE+offset, elapsedMs=1000+offset, navigationObservation=observation)
+
+
 
 def visits(*rows):
     return io.StringIO(HEADER + ''.join(','.join(map(str, row))+'\n' for row in rows))
@@ -150,18 +167,1888 @@ def recovery_rows(stage='FAILED', reason='GATT_CONNECT_FAILED', second_start=370
     return rows
 
 
+def native_uwb(event='PEER_STOPPED', offset=0, session_id=-123456789, **changes):
+    state = dict(uwbNativeSessionTag=uwb_session_tag(session_id), uwbNativeConfigId=1,
+        uwbNativeChannel=9, uwbNativePreambleIndex=10, uwbNativeUpdateRate=1,
+        uwbNativePeerCount=5, uwbNativeEvent=event,
+        uwbNativePeerIndex=4 if event in ('PEER_STARTED', 'PEER_STOPPED') else None,
+        uwbNativeElapsedSinceStartMs=123, uwbNativeCloseRequested=False)
+    state.update(changes)
+    event_code = {'STARTING': 'TESLA_UWB_BACKEND_STARTING', 'OPENED': 'TESLA_UWB_BACKEND_OPENED',
+        'PEER_STARTED': 'TESLA_UWB_PEER_STARTED', 'PEER_STOPPED': 'TESLA_UWB_PEER_STOPPED',
+        'CLOSED': 'TESLA_UWB_BACKEND_CLOSED'}[event]
+    return dict(uwb(event_code, offset, **state), version=31)
+
+
+def uwb_metric(session_id=-123456789, **changes):
+    fields = dict(initTime='10-29 16:32:10.123', sessionId=str(session_id), initLatencyMs='2',
+        activeDurationMs='6000', rangingCount='61', validRangingCount='0', startCount='1',
+        startFailureCount='0', initStatus='1', channel='9', uid='12345',
+        packageName='com.google.android.gms', rangingIntervalMs='100', parallelSessionCount='2')
+    fields.update(changes)
+    return ', '.join(f'{key}={value}' for key, value in fields.items()) + '\n'
+
+
+def uwb_dump(*metrics):
+    return io.StringIO('---- Dump of UwbMetrics ----\n-- mRangingSessionList --\n' +
+        ''.join(metrics) + '-- mOpenedSessionMap --\n' + ''.join(metrics) +
+        '-- mRangingReportList --\ntime=PRIVATE-COORDINATES\n')
+
+
+class ProductVoiceDiagnosticTests(unittest.TestCase):
+    @staticmethod
+    def row(outcome='ACCEPTED', offset=10, **diagnostic):
+        payload = dict(outcome=outcome, utteranceBytes=32000, voicedBytes=16000,
+            suppressedOnsets=2, silenceBytesAtEnd=8000, captureMs=1000,
+            loadMs=20, decodeMs=30, cleanupMs=4, modelReused=True,
+            microphoneReleased=True, streamCleanupConfirmed=True, recognizerCleanupConfirmed=True)
+        payload.update(diagnostic)
+        return record(version=39, event='PRODUCT_VOICE_DIAGNOSTIC',
+            wallMs=BASE+offset, elapsedMs=1000+offset, productVoiceDiagnostic=payload)
+
+    @staticmethod
+    def start(offset=0):
+        return record(version=39, event='TESLA_CONNECTION_STARTED',
+            wallMs=BASE+offset, elapsedMs=1000+offset)
+
+    def test_only_dedicated_sanitized_outcomes_are_counted_without_granting_control(self):
+        rows = [self.start(),
+            self.row('PREPARED', 1, recognizerCleanupConfirmed=False),
+            self.row('EMPTY', 2, recognizerCleanupConfirmed=False),
+            self.row('GRAMMAR_NO_MATCH', 3, recognizerCleanupConfirmed=False),
+            self.row('ACCEPTED', 4),
+            dict(self.row('ACCEPTED', 5), event='PRODUCT_VOICE_STATE_CHANGED'),
+            self.row('CLOSED', 6)]
+        report = parse(*rows)
+        session, = report['productSessions']
+        self.assertEqual(session['voiceOutcomes'],
+            {'PREPARED': 1, 'EMPTY': 1, 'GRAMMAR_NO_MATCH': 1, 'ACCEPTED': 1, 'CLOSED': 1})
+        self.assertIsNone(report['productEvents'][5]['productVoiceDiagnostic'])
+        self.assertEqual(session['commandAcceptedCount'], 0)
+        self.assertEqual(session['frunkObserved'], dict.fromkeys(FRUNK_STATE_KEYS))
+        self.assertFalse(session['cleanupFailureObserved'])
+        self.assertIsNone(session['microphoneCleanupConfirmed'])
+        self.assertTrue(all(point['state']['connectionParkFresh'] is None
+                            for point in report['productEvents']))
+        self.assertTrue(all(point['state']['productVoiceStage'] is None
+                            for point in report['productEvents']))
+        self.assertEqual(report['reportVersion'], 1)
+
+    def test_cleanup_false_missing_or_wrong_type_cannot_forge_accepted_or_closed(self):
+        for outcome in ('EMPTY', 'GRAMMAR_NO_MATCH', 'ACCEPTED', 'CLOSED'):
+            required = ['recognizerCleanupConfirmed'] if outcome == 'CLOSED' else [
+                'microphoneReleased', 'streamCleanupConfirmed']
+            if outcome == 'ACCEPTED':
+                required.append('recognizerCleanupConfirmed')
+            for key in required:
+                for value in (None, False, 1, 0, 'true', [], {}):
+                    with self.subTest(outcome=outcome, key=key, value=value):
+                        row = self.row(outcome, **{key: value})
+                        report = parse(self.start(), row)
+                        safe = report['productEvents'][1]['productVoiceDiagnostic']
+                        self.assertIsNone(safe['outcome'])
+                        self.assertIs(safe[key], False if value is False else None)
+                        self.assertEqual(report['productSessions'][0]['voiceOutcomes'], {})
+                        self.assertEqual(report['productSessions'][0]['commandAcceptedCount'], 0)
+                        self.assertIsNone(report['productSessions'][0]['frunkObserved']['frunkCommandSent'])
+        for outcome in ('FAILURE', 'SEALED'):
+            report = parse(self.start(), self.row(outcome, microphoneReleased=False,
+                streamCleanupConfirmed=False, recognizerCleanupConfirmed=False))
+            safe = report['productEvents'][1]['productVoiceDiagnostic']
+            self.assertEqual(safe['outcome'], outcome)
+            for key in ('microphoneReleased', 'streamCleanupConfirmed', 'recognizerCleanupConfirmed'):
+                self.assertIs(safe[key], False)
+            self.assertEqual(report['productSessions'][0]['voiceOutcomes'], {outcome: 1})
+        closed = parse(self.start(), self.row('CLOSED', microphoneReleased=False,
+            streamCleanupConfirmed=False))
+        self.assertEqual(closed['productSessions'][0]['voiceOutcomes'], {'CLOSED': 1})
+
+    def test_private_text_numeric_strings_and_bad_metrics_do_not_escape(self):
+        secret = 'PRIVATE-TRANSCRIPT-PCM-VIN-ADDRESS-KEY-UUID-RAW-RESPONSE'
+        ranges = {'utteranceBytes': (0, 320000), 'voicedBytes': (0, 320000),
+            'silenceBytesAtEnd': (0, 320000), 'suppressedOnsets': (0, 2**31-1),
+            'captureMs': (0, 86400000), 'loadMs': (0, 600000),
+            'decodeMs': (0, 600000), 'cleanupMs': (0, 600000)}
+        for key, (lower, upper) in ranges.items():
+            for value in (secret, '123456789012345678901234567890', str(upper),
+                          True, False, 0.0, [], {'raw': secret}, -1, upper+1, 2**63):
+                with self.subTest(key=key, value=value):
+                    row = self.row('SEALED', utteranceBytes=320000)
+                    row['productVoiceDiagnostic'].update({key: value, 'transcript': secret,
+                        'pcm': secret, 'vin': secret, 'uuid': secret, 'hash': secret,
+                        'vehicleTimestamp': secret, 'rawResponse': secret})
+                    report = parse(self.start(), row)
+                    safe = report['productEvents'][1]['productVoiceDiagnostic']
+                    self.assertIsNone(safe[key])
+                    self.assertEqual(report['productSessions'][0]['voiceOutcomes'], {'SEALED': 1})
+                    self.assertNotIn(secret, json.dumps(report))
+                    self.assertNotIn('123456789012345678901234567890', json.dumps(report))
+            for value in (lower, upper):
+                row = self.row('SEALED', utteranceBytes=320000)
+                row['productVoiceDiagnostic'][key] = value
+                safe = parse(row)['productEvents'][0]['productVoiceDiagnostic']
+                self.assertEqual(safe[key], value)
+        for key in ('utteranceBytes', 'voicedBytes', 'silenceBytesAtEnd'):
+            row = self.row('SEALED', **{key: 1})
+            self.assertIsNone(parse(row)['productEvents'][0]['productVoiceDiagnostic'][key])
+        for utterance in (None, -2, 1, 320002):
+            safe = parse(self.row('SEALED', utteranceBytes=utterance))['productEvents'][0]['productVoiceDiagnostic']
+            self.assertIsNone(safe['utteranceBytes'])
+            self.assertIsNone(safe['voicedBytes'])
+            self.assertIsNone(safe['silenceBytesAtEnd'])
+        for key in ('voicedBytes', 'silenceBytesAtEnd'):
+            safe = parse(self.row('SEALED', **{key: 32002}))['productEvents'][0]['productVoiceDiagnostic']
+            self.assertIsNone(safe[key])
+        for outcome in (secret, 'accepted', ' ACCEPTED', 1, True, [], {}):
+            report = parse(self.start(), self.row(outcome))
+            self.assertIsNone(report['productEvents'][1]['productVoiceDiagnostic']['outcome'])
+            self.assertEqual(report['productSessions'][0]['voiceOutcomes'], {})
+            self.assertNotIn(secret, json.dumps(report))
+        for value in (secret, [], True, None):
+            report = parse(self.start(), dict(self.row(), productVoiceDiagnostic=value))
+            self.assertIsNone(report['productEvents'][1]['productVoiceDiagnostic'])
+            self.assertIsNone(report['productSessions'][0]['voiceOutcomes'])
+
+    def test_prepared_and_closed_cannot_reuse_utterance_snapshot(self):
+        for outcome in ('PREPARED', 'CLOSED'):
+            safe = parse(self.row(outcome))['productEvents'][0]['productVoiceDiagnostic']
+            for key in ('utteranceBytes', 'voicedBytes', 'suppressedOnsets',
+                        'silenceBytesAtEnd', 'captureMs', 'decodeMs', 'modelReused'):
+                self.assertIsNone(safe[key])
+            self.assertEqual(safe['loadMs'], 20)
+            self.assertEqual(safe['cleanupMs'], 4)
+        for value in ('true', 1, [], {}):
+            safe = parse(self.row('SEALED', modelReused=value))['productEvents'][0]['productVoiceDiagnostic']
+            self.assertIsNone(safe['modelReused'])
+
+    def test_no_backport_of_diagnostic_event_payload_or_counts_and_future_40_rejected(self):
+        for version in range(1, 39):
+            injected = dict(self.row(), version=version)
+            report = parse(injected)
+            self.assertEqual(report['productEvents'], [])
+            self.assertEqual(report['productSessions'], [])
+            historical = dict(injected, event='PRODUCT_VOICE_STATE_CHANGED')
+            report = parse(historical)
+            if version >= 33:
+                self.assertIsNone(report['productEvents'][0]['productVoiceDiagnostic'])
+                self.assertIsNone(report['productSessions'][0]['voiceOutcomes'])
+            else:
+                self.assertEqual(report['productEvents'], [])
+        report = parse(dict(self.row(), version=40), self.row())
+        self.assertEqual(report['counts']['unsupportedRows'], 1)
+        self.assertEqual(report['productSessions'][0]['voiceOutcomes'], {'ACCEPTED': 1})
+        self.assertEqual(len(report['productEvents']), 1)
+
+    def test_voice_outcomes_do_not_cross_start_cleanup_or_clock_process_trial_boundaries(self):
+        report = parse(self.start(), self.row('EMPTY', 1), self.start(2), self.row('ACCEPTED', 3))
+        self.assertEqual([session['voiceOutcomes'] for session in report['productSessions']],
+            [{'EMPTY': 1}, {'ACCEPTED': 1}])
+        for changes in (dict(processId=Q), dict(trialId=U), dict(elapsedMs=900),
+                        dict(wallMs=BASE+5000)):
+            report = parse(self.start(), self.row('EMPTY', 1), dict(self.row('ACCEPTED', 2), **changes))
+            self.assertEqual([session['voiceOutcomes'] for session in report['productSessions']],
+                [{'EMPTY': 1}, {'ACCEPTED': 1}])
+            self.assertFalse(report['productSessions'][1]['startObserved'])
+        key_closed = dict(self.start(2), event='TESLA_KEY_LOCAL_CLOSED',
+            state={'connectionStage': 'STOPPED'})
+        report = parse(self.start(), self.row('EMPTY', 1), key_closed, self.row('CLOSED', 3))
+        self.assertEqual([session['voiceOutcomes'] for session in report['productSessions']],
+            [{'EMPTY': 1}, {'CLOSED': 1}])
+        self.assertFalse(report['productSessions'][1]['startObserved'])
+
+    def test_cli_json_and_human_show_sanitized_diagnostics_and_session_counts(self):
+        secret = 'PRIVATE-TRANSCRIPT-PCM-VIN-ADDRESS-KEY'
+        rows = [self.start(), self.row('PREPARED', 1, recognizerCleanupConfirmed=False),
+            self.row('ACCEPTED', 2), self.row('ACCEPTED', 3, recognizerCleanupConfirmed=False)]
+        rows[2]['productVoiceDiagnostic'].update(transcript=secret, pcm=secret, vin=secret)
+        payload = ''.join(json.dumps(row)+'\n' for row in rows).encode()
+        for flags in ([], ['--json']):
+            out, err = io.StringIO(), io.StringIO()
+            with patch('builtins.open', return_value=io.BytesIO(payload)), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(main(['input.jsonl', *flags]), 0)
+            self.assertEqual(err.getvalue(), '')
+            text = out.getvalue()
+            self.assertNotIn(secret, text)
+            if flags:
+                report = json.loads(text)
+                sessions = report['productSessions']
+                diagnostics = [point['productVoiceDiagnostic'] for point in report['productEvents'][1:]]
+            else:
+                sessions = [json.loads(line.split('관측 세션 ', 1)[1]) for line in text.splitlines()
+                            if line.startswith('연결·제품 음성 관측 세션 ')]
+                diagnostics = [json.loads(line.split('진단 ', 1)[1]) for line in text.splitlines()
+                               if line.startswith('제품 음성 진단 ')]
+                self.assertIn('차량 명령 허가나 물리 성공의 근거가 아닙니다', text)
+            self.assertEqual(sessions[0]['voiceOutcomes'], {'PREPARED': 1, 'ACCEPTED': 1})
+            self.assertEqual([item['outcome'] for item in diagnostics], ['PREPARED', 'ACCEPTED', None])
+            self.assertIs(diagnostics[-1]['recognizerCleanupConfirmed'], False)
+            self.assertEqual(sessions[0]['commandAcceptedCount'], 0)
+
+
+class ProductServiceTests(unittest.TestCase):
+    @staticmethod
+    def row(event='TESLA_CONNECTION_STARTED', offset=0, **state):
+        return record(version=33, event=event, wallMs=BASE+offset, elapsedMs=1000+offset,
+            state=dict(connectionStage='MONITORING', connectionGear='P',
+                connectionParkFresh=True, productVoiceStage='LISTENING',
+                productVoiceConsent=True, **state))
+
+    def test_product_snapshot_rejects_free_text_wrong_types_and_older_schema(self):
+        secret = 'PRIVATE-TRANSCRIPT-PCM-VIN-ID-VEHICLE-TIME'
+        for key, choices in PRODUCT_ENUMS.items():
+            for value in choices:
+                self.assertEqual(product_state({key: value}, 33)[key], value)
+        for key in PRODUCT_BOOLS:
+            for value in (True, False):
+                self.assertIs(product_state({key: value}, 33)[key], value)
+        for key in PRODUCT_KEYS:
+            bad = [secret, '', ' P', 'listening', 1, 1.0, [], {'raw': secret}]
+            bad += ['true'] if key in PRODUCT_BOOLS else [True, False]
+            for value in bad:
+                with self.subTest(key=key, value=value):
+                    safe = product_state({key: value, 'transcript': secret, 'pcm': secret,
+                        'vin': secret, 'vehicleTimestamp': BASE}, 33)
+                    self.assertIsNone(safe[key])
+                    self.assertEqual(set(safe), set(PRODUCT_KEYS))
+                    self.assertNotIn(secret, json.dumps(safe))
+        for version in range(1, 33):
+            row = dict(self.row(), version=version)
+            self.assertEqual(product_state(row['state'], version), dict.fromkeys(PRODUCT_KEYS))
+            report = parse(row)
+            self.assertEqual(report['productEvents'], [])
+            self.assertEqual(report['productSessions'], [])
+        for value in (None, [], secret, True):
+            self.assertEqual(product_state(value, 33), dict.fromkeys(PRODUCT_KEYS))
+
+    def test_acceptance_and_unknown_cleanup_do_not_become_actuator_success(self):
+        rows = [self.row(), self.row('PRODUCT_VOICE_COMMAND_ACCEPTED', 10)]
+        rows[1]['state'].update(productVoiceStage='COMMAND_READY', frunkCommandRequested=True,
+            frunkCommandSent=False, frunkCommandAcknowledged=False, frunkOpenObserved=False)
+        report = parse(*rows)
+        session = report['productSessions'][0]
+        self.assertTrue(session['startObserved'])
+        self.assertEqual(session['commandAcceptedCount'], 1)
+        self.assertEqual(session['frunkObserved'], dict.fromkeys(FRUNK_STATE_KEYS))
+        self.assertIsNone(session['microphoneCleanupConfirmed'])
+        self.assertFalse(session['cleanupFailureObserved'])
+        cleanup = self.row('PRODUCT_VOICE_CLEANUP_FAILED', 20,
+            productVoiceReason='PRODUCT_VOICE_CLEANUP_FAILED_RESTART_REQUIRED')
+        cleanup['state'].update(productVoiceStage='FAILED', connectionParkFresh=False)
+        stopped = self.row('PRODUCT_VOICE_STOPPED', 30)
+        stopped['state'].update(productVoiceStage='STOPPED', productVoiceReason=None)
+        session = parse(*rows, cleanup, stopped)['productSessions'][0]
+        self.assertTrue(session['cleanupFailureObserved'])
+        self.assertIsNone(session['microphoneCleanupConfirmed'])
+        self.assertIsNone(session['frunkObserved']['frunkOpenObserved'])
+        sent = self.row('TESLA_FRUNK_COMMAND_SENT', 40, frunkCommandSent=True)
+        session = parse(*rows, cleanup, stopped, sent)['productSessions'][0]
+        self.assertTrue(session['frunkObserved']['frunkCommandSent'])
+        self.assertIsNone(session['frunkObserved']['frunkOpenObserved'])
+        self.assertTrue(session['cleanupFailureObserved'])
+        stale = self.row('PRODUCT_VOICE_COMMAND_ACCEPTED', 10,
+            **dict.fromkeys(FRUNK_STATE_KEYS, True))
+        session = parse(self.row(), stale)['productSessions'][0]
+        self.assertEqual(session['frunkObserved'], dict.fromkeys(FRUNK_STATE_KEYS))
+        self.assertFalse(session['cleanupFailureObserved'])
+        requested = self.row('TESLA_FRUNK_COMMAND_REQUESTED', 15, frunkCommandRequested=True)
+        acknowledged = self.row('TESLA_FRUNK_COMMAND_ACKNOWLEDGED', 50, frunkCommandAcknowledged=True)
+        opened = self.row('TESLA_FRUNK_OPEN_OBSERVED', 60, frunkOpenObserved=True)
+        session = parse(self.row(), stale, requested, sent, acknowledged, opened)['productSessions'][0]
+        for key in ('frunkCommandRequested', 'frunkCommandSent', 'frunkCommandAcknowledged', 'frunkOpenObserved'):
+            self.assertTrue(session['frunkObserved'][key])
+        session = parse(self.row(), self.row(offset=5), stale)['productSessions'][1]
+        self.assertEqual(session['frunkObserved'], dict.fromkeys(FRUNK_STATE_KEYS))
+
+    def test_sessions_split_at_observed_start_and_clock_process_trial_boundaries(self):
+        accepted = self.row('PRODUCT_VOICE_COMMAND_ACCEPTED', 10)
+        no_start = parse(accepted, self.row('PRODUCT_VOICE_STOPPED', 20))
+        self.assertEqual(len(no_start['productSessions']), 2)
+        self.assertTrue(all(not s['startObserved'] for s in no_start['productSessions']))
+        report = parse(self.row(), accepted, self.row(offset=20),
+            self.row('PRODUCT_VOICE_STOPPED', 30))
+        self.assertEqual([s['commandAcceptedCount'] for s in report['productSessions']], [1, 0])
+        for changed in (
+            dict(accepted, processId=Q), dict(accepted, trialId=U),
+            dict(accepted, elapsedMs=900), dict(accepted, wallMs=BASE+5000),
+        ):
+            report = parse(self.row(), changed)
+            self.assertEqual(len(report['productSessions']), 2)
+            self.assertEqual(report['productSessions'][0]['commandAcceptedCount'], 0)
+        report = parse(dict(accepted, processId='invalid'))
+        self.assertEqual(report['productEvents'], [])
+        self.assertEqual(parse(dict(accepted, trialId='invalid'))['productEvents'], [])
+        self.assertEqual(parse(self.row(), exclude=(T,))['productSessions'], [])
+        closed = self.row('TESLA_KEY_LOCAL_CLOSED', 20)
+        report = parse(self.row(), accepted, closed,
+            self.row('TESLA_FRUNK_COMMAND_SENT', 30, frunkCommandSent=True))
+        self.assertEqual(len(report['productSessions']), 2)
+        self.assertIsNone(report['productSessions'][0]['frunkObserved']['frunkCommandSent'])
+        self.assertFalse(report['productSessions'][1]['startObserved'])
+
+    def test_key_cleanup_keeps_following_frunk_cleanup_in_started_session(self):
+        # KeyProbe.cleanup의 실제 발행 순서는 KEY 정리 결과 다음 FRUNK 정리 결과다.
+        for key_event in ('TESLA_KEY_LOCAL_CLOSED', 'TESLA_KEY_CLEANUP_FAILED'):
+            for frunk_event, observed_key in (
+                ('TESLA_FRUNK_LOCAL_CLOSED', 'frunkLocalClosed'),
+                ('TESLA_FRUNK_CLEANUP_FAILED', 'frunkCleanupFailed'),
+            ):
+                with self.subTest(key_event=key_event, frunk_event=frunk_event):
+                    rows = [self.row(), self.row('PRODUCT_VOICE_COMMAND_ACCEPTED', 10),
+                        self.row('TESLA_FRUNK_COMMAND_SENT', 20, frunkCommandSent=True),
+                        self.row(key_event, 30),
+                        self.row(frunk_event, 40, **{observed_key: True})]
+                    session, = parse(*rows)['productSessions']
+                    self.assertTrue(session['startObserved'])
+                    self.assertEqual((session['firstLine'], session['lastLine']), (1, 5))
+                    self.assertEqual(session['eventCounts'],
+                        {row['event']: 1 for row in rows})
+                    self.assertEqual(session['commandAcceptedCount'], 1)
+                    expected = dict.fromkeys(FRUNK_STATE_KEYS)
+                    expected.update(frunkCommandSent=True, **{observed_key: True})
+                    self.assertEqual(session['frunkObserved'], expected)
+                    self.assertEqual(session['cleanupFailureObserved'],
+                        key_event == 'TESLA_KEY_CLEANUP_FAILED' or
+                        frunk_event == 'TESLA_FRUNK_CLEANUP_FAILED')
+                    self.assertIsNone(session['microphoneCleanupConfirmed'])
+
+    def test_frunk_cleanup_finishes_key_tail_before_unstarted_work(self):
+        for key_event, frunk_event, observed_key in (
+            ('TESLA_KEY_LOCAL_CLOSED', 'TESLA_FRUNK_LOCAL_CLOSED', 'frunkLocalClosed'),
+            ('TESLA_KEY_CLEANUP_FAILED', 'TESLA_FRUNK_CLEANUP_FAILED', 'frunkCleanupFailed'),
+        ):
+            with self.subTest(key_event=key_event, frunk_event=frunk_event):
+                first, second, third = parse(self.row(),
+                    self.row('PRODUCT_VOICE_COMMAND_ACCEPTED', 10),
+                    self.row(key_event, 20),
+                    self.row(frunk_event, 30, **{observed_key: True}),
+                    self.row('TESLA_FRUNK_COMMAND_SENT', 40, frunkCommandSent=True),
+                    self.row('TESLA_FRUNK_LOCAL_CLOSED', 50, frunkLocalClosed=True)
+                    )['productSessions']
+                self.assertEqual((first['firstLine'], first['lastLine']), (1, 4))
+                self.assertEqual(first['commandAcceptedCount'], 1)
+                for session in (second, third):
+                    self.assertFalse(session['startObserved'])
+                    self.assertEqual(session['commandAcceptedCount'], 0)
+                    self.assertFalse(session['cleanupFailureObserved'])
+                    self.assertIsNone(session['microphoneCleanupConfirmed'])
+                self.assertEqual(second['eventCounts'], {'TESLA_FRUNK_COMMAND_SENT': 1})
+                self.assertIsNone(second['frunkObserved']['frunkLocalClosed'])
+                self.assertEqual(third['eventCounts'], {'TESLA_FRUNK_LOCAL_CLOSED': 1})
+                self.assertIsNone(third['frunkObserved']['frunkCommandSent'])
+
+    def test_key_cleanup_without_frunk_event_does_not_infer_frunk_cleanup(self):
+        for key_event in ('TESLA_KEY_LOCAL_CLOSED', 'TESLA_KEY_CLEANUP_FAILED'):
+            with self.subTest(key_event=key_event):
+                closed = self.row(key_event, 10, **dict.fromkeys(FRUNK_STATE_KEYS, True))
+                session, = parse(self.row(), closed)['productSessions']
+                self.assertEqual(session['frunkObserved'], dict.fromkeys(FRUNK_STATE_KEYS))
+                self.assertEqual(session['cleanupFailureObserved'],
+                    key_event == 'TESLA_KEY_CLEANUP_FAILED')
+                self.assertIsNone(session['microphoneCleanupConfirmed'])
+
+    def test_key_cleanup_tail_stops_at_new_start_or_non_cleanup_event(self):
+        for key_event in ('TESLA_KEY_LOCAL_CLOSED', 'TESLA_KEY_CLEANUP_FAILED'):
+            for boundary_event in ('TESLA_CONNECTION_STARTED', 'TESLA_FRUNK_COMMAND_SENT',
+                                   'PRODUCT_VOICE_STOPPED'):
+                with self.subTest(key_event=key_event, boundary_event=boundary_event):
+                    boundary = self.row(boundary_event, 30,
+                        **dict.fromkeys(FRUNK_STATE_KEYS, True))
+                    rows = [self.row(), self.row('PRODUCT_VOICE_COMMAND_ACCEPTED', 10),
+                        self.row(key_event, 20), boundary,
+                        self.row('TESLA_FRUNK_LOCAL_CLOSED', 40, frunkLocalClosed=True)]
+                    sessions = parse(*rows)['productSessions']
+                    started = boundary_event == 'TESLA_CONNECTION_STARTED'
+                    self.assertEqual(len(sessions), 2 if started else 3)
+                    first = sessions[0]
+                    self.assertEqual(first['lastLine'], 3)
+                    self.assertEqual(first['commandAcceptedCount'], 1)
+                    self.assertEqual(first['frunkObserved'], dict.fromkeys(FRUNK_STATE_KEYS))
+                    self.assertNotIn('TESLA_FRUNK_LOCAL_CLOSED', first['eventCounts'])
+                    self.assertEqual([s['startObserved'] for s in sessions],
+                        [True, True] if started else [True, False, False])
+                    self.assertTrue(all(s['commandAcceptedCount'] == 0 for s in sessions[1:]))
+                    self.assertIs(sessions[-1]['frunkObserved']['frunkLocalClosed'], True)
+                    self.assertIsNone(sessions[-1]['frunkObserved']['frunkCleanupFailed'])
+                    if started:
+                        self.assertEqual(sessions[-1]['eventCounts'],
+                            {'TESLA_CONNECTION_STARTED': 1, 'TESLA_FRUNK_LOCAL_CLOSED': 1})
+                    for session in sessions:
+                        self.assertIsNone(session['microphoneCleanupConfirmed'])
+
+    def test_key_frunk_cleanup_does_not_cross_clock_process_trial_boundaries(self):
+        for key_event in ('TESLA_KEY_LOCAL_CLOSED', 'TESLA_KEY_CLEANUP_FAILED'):
+            for frunk_event, observed_key in (
+                ('TESLA_FRUNK_LOCAL_CLOSED', 'frunkLocalClosed'),
+                ('TESLA_FRUNK_CLEANUP_FAILED', 'frunkCleanupFailed'),
+            ):
+                tail = self.row(frunk_event, 20, **{observed_key: True})
+                for changes in (dict(processId=Q), dict(trialId=U),
+                                dict(elapsedMs=900), dict(wallMs=BASE+5000)):
+                    with self.subTest(key_event=key_event, frunk_event=frunk_event,
+                                      changes=changes):
+                        first, second = parse(self.row(), self.row(key_event, 10),
+                            dict(tail, **changes))['productSessions']
+                        self.assertTrue(first['startObserved'])
+                        self.assertFalse(second['startObserved'])
+                        self.assertEqual((first['lastLine'], second['firstLine']), (2, 3))
+                        self.assertEqual(first['frunkObserved'], dict.fromkeys(FRUNK_STATE_KEYS))
+                        self.assertNotIn(frunk_event, first['eventCounts'])
+                        self.assertEqual(second['eventCounts'], {frunk_event: 1})
+                        expected = dict.fromkeys(FRUNK_STATE_KEYS)
+                        expected[observed_key] = True
+                        self.assertEqual(second['frunkObserved'], expected)
+                        self.assertEqual(second['cleanupFailureObserved'],
+                            frunk_event == 'TESLA_FRUNK_CLEANUP_FAILED')
+                        self.assertIsNone(second['microphoneCleanupConfirmed'])
+
+    def test_key_frunk_cleanup_without_start_keeps_independent_observations(self):
+        for key_event in ('TESLA_KEY_LOCAL_CLOSED', 'TESLA_KEY_CLEANUP_FAILED'):
+            for frunk_event, observed_key in (
+                ('TESLA_FRUNK_LOCAL_CLOSED', 'frunkLocalClosed'),
+                ('TESLA_FRUNK_CLEANUP_FAILED', 'frunkCleanupFailed'),
+            ):
+                with self.subTest(key_event=key_event, frunk_event=frunk_event):
+                    first, second = parse(self.row(key_event),
+                        self.row(frunk_event, 10, **{observed_key: True}))['productSessions']
+                    self.assertFalse(first['startObserved'])
+                    self.assertFalse(second['startObserved'])
+                    self.assertEqual(first['frunkObserved'], dict.fromkeys(FRUNK_STATE_KEYS))
+                    expected = dict.fromkeys(FRUNK_STATE_KEYS)
+                    expected[observed_key] = True
+                    self.assertEqual(second['frunkObserved'], expected)
+                    self.assertEqual(second['cleanupFailureObserved'],
+                        frunk_event == 'TESLA_FRUNK_CLEANUP_FAILED')
+                    self.assertIsNone(first['microphoneCleanupConfirmed'])
+                    self.assertIsNone(second['microphoneCleanupConfirmed'])
+
+    def test_frunk_cleanup_after_key_requires_boolean_observation(self):
+        for frunk_event, observed_key in (
+            ('TESLA_FRUNK_LOCAL_CLOSED', 'frunkLocalClosed'),
+            ('TESLA_FRUNK_CLEANUP_FAILED', 'frunkCleanupFailed'),
+        ):
+            for value in (None, False, 'true', 1):
+                with self.subTest(frunk_event=frunk_event, value=value):
+                    session, = parse(self.row(), self.row('TESLA_KEY_LOCAL_CLOSED', 10),
+                        self.row(frunk_event, 20, **{observed_key: value}))['productSessions']
+                    expected = dict.fromkeys(FRUNK_STATE_KEYS)
+                    expected[observed_key] = False if value is False else None
+                    self.assertEqual(session['frunkObserved'], expected)
+                    self.assertEqual(session['cleanupFailureObserved'],
+                        frunk_event == 'TESLA_FRUNK_CLEANUP_FAILED')
+                    self.assertIsNone(session['microphoneCleanupConfirmed'])
+
+    def test_product_events_and_payloads_have_no_raw_recognition_channel(self):
+        secret = 'PRIVATE-TRANSCRIPT-PCM-VIN-ID-VEHICLE-TIME'
+        for event in PRODUCT_EVENTS:
+            row = dict(self.row(event, productVoiceReason=secret), version=39)
+            row['state'].update(transcript=secret, pcm=secret, vin=secret, vehicleTimestamp=BASE,
+                frunkCommandSent='true', frunkOpenObserved=1)
+            row['frunkVoiceRecognition'] = {'candidates': [{'text': secret}]}
+            report = parse(row)
+            self.assertEqual(len(report['productEvents']), 1)
+            self.assertNotIn(secret, json.dumps(report))
+            self.assertIsNone(report['productEvents'][0]['frunkState']['frunkCommandSent'])
+            self.assertIsNone(report['productEvents'][0]['frunkState']['frunkOpenObserved'])
+            self.assertEqual(report['frunkEvents'], [])
+        self.assertEqual(parse(self.row('PRODUCT_VOICE_'+secret))['productEvents'], [])
+
+
+class ConnectionWakeSchemaTests(unittest.TestCase):
+    EVENTS = (
+        'TESLA_CONNECTION_BODY_VERIFIED', 'TESLA_CONNECTION_WAKE_STARTED',
+        'TESLA_CONNECTION_WAKE_ACKNOWLEDGED', 'TESLA_CONNECTION_WAKE_REJECTED',
+        'TESLA_CONNECTION_WAKE_NOMINAL_ACK',
+        'TESLA_CONNECTION_WAKE_UNCONFIRMED', 'TESLA_CONNECTION_WAKE_SKIPPED_AWAKE',
+        'TESLA_CONNECTION_WAKE_SKIPPED_UNKNOWN',
+    )
+
+    def test_wake_events_and_stages_are_schema35_only_without_success_inference(self):
+        for stage in ('CHECKING_VEHICLE', 'WAKING_VEHICLE'):
+            for event in self.EVENTS:
+                row = record(version=35, event=event, state={'connectionStage': stage})
+                report = parse(row)
+                self.assertEqual(report['issues'], [])
+                self.assertEqual(report['productEvents'][0]['event'], event)
+                self.assertEqual(report['productEvents'][0]['state']['connectionStage'], stage)
+                self.assertIsNone(report['productEvents'][0]['state']['connectionParkFresh'])
+                self.assertEqual(report['productSessions'][0]['frunkObserved'],
+                    dict.fromkeys(FRUNK_STATE_KEYS))
+                for version in range(1, 35):
+                    self.assertEqual(parse(dict(row, version=version))['productEvents'], [])
+                    self.assertIsNone(product_state(row['state'], version)['connectionStage'])
+
+    def test_wake_terminal_rx_is_version_gated_and_not_physical_success(self):
+        for disposition, aead in (('WAKE_ACKNOWLEDGED', 'VERIFIED'),
+                                  ('WAKE_NOMINAL_ACK', 'NOT_ATTEMPTED'),
+                                  ('WAKE_UNCONFIRMED', 'NOT_ATTEMPTED'),
+                                  ('RESPONSE_REJECTED', 'VERIFIED')):
+            row = dict(ConnectionObservationTests.row('PROTOCOL', rxProtocolCount=1,
+                rxResponse={'disposition': disposition, 'step': 'WAKE_RESULT', 'aead': aead}),
+                version=35)
+            report = parse(row)
+            classified = report['connectionOperations'][0]['classifications']
+            self.assertEqual(classified['step'], {'WAKE_RESULT': 1})
+            self.assertEqual(classified['authEvidence'], {'unobserved': 1})
+            self.assertEqual(classified['disposition'], {disposition: 1})
+            self.assertEqual(classified['aead'], {aead: 1})
+            self.assertEqual(report['productSessions'][0]['frunkObserved'],
+                dict.fromkeys(FRUNK_STATE_KEYS))
+            old = parse(dict(row, version=34))['productEvents'][0]['connectionObservation']['rxResponse']
+            self.assertIsNone(old['step'])
+            self.assertEqual(old['disposition'], 'RESPONSE_REJECTED' if disposition == 'RESPONSE_REJECTED' else None)
+
+    def test_wake_reasons_are_new_only_and_private_payload_has_no_new_channel(self):
+        secret = 'PRIVATE-VIN-KEY-ROUTE-UUID-PACKET-PCM'
+        for reason in ('CONNECTION_BODY_RECEIPT_STALE', 'CONNECTION_WAKE_REJECTED',
+                       'CONNECTION_WAKE_UNCONFIRMED', 'WAKE_EXPIRED'):
+            self.assertEqual(product_state({'connectionReason': reason}, 35)['connectionReason'], reason)
+            self.assertIsNone(product_state({'connectionReason': reason}, 34)['connectionReason'])
+        row = dict(ConnectionObservationTests.row('PROTOCOL', rxProtocolCount=1,
+            rxResponse={'disposition': secret, 'step': secret, 'raw': secret,
+                'route': secret, 'requestUuid': secret, 'hash': secret}), version=35)
+        row.update(origin=secret, packet=secret)
+        row['state'].update(connectionStage=secret, connectionReason=secret, vin=secret)
+        report = parse(row)
+        self.assertNotIn(secret, json.dumps(report))
+        future = parse(dict(row, version=40))
+        self.assertEqual(future['counts']['unsupportedRows'], 1)
+        self.assertEqual(future['productEvents'], [])
+        self.assertEqual(future['connectionOperations'], [])
+        self.assertNotIn(secret, json.dumps(future))
+
+    def test_domain2_sleep_status_is_schema36_enum_only(self):
+        for raw, expected in ((0, 'UNKNOWN'), (1, 'AWAKE'), (2, 'ASLEEP'), (3, None), (-1, None),
+                              ('2', None), (True, None)):
+            row = dict(ConnectionObservationTests.row('PROTOCOL', rxProtocolCount=1,
+                rxResponse={'disposition': 'DOMAIN_MISMATCH', 'domainMismatchReason': 'DOMAIN_DIFFERENT',
+                            'domainMismatchVcsecSleepStatus': raw}), version=36)
+            response = parse(row)['productEvents'][0]['connectionObservation']['rxResponse']
+            self.assertEqual(response['domainMismatchVcsecSleepStatus'], expected)
+            old = parse(dict(row, version=35))['productEvents'][0]['connectionObservation']['rxResponse']
+            self.assertNotIn('domainMismatchVcsecSleepStatus', old)
+
+    def test_session_retransmit_event_is_schema36_only(self):
+        row = record(version=36, event='TESLA_CONNECTION_SESSION_RETRANSMIT',
+                     state={'connectionStage': 'CHECKING_VEHICLE'})
+        events = parse(row)['productEvents']
+        self.assertEqual([point['event'] for point in events], ['TESLA_CONNECTION_SESSION_RETRANSMIT'])
+        self.assertEqual(parse(dict(row, version=35))['productEvents'], [])
+
+    def test_initial_drive_retry_cannot_backport_or_grant_park_or_voice(self):
+        row = record(version=38, event='TESLA_CONNECTION_DRIVE_RETRY',
+                     state={'connectionStage': 'AUTHENTICATING', 'connectionGear': 'UNKNOWN',
+                            'connectionParkFresh': False, 'productVoiceStage': 'IDLE',
+                            'frunkCommandSent': False})
+        report = parse(row)
+        self.assertEqual(report['productEvents'][0]['state']['connectionParkFresh'], False)
+        self.assertEqual(report['productEvents'][0]['state']['productVoiceStage'], 'IDLE')
+        self.assertEqual(report['connectionOperations'], [])
+        for version in (33, 34, 35, 36, 37):
+            with self.subTest(version=version):
+                self.assertEqual(parse(dict(row, version=version))['productEvents'], [])
+
+
+class ConnectionObservationTests(unittest.TestCase):
+    @staticmethod
+    def row(kind='STAGE', offset=0, **observation):
+        current = dict(event=kind, stage='HANDSHAKING', operationStartedElapsedMs=1000,
+            stageStartedElapsedMs=1000, observedElapsedMs=1000+offset)
+        current.update(observation)
+        return record(version=34, event='TESLA_CONNECTION_GATT_OBSERVATION',
+            wallMs=BASE+offset, elapsedMs=1000+offset, connectionObservation=current,
+            state={'connectionStage': 'AUTHENTICATING', 'productVoiceStage': 'IDLE'})
+
+    @classmethod
+    def six_notifications(cls):
+        rows = [cls.row(stage='CONNECTING', rxNotificationCount=0, rxFrameCount=0, rxProtocolCount=0)]
+        response = None
+        frame_count = protocol_count = 0
+        for count, complete in enumerate((0, 1, 1, 0, 1, 0), 1):
+            offset = count * 100
+            frame_count += complete
+            stage = 'HANDSHAKING' if count <= 3 else 'READING_STATUS'
+            stage_start = 1000 if count <= 3 else 1320
+            rows.append(cls.row('RX', offset, stage=stage, stageStartedElapsedMs=stage_start,
+                connectedObserved=True, subscriptionConfirmed=True, rxNotificationCount=count,
+                rxFrameCount=frame_count, rxProtocolCount=protocol_count,
+                rxNotificationFrameCount=complete, rxDecoderIncomplete=complete == 0,
+                rxDecoderFailed=False, rxResponse=response))
+            if complete:
+                protocol_count += 1
+                disposition = ('REQUEST_UUID_MISMATCH', 'SESSION_READY', 'RESPONSE_WAITING')[protocol_count-1]
+                response = dict(disposition=disposition, step='SEND' if protocol_count == 2 else 'WAITING',
+                    inputKind='ROUTABLE_MESSAGE', aead='NOT_ATTEMPTED', authEvidence=None,
+                    requestUuidPresent=True, requestUuidMatches=protocol_count != 1)
+                rows.append(cls.row('PROTOCOL', offset+10, stage=stage,
+                    stageStartedElapsedMs=stage_start, rxNotificationCount=count,
+                    rxFrameCount=frame_count, rxProtocolCount=protocol_count,
+                    rxProtocolReceivedElapsedMs=1000+offset,
+                    rxProtocolObservedElapsedMs=1010+offset, rxResponse=response))
+            if count == 3:
+                rows.append(cls.row('STAGE', offset+20, stage='READING_STATUS',
+                    stageStartedElapsedMs=1320, rxNotificationCount=count,
+                    rxFrameCount=frame_count, rxProtocolCount=protocol_count, rxResponse=response))
+        rows += [
+            cls.row('STAGE', 10000, stage='TIMED_OUT', stageStartedElapsedMs=11000,
+                deadlineCause='PROTOCOL_STAGE', rxNotificationCount=6, rxFrameCount=3,
+                rxProtocolCount=3, rxResponse=response),
+            cls.row('LOCAL_CLOSED', 10010, stage='TIMED_OUT', stageStartedElapsedMs=11000,
+                deadlineCause=None, rxNotificationCount=6, rxFrameCount=3,
+                rxProtocolCount=3, rxResponse=response),
+        ]
+        return rows
+
+    def test_six_notifications_do_not_become_six_protocol_results_or_auth_rejection(self):
+        started = dict(ProductServiceTests.row(), version=34)
+        rows = self.six_notifications()
+        rows[-1]['state'].update(dict.fromkeys(FRUNK_STATE_KEYS, True))
+        report = parse(started, *rows)
+        operation = report['connectionOperations'][0]
+        self.assertEqual(operation['counterTotals'], dict(notification=6, frame=3, protocol=3))
+        self.assertEqual(operation['observedEvents'], dict(notification=6, frame=3, protocol=3))
+        self.assertEqual(operation['decoder']['rxDecoderIncomplete'], {'true': 3, 'false': 3})
+        self.assertEqual(operation['classifications']['disposition'],
+            {'REQUEST_UUID_MISMATCH': 1, 'SESSION_READY': 1, 'RESPONSE_WAITING': 1})
+        self.assertEqual(operation['classifications']['authEvidence'], {'unobserved': 3})
+        self.assertEqual(operation['classifications']['aead'], {'NOT_ATTEMPTED': 3})
+        self.assertEqual(operation['lastActiveStage'], 'READING_STATUS')
+        self.assertIn('HANDSHAKING', [point['stage'] for point in operation['stages']])
+        self.assertEqual(operation['deadlineCause'], 'PROTOCOL_STAGE')
+        self.assertEqual(operation['deadlineObservation']['observedElapsedMs'], 11000)
+        self.assertEqual(operation['lastObservation']['event'], 'LOCAL_CLOSED')
+        self.assertIsNone(operation['lastObservation']['deadlineCause'])
+        self.assertEqual(operation['protocolQueueDelayMs']['count'], 3)
+        self.assertEqual(operation['protocolQueueDelayMs']['max'], 10)
+        session = report['productSessions'][0]
+        self.assertEqual(session['commandAcceptedCount'], 0)
+        self.assertEqual(session['frunkObserved'], dict.fromkeys(FRUNK_STATE_KEYS))
+        self.assertIsNone(session['microphoneCleanupConfirmed'])
+
+    def test_schema35_frunk_terminal_results_count_only_new_protocol_counters_not_copied_snapshots(self):
+        acknowledged = dict(disposition='FRUNK_ACKNOWLEDGED', step='FRUNK_RESULT',
+            inputKind='ENCRYPTED_RESPONSE', aead='VERIFIED')
+        unconfirmed = dict(disposition='FRUNK_UNCONFIRMED', step='FRUNK_RESULT',
+            inputKind='ROUTABLE_MESSAGE', aead='NOT_ATTEMPTED')
+        events = (
+            ('STAGE', 0, None),
+            ('PROTOCOL', 1, acknowledged),
+            ('STAGE', 1, acknowledged),
+            ('RX', 1, acknowledged),
+            ('PROTOCOL', 1, acknowledged),
+            ('PROTOCOL', 2, unconfirmed),
+            ('WRITE', 2, unconfirmed),
+            ('PROTOCOL', 2, unconfirmed),
+            ('PROTOCOL', 3, acknowledged),
+            ('PROTOCOL', 1, unconfirmed),
+            ('LOCAL_CLOSED', 3, acknowledged),
+        )
+        for version in (35, 34):
+            with self.subTest(version=version):
+                rows = [dict(self.row(kind, index * 10, stage='READING_STATUS',
+                    rxNotificationCount=0, rxFrameCount=0, rxProtocolCount=count,
+                    rxProtocolReceivedElapsedMs=1000+index*10,
+                    rxProtocolObservedElapsedMs=1000+index*10, rxResponse=response),
+                    version=version) for index, (kind, count, response) in enumerate(events)]
+                report = parse(*rows)
+                self.assertEqual(len(report['connectionOperations']), 1)
+                operation = report['connectionOperations'][0]
+                self.assertEqual(operation['counterTotals'], dict(notification=0, frame=0, protocol=3))
+                # RX의 per-notification frame 값이 없으므로 snapshot의 0으로 관측을 채우지 않는다.
+                self.assertEqual(operation['observedEvents'], dict(notification=0, frame=None, protocol=3))
+                self.assertEqual(operation['classifications']['disposition'],
+                    {'FRUNK_ACKNOWLEDGED': 2, 'FRUNK_UNCONFIRMED': 1}
+                    if version == 35 else {'unobserved': 3})
+                self.assertEqual(operation['classifications']['step'], {'FRUNK_RESULT': 3})
+                self.assertEqual(operation['classifications']['aead'], {'VERIFIED': 2, 'NOT_ATTEMPTED': 1})
+                self.assertEqual(operation['classifications']['authEvidence'], {'unobserved': 3})
+                self.assertTrue(operation['counterRegressionObserved'])
+                self.assertEqual(operation['protocolQueueDelayMs']['count'], 3)
+                self.assertEqual([point['connectionRxObservation']['newProtocol']
+                    for point in report['productEvents']],
+                    [False, True, False, False, False, True, False, False, True, False, False])
+                self.assertEqual(report['productSessions'][0]['frunkObserved'], dict.fromkeys(FRUNK_STATE_KEYS))
+                self.assertIsNone(report['productSessions'][0]['microphoneCleanupConfirmed'])
+        for version in range(1, 34):
+            report = parse(dict(self.row('PROTOCOL', rxProtocolCount=1, rxResponse=acknowledged), version=version))
+            self.assertEqual(report['connectionOperations'], [])
+
+    def test_copied_snapshots_and_duplicate_or_older_protocol_counters_are_not_new_results(self):
+        rows = self.six_notifications()
+        repeated = dict(rxNotificationCount=6, rxFrameCount=3, rxProtocolCount=3,
+            rxNotificationFrameCount=0, rxDecoderIncomplete=True,
+            rxResponse={'disposition': 'SESSION_INFO_AUTH_REJECTED', 'authEvidence': 'HMAC_MISMATCH'})
+        report = parse(*rows, self.row('PROTOCOL', 10020, **repeated),
+            self.row('STAGE', 10030, **repeated), self.row('RX', 10040, **repeated),
+            self.row('PROTOCOL', 10050, rxProtocolCount=1,
+                rxResponse={'disposition': 'STATUS_VERIFIED', 'aead': 'VERIFIED'}))
+        self.assertEqual(len(report['connectionOperations']), 1)
+        operation = report['connectionOperations'][0]
+        self.assertEqual(operation['observedEvents'], dict(notification=6, frame=3, protocol=3))
+        self.assertNotIn('SESSION_INFO_AUTH_REJECTED', operation['classifications']['disposition'])
+        self.assertNotIn('STATUS_VERIFIED', operation['classifications']['disposition'])
+        self.assertTrue(operation['counterRegressionObserved'])
+
+    def test_prior_snapshot_counter_blocks_same_or_older_protocol_success(self):
+        for kind in ('STAGE', 'RX', 'WRITE', 'LOCAL_CLOSED'):
+            for count in (1, 2):
+                with self.subTest(kind=kind, count=count):
+                    report = parse(
+                        self.row(kind, rxProtocolCount=2),
+                        self.row('PROTOCOL', 10, rxProtocolCount=count,
+                            rxProtocolReceivedElapsedMs=1000, rxProtocolObservedElapsedMs=1010,
+                            rxResponse={'disposition': 'STATUS_VERIFIED', 'aead': 'VERIFIED'}),
+                    )
+                    operation = report['connectionOperations'][0]
+                    self.assertEqual(operation['counterTotals']['protocol'], 2)
+                    self.assertEqual(operation['observedEvents']['protocol'], 0)
+                    self.assertEqual(operation['classifications']['disposition'], {})
+                    self.assertEqual(operation['classifications']['aead'], {})
+                    self.assertEqual(operation['protocolQueueDelayMs']['count'], 0)
+                    self.assertFalse(report['productEvents'][-1]['connectionRxObservation']['newProtocol'])
+
+    def test_snapshot_counter_gaps_only_classify_strictly_new_protocol_results(self):
+        report = parse(
+            self.row('STAGE', rxProtocolCount=2),
+            self.row('PROTOCOL', 10, rxProtocolCount=4, rxResponse=None),
+            self.row('RX', 20, rxProtocolCount=5),
+            self.row('PROTOCOL', 30, rxProtocolCount=5,
+                rxResponse={'disposition': 'STATUS_VERIFIED', 'aead': 'VERIFIED'}),
+            self.row('PROTOCOL', 40, rxProtocolCount=9,
+                rxResponse={'disposition': 'REQUEST_UUID_MISMATCH'}),
+            self.row('PROTOCOL', 50, rxProtocolCount=4,
+                rxResponse={'disposition': 'SESSION_READY'}),
+        )
+        operation = report['connectionOperations'][0]
+        self.assertEqual(operation['counterTotals']['protocol'], 9)
+        self.assertEqual(operation['observedEvents']['protocol'], 2)
+        self.assertEqual(operation['classifications']['disposition'],
+            {'unobserved': 1, 'REQUEST_UUID_MISMATCH': 1})
+        self.assertEqual(operation['classifications']['aead'], {'unobserved': 2})
+        self.assertEqual([point['connectionRxObservation']['newProtocol']
+                          for point in report['productEvents']], [False, True, False, False, True, False])
+        self.assertTrue(operation['counterRegressionObserved'])
+
+    def test_counter_gaps_and_missing_results_do_not_fabricate_protocol_classifications(self):
+        rows = [self.row('STAGE', rxProtocolCount=5,
+            rxResponse={'disposition': 'STATUS_VERIFIED', 'aead': 'VERIFIED'}),
+            self.row('PROTOCOL', 10, rxProtocolCount=6, rxResponse=None),
+            self.row('PROTOCOL', 20, rxProtocolCount=None,
+                rxResponse={'disposition': 'SESSION_READY'}),
+            self.row('PROTOCOL', 30, rxProtocolCount=7,
+                rxResponse={'disposition': 'SESSION_INFO_AUTH_REJECTED', 'authEvidence': 'HMAC_MISMATCH'})]
+        operation = parse(*rows)['connectionOperations'][0]
+        self.assertEqual(operation['counterTotals']['protocol'], 7)
+        self.assertEqual(operation['observedEvents']['protocol'], 2)
+        self.assertIsNone(operation['counterTotals']['notification'])
+        self.assertIsNone(operation['observedEvents']['frame'])
+        self.assertEqual(operation['classifications']['disposition'],
+            {'unobserved': 1, 'SESSION_INFO_AUTH_REJECTED': 1})
+        self.assertEqual(operation['classifications']['authEvidence'],
+            {'unobserved': 1, 'HMAC_MISMATCH': 1})
+
+    def test_operations_never_merge_across_trial_process_clock_or_unknown_start(self):
+        first = self.row('PROTOCOL', rxProtocolCount=1, rxResponse={'disposition': 'SESSION_READY'})
+        second = self.row('PROTOCOL', 10, rxProtocolCount=1,
+            rxResponse={'disposition': 'REQUEST_UUID_MISMATCH'})
+        changed_operation = dict(second, connectionObservation=dict(second['connectionObservation'],
+            operationStartedElapsedMs=1005, stageStartedElapsedMs=1005))
+        for changed in (dict(second, processId=Q), dict(second, trialId=U),
+                        dict(second, wallMs=BASE+5010), changed_operation):
+            with self.subTest(changed=changed):
+                operations = parse(first, changed)['connectionOperations']
+                self.assertEqual(len(operations), 2)
+                self.assertEqual([op['observedEvents']['protocol'] for op in operations], [1, 1])
+                self.assertEqual(operations[0]['classifications']['disposition'], {'SESSION_READY': 1})
+                self.assertEqual(operations[1]['classifications']['disposition'], {'REQUEST_UUID_MISMATCH': 1})
+        earlier = self.row('PROTOCOL', -10, operationStartedElapsedMs=900,
+            stageStartedElapsedMs=900, rxProtocolCount=1)
+        self.assertEqual(len(parse(first, earlier)['connectionOperations']), 2)
+        unknown = [self.row('PROTOCOL', offset, operationStartedElapsedMs=None, rxProtocolCount=1)
+                   for offset in (0, 10)]
+        operations = parse(*unknown)['connectionOperations']
+        self.assertEqual(len(operations), 2)
+        self.assertTrue(all(not op['scopeComplete'] for op in operations))
+        self.assertEqual(parse(first, exclude=(T,))['connectionOperations'], [])
+        self.assertEqual(parse(dict(first, processId='invalid'))['connectionOperations'], [])
+        self.assertEqual(parse(dict(first, trialId='invalid'))['connectionOperations'], [])
+
+    def test_legacy_and_non_gatt_snapshots_leave_connection_evidence_unobserved(self):
+        for version in range(1, 34):
+            report = parse(dict(self.row('PROTOCOL', rxProtocolCount=1,
+                rxResponse={'disposition': 'STATUS_VERIFIED'}), version=version))
+            self.assertEqual(report['connectionOperations'], [])
+            self.assertTrue(all(point['connectionObservation'] is None for point in report['productEvents']))
+        for event in ('PRODUCT_VOICE_STATE_CHANGED', 'TESLA_CONNECTION_STATE_CHANGED'):
+            report = parse(dict(self.row('PROTOCOL', rxProtocolCount=1,
+                rxResponse={'disposition': 'STATUS_VERIFIED'}), event=event))
+            self.assertEqual(report['connectionOperations'], [])
+            self.assertIsNone(report['productEvents'][0]['connectionObservation'])
+        row = dict(ProductServiceTests.row('TESLA_CONNECTION_GATT_OBSERVATION'), version=34)
+        report = parse(row)
+        self.assertEqual(report['connectionOperations'], [])
+        self.assertIsNone(report['productEvents'][0]['connectionObservation'])
+
+    def test_unknown_private_and_wrong_type_evidence_cannot_become_auth_or_success(self):
+        secret = 'PRIVATE-VIN-KEY-UUID-ADDRESS-PCM'
+        row = self.row('PROTOCOL', rxProtocolCount=1, stage=secret, deadlineCause=secret,
+            connectAccepted=1, subscriptionConfirmed='true', rxNotificationCount=True,
+            rxFrameCount=-1, rxNotificationFrameCount=17, rxDecoderFailed='false',
+            connectionStatus=2**31, connectAction=secret, address=secret,
+            rxResponse={'disposition': secret, 'step': secret, 'aead': secret,
+                'authEvidence': secret, 'inputKind': secret, 'fromPresent': False,
+                'fromKind': 'DOMAIN', 'fromDomain': 2, 'requestUuidPresent': False,
+                'requestUuidMatches': True, 'toPresent': False, 'toRouteMatches': True,
+                'signedStatusPresent': False, 'signedMessageFault': 0, 'operationStatus': 0,
+                'bodySummary': secret, 'requestCorrelation': secret, 'requestUuid': secret},
+            write={'writeSequence': 0, 'writeBusyRetryCount': 3, 'writeType': True,
+                'writeException': secret, 'writeDispatchQueued': 1, 'raw': secret})
+        report = parse(row)
+        self.assertNotIn(secret, json.dumps(report))
+        operation = report['connectionOperations'][0]
+        self.assertIsNone(operation['deadlineCause'])
+        self.assertIsNone(operation['lastActiveStage'])
+        self.assertEqual(operation['classifications']['disposition'], {'unobserved': 1})
+        self.assertEqual(operation['classifications']['authEvidence'], {'unobserved': 1})
+        safe = report['productEvents'][0]['connectionObservation']
+        for key in ('stage', 'connectAccepted', 'subscriptionConfirmed', 'rxNotificationCount',
+                    'rxFrameCount', 'rxNotificationFrameCount', 'rxDecoderFailed', 'connectionStatus'):
+            self.assertIsNone(safe[key])
+        for key in ('fromDomain', 'requestUuidMatches', 'toRouteMatches',
+                    'signedMessageFault', 'operationStatus'):
+            self.assertIsNone(safe['rxResponse'][key])
+        self.assertTrue(all(value is None for value in safe['write'].values()))
+        for payload in (None, secret, [], True):
+            report = parse(dict(row, connectionObservation=payload))
+            self.assertEqual(report['connectionOperations'], [])
+            self.assertNotIn(secret, json.dumps(report))
+
+    def test_invalid_timing_does_not_create_negative_latency_or_cross_operation_write(self):
+        row = self.row('WRITE', 100, observedElapsedMs=1090, stageStartedElapsedMs=1100,
+            connectIssuedElapsedMs=1020, connectReturnedElapsedMs=1010,
+            firstRxElapsedMs=1040, lastRxElapsedMs=1030,
+            rxProtocolReceivedElapsedMs=1080, rxProtocolObservedElapsedMs=1070,
+            connectionCallbackElapsedMs=999, descriptorCallbackElapsedMs=1101,
+            advertisementAgeAtConnectMs=-1,
+            write={'writeSequence': 1, 'writeRequestedElapsedMs': 1050,
+                'writeReturnedElapsedMs': 1040, 'writeCallbackElapsedMs': 1049,
+                'writeDispatchElapsedMs': 999, 'writeRequestStatus': 0,
+                'writeCallbackStatus': None, 'writeDispatchQueued': False})
+        report = parse(row)
+        safe = report['productEvents'][0]['connectionObservation']
+        for key in ('stageStartedElapsedMs', 'connectReturnedElapsedMs', 'lastRxElapsedMs',
+                    'rxProtocolObservedElapsedMs', 'connectionCallbackElapsedMs',
+                    'descriptorCallbackElapsedMs', 'advertisementAgeAtConnectMs'):
+            self.assertIsNone(safe[key])
+        for key in ('writeReturnedElapsedMs', 'writeCallbackElapsedMs', 'writeDispatchElapsedMs'):
+            self.assertIsNone(safe['write'][key])
+        timing = report['productEvents'][0]['gattTimingMs']
+        self.assertEqual(timing['operationElapsedMs'], 90)
+        self.assertIsNone(timing['stageElapsedMs'])
+        self.assertIsNone(timing['connectCallElapsedMs'])
+        self.assertIsNone(timing['protocolQueueDelayMs'])
+        self.assertIsNone(safe['write']['writeCallbackStatus'])
+        self.assertEqual(safe['write']['writeRequestStatus'], 0)
+        future = self.row('WRITE', observedElapsedMs=1001,
+            write={'writeRequestedElapsedMs': 1000})
+        safe = parse(future)['productEvents'][0]['connectionObservation']
+        self.assertIsNone(safe['observedElapsedMs'])
+        self.assertIsNone(safe['write']['writeRequestedElapsedMs'])
+
+    def test_stage_cccd_and_write_success_do_not_supply_missing_protocol_authentication(self):
+        rows = [
+            self.row('WRITE', stage='READING_STATUS', subscriptionConfirmed=True,
+                write={'writeSequence': 1, 'writeDispatchQueued': True}),
+            self.row('WRITE', 10, stage='READING_STATUS', subscriptionConfirmed=True,
+                write={'writeSequence': 1, 'writeDispatchQueued': False,
+                    'writeRequestedElapsedMs': 1005, 'writeReturnedElapsedMs': 1010,
+                    'writeRequestStatus': 0}),
+            self.row('WRITE', 20, stage='READING_STATUS', subscriptionConfirmed=True,
+                write={'writeSequence': 1, 'writeDispatchQueued': False,
+                    'writeRequestedElapsedMs': 1005, 'writeReturnedElapsedMs': 1010,
+                    'writeRequestStatus': 0, 'writeCallbackStatus': 0, 'writeCallbackElapsedMs': 1020}),
+            self.row('STAGE', 30, stage='TIMED_OUT',
+                rxResponse={'disposition': 'SESSION_READY', 'aead': 'VERIFIED'}),
+        ]
+        rows[-1]['state']['connectionReason'] = 'DEADLINE_EXPIRED'
+        report = parse(*rows)
+        operation = report['connectionOperations'][0]
+        self.assertEqual(operation['classifications']['disposition'], {})
+        self.assertEqual(operation['classifications']['aead'], {})
+        self.assertIsNone(operation['counterTotals']['protocol'])
+        self.assertIsNone(operation['deadlineCause'])
+        self.assertIsNone(report['productEvents'][0]['connectionObservation']['write']['writeRequestStatus'])
+        self.assertIsNone(report['productEvents'][1]['connectionObservation']['write']['writeCallbackStatus'])
+        self.assertEqual(report['productEvents'][1]['gattTimingMs']['writeCallElapsedMs'], 5)
+        self.assertEqual(report['productEvents'][2]['gattTimingMs']['writeCallbackSinceRequestMs'], 15)
+        ready = self.row('PROTOCOL', 40, rxProtocolCount=1, rxResponse={'disposition': 'SESSION_READY'})
+        report = parse(*rows, ready, dict(ready, elapsedMs=1050, wallMs=BASE+50))
+        self.assertEqual(report['connectionOperations'][0]['classifications']['disposition'], {'SESSION_READY': 1})
+        self.assertTrue(report['productEvents'][-2]['connectionRxObservation']['newProtocol'])
+        self.assertFalse(report['productEvents'][-1]['connectionRxObservation']['newProtocol'])
+
+    def test_decoder_failure_does_not_turn_missing_frame_count_into_zero_or_success(self):
+        operation = parse(self.row('RX', rxNotificationCount=6,
+            rxDecoderFailed=True, rxNotificationFrameCount=None))['connectionOperations'][0]
+        self.assertEqual(operation['counterTotals'], dict(notification=6, frame=None, protocol=None))
+        self.assertEqual(operation['observedEvents'], dict(notification=1, frame=None, protocol=0))
+        self.assertEqual(operation['notificationFrameCountUnobserved'], 1)
+        self.assertEqual(operation['decoder']['rxDecoderFailed'], {'true': 1})
+        self.assertEqual(operation['decoder']['rxDecoderIncomplete'], {'unobserved': 1})
+        self.assertEqual(operation['classifications']['disposition'], {})
+
+    def test_invalid_operation_times_and_numeric_types_cannot_create_a_shared_scope(self):
+        for value in (True, False, 1.5, 'PRIVATE-NUMERIC', [], {}, -1, 2**63):
+            with self.subTest(value=value):
+                row = self.row('PROTOCOL', operationStartedElapsedMs=value,
+                    rxProtocolCount=value, rxFrameCount=value, rxNotificationCount=value,
+                    write={'writeRequestedElapsedMs': 1000})
+                report = parse(row, dict(row))
+                self.assertEqual(len(report['connectionOperations']), 2)
+                for operation in report['connectionOperations']:
+                    self.assertFalse(operation['scopeComplete'])
+                    self.assertEqual(operation['counterTotals'], dict(notification=None, frame=None, protocol=None))
+                    self.assertEqual(operation['classifications']['disposition'], {})
+                safe = report['productEvents'][0]['connectionObservation']
+                self.assertIsNone(safe['observedElapsedMs'])
+                self.assertIsNone(safe['stageStartedElapsedMs'])
+                self.assertIsNone(safe['write']['writeRequestedElapsedMs'])
+                self.assertNotIn('PRIVATE-NUMERIC', json.dumps(report))
+
+    def test_cli_text_and_json_expose_evidence_without_promoting_legacy_absence(self):
+        secret = 'PRIVATE-CONNECTION-INPUT'
+        rows = self.six_notifications()
+        rows[-1]['connectionObservation']['raw'] = secret
+        for flags in ([], ['--json']):
+            out, err = io.StringIO(), io.StringIO()
+            stream = io.BytesIO(''.join(json.dumps(row)+'\n' for row in rows).encode())
+            with patch('builtins.open', return_value=stream), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(main(['input.jsonl', *flags]), 0)
+            self.assertEqual(err.getvalue(), '')
+            self.assertNotIn(secret, out.getvalue())
+            if flags:
+                operations = json.loads(out.getvalue())['connectionOperations']
+            else:
+                objects = [json.loads(line[line.index('{"'):]) for line in out.getvalue().splitlines()
+                           if '{"' in line]
+                operations = [value for value in objects if 'counterTotals' in value and 'lastActiveStage' in value]
+            self.assertEqual(len(operations), 1)
+            self.assertEqual(operations[0]['counterTotals']['notification'], 6)
+            self.assertEqual(operations[0]['lastActiveStage'], 'READING_STATUS')
+            self.assertEqual(operations[0]['deadlineCause'], 'PROTOCOL_STAGE')
+            legacy = dict(rows[-1], version=33)
+            stream = io.BytesIO((json.dumps(legacy)+'\n').encode())
+            out = io.StringIO()
+            with patch('builtins.open', return_value=stream), contextlib.redirect_stdout(out):
+                self.assertEqual(main(['input.jsonl', *flags]), 0)
+            if flags:
+                result = json.loads(out.getvalue())
+                self.assertEqual(result['connectionOperations'], [])
+                self.assertIsNone(result['productEvents'][0]['connectionObservation'])
+            else:
+                objects = [json.loads(line[line.index('{"'):]) for line in out.getvalue().splitlines()
+                           if '{"' in line]
+                self.assertFalse(any('counterTotals' in value for value in objects))
+            self.assertNotIn(secret, out.getvalue())
+
+
+class ConnectionDriveSchemaTests(unittest.TestCase):
+    @staticmethod
+    def response(**changes):
+        response = dict(expectedDomain=3, fromPresent=True, fromKind='DOMAIN', fromDomain=3,
+            toPresent=True, toKind='ROUTING_ADDRESS', requestUuidPresent=True,
+            requestUuidMatches=True, toRouteMatches=True, inputKind='ENCRYPTED_RESPONSE',
+            aead='VERIFIED', disposition='STATUS_VERIFIED', step='COMPLETE',
+            driveShiftState='P', driveTimestampStatus='VALID')
+        response.update(changes)
+        return response
+
+    @staticmethod
+    def row(kind='PROTOCOL', offset=0, **observation):
+        row = dict(ConnectionObservationTests.row(kind, offset, **observation), version=37)
+        row['state'].update(connectionGear='UNKNOWN', connectionParkFresh=False)
+        return row
+
+    def test_verified_drive_classifications_do_not_infer_gear_or_freshness(self):
+        for shift in ('ABSENT', 'EMPTY', 'INVALID', 'P', 'R', 'N', 'D', 'SNA', 'UNRECOGNIZED'):
+            for timestamp in ('ABSENT', 'INVALID', 'NON_POSITIVE', 'VALID'):
+                with self.subTest(shift=shift, timestamp=timestamp):
+                    report = parse(self.row(rxProtocolCount=1, rxResponse=self.response(
+                        driveShiftState=shift, driveTimestampStatus=timestamp)))
+                    point = report['productEvents'][0]
+                    self.assertEqual(point['state']['connectionGear'], 'UNKNOWN')
+                    self.assertFalse(point['state']['connectionParkFresh'])
+                    classified = report['connectionOperations'][0]['classifications']
+                    self.assertEqual(classified['driveShiftState'], {shift: 1})
+                    self.assertEqual(classified['driveTimestampStatus'], {timestamp: 1})
+                    self.assertEqual(report['productSessions'][0]['frunkObserved'],
+                        dict.fromkeys(FRUNK_STATE_KEYS))
+
+    def test_every_authentication_and_correlation_requirement_is_mandatory(self):
+        wrong_values = {
+            'expectedDomain': (2, 3.0, True, '3', [], {}),
+            'fromPresent': (False, 1, 'true', [], {}),
+            'fromKind': ('ROUTING_ADDRESS', 'UNSET', True, [], {}),
+            'fromDomain': (2, 3.0, True, '3', [], {}),
+            'toPresent': (False, 1, 'true', [], {}),
+            'toKind': ('DOMAIN', 'UNSET', True, [], {}),
+            'requestUuidPresent': (False, 1, 'true', [], {}),
+            'requestUuidMatches': (False, 1, 'true', [], {}),
+            'toRouteMatches': (False, 1, 'true', [], {}),
+            'inputKind': ('ROUTABLE_MESSAGE', 'WRAPPED_PLAINTEXT', True, [], {}),
+            'aead': ('FAILED', 'NOT_ATTEMPTED', True, [], {}),
+            'disposition': ('SESSION_READY', 'STATUS_INCOMPLETE', 'RESPONSE_REJECTED', True, [], {}),
+            'step': ('WAITING', 'SEND', 'FAILED', True, [], {}),
+        }
+        for key, values in wrong_values.items():
+            for value in (*values, None):
+                with self.subTest(key=key, value=value):
+                    response = self.response(**{key: value})
+                    if value is None:
+                        del response[key]
+                    report = parse(self.row(rxProtocolCount=1, rxResponse=response))
+                    safe = report['productEvents'][0]['connectionObservation']['rxResponse']
+                    classified = report['connectionOperations'][0]['classifications']
+                    for diagnostic in ('driveShiftState', 'driveTimestampStatus'):
+                        self.assertIsNone(safe[diagnostic])
+                        self.assertEqual(classified[diagnostic], {'unobserved': 1})
+
+    def test_invalid_private_and_wrong_type_diagnostics_are_independently_unobserved(self):
+        secret = 'PRIVATE-VIN-KEY-ROUTE-UUID-PACKET-TIMESTAMP'
+        for key, other, expected in (
+                ('driveShiftState', 'driveTimestampStatus', 'VALID'),
+                ('driveTimestampStatus', 'driveShiftState', 'P')):
+            for value in (secret, 'UNKNOWN', '', 'p', True, False, 3, 1.5, [], {}, None):
+                with self.subTest(key=key, value=value):
+                    response = self.response(**{key: value}, driveTimestamp=secret,
+                        seconds=secret, nanos=secret, packet=secret, vin=secret,
+                        route=secret, requestUuid=secret)
+                    report = parse(self.row(rxProtocolCount=1, rxResponse=response))
+                    self.assertNotIn(secret, json.dumps(report))
+                    safe = report['productEvents'][0]['connectionObservation']['rxResponse']
+                    classified = report['connectionOperations'][0]['classifications']
+                    self.assertIsNone(safe[key])
+                    self.assertEqual(classified[key], {'unobserved': 1})
+                    self.assertEqual(classified[other], {expected: 1})
+
+    def test_schema36_and_older_cannot_inject_drive_diagnostics(self):
+        for version in range(1, 37):
+            with self.subTest(version=version):
+                report = parse(dict(self.row(rxProtocolCount=1,
+                    rxResponse=self.response()), version=version))
+                if version < 34:
+                    self.assertEqual(report['connectionOperations'], [])
+                    self.assertTrue(all(point['connectionObservation'] is None
+                        for point in report['productEvents']))
+                    continue
+                safe = report['productEvents'][0]['connectionObservation']['rxResponse']
+                classified = report['connectionOperations'][0]['classifications']
+                for key in ('driveShiftState', 'driveTimestampStatus'):
+                    self.assertNotIn(key, safe)
+                    self.assertEqual(classified[key], {'unobserved': 1})
+
+    def test_copied_and_regressed_snapshots_never_recount_drive_results(self):
+        response = self.response(driveShiftState='EMPTY', driveTimestampStatus='ABSENT')
+        report = parse(
+            self.row(rxProtocolCount=1, rxResponse=response),
+            self.row(offset=1, rxProtocolCount=1, rxResponse=response),
+            self.row('RX', 2, rxProtocolCount=1, rxResponse=response),
+            self.row('STAGE', 3, rxProtocolCount=1, rxResponse=response),
+            self.row('LOCAL_CLOSED', 4, rxProtocolCount=1, rxResponse=response),
+            self.row(offset=5, rxProtocolCount=0, rxResponse=self.response()),
+            self.row(offset=6, rxProtocolCount=2, rxResponse=self.response(aead='FAILED')),
+            self.row(offset=7, rxProtocolCount=3, rxResponse=None),
+            self.row(offset=8, rxProtocolCount=4, rxResponse={}),
+        )
+        operation = report['connectionOperations'][0]
+        self.assertEqual(operation['observedEvents']['protocol'], 4)
+        self.assertEqual(operation['counterTotals']['protocol'], 4)
+        self.assertTrue(operation['counterRegressionObserved'])
+        self.assertEqual(operation['classifications']['driveShiftState'],
+            {'EMPTY': 1, 'unobserved': 3})
+        self.assertEqual(operation['classifications']['driveTimestampStatus'],
+            {'ABSENT': 1, 'unobserved': 3})
+        self.assertEqual([point['connectionRxObservation']['newProtocol']
+            for point in report['productEvents']], [True, False, False, False, False,
+                                                   False, True, True, True])
+
+    def test_snapshot_counter_high_watermark_blocks_past_drive_classifications(self):
+        report = parse(
+            self.row('STAGE', rxProtocolCount=5, rxResponse=self.response()),
+            self.row(offset=1, rxProtocolCount=5, rxResponse=self.response()),
+            self.row(offset=2, rxProtocolCount=4, rxResponse=self.response()),
+            self.row(offset=3, rxProtocolCount=6, rxResponse=self.response(
+                driveShiftState='SNA', driveTimestampStatus='NON_POSITIVE')),
+        )
+        operation = report['connectionOperations'][0]
+        self.assertEqual(operation['observedEvents']['protocol'], 1)
+        self.assertEqual(operation['classifications']['driveShiftState'], {'SNA': 1})
+        self.assertEqual(operation['classifications']['driveTimestampStatus'], {'NON_POSITIVE': 1})
+
+    def test_drive_diagnostics_do_not_cross_operation_or_scope_boundaries(self):
+        first = self.row(rxProtocolCount=1, rxResponse=self.response())
+        second = self.row(offset=10, rxProtocolCount=1, rxResponse=self.response(
+            driveShiftState='UNRECOGNIZED', driveTimestampStatus='INVALID'))
+        new_operation = dict(second, connectionObservation=dict(second['connectionObservation'],
+            operationStartedElapsedMs=1005, stageStartedElapsedMs=1005))
+        for changed in (new_operation, dict(second, processId=Q), dict(second, trialId=U),
+                        dict(second, wallMs=BASE+5010)):
+            with self.subTest(changed=changed):
+                operations = parse(first, changed)['connectionOperations']
+                self.assertEqual(len(operations), 2)
+                self.assertEqual([op['observedEvents']['protocol'] for op in operations], [1, 1])
+                self.assertEqual([op['classifications']['driveShiftState'] for op in operations],
+                    [{'P': 1}, {'UNRECOGNIZED': 1}])
+                self.assertEqual([op['classifications']['driveTimestampStatus'] for op in operations],
+                    [{'VALID': 1}, {'INVALID': 1}])
+        unknown = [self.row(offset=offset, operationStartedElapsedMs=None,
+            rxProtocolCount=1, rxResponse=self.response()) for offset in (0, 10)]
+        operations = parse(*unknown)['connectionOperations']
+        self.assertEqual(len(operations), 2)
+        self.assertTrue(all(not op['scopeComplete'] for op in operations))
+        self.assertTrue(all(op['classifications']['driveShiftState'] == {'P': 1}
+            for op in operations))
+        missing = self.row(offset=10, operationStartedElapsedMs=1005,
+            rxProtocolCount=1, rxResponse={})
+        classified = parse(first, missing)['connectionOperations'][1]['classifications']
+        self.assertEqual(classified['driveShiftState'], {'unobserved': 1})
+        self.assertEqual(classified['driveTimestampStatus'], {'unobserved': 1})
+
+    def test_cli_json_and_human_report_expose_only_sanitized_drive_diagnostics(self):
+        secret = 'PRIVATE-DRIVE-INPUT-PACKET-TIMESTAMP'
+        rows = [
+            self.row(rxProtocolCount=1, rxResponse=self.response(
+                driveShiftState='EMPTY', driveTimestampStatus='ABSENT', packet=secret)),
+            self.row(offset=10, rxProtocolCount=2, rxResponse=self.response(
+                driveShiftState=secret, driveTimestampStatus=secret, driveTimestamp=secret)),
+        ]
+        for flags in ([], ['--json']):
+            with self.subTest(flags=flags):
+                out, err = io.StringIO(), io.StringIO()
+                stream = io.BytesIO(''.join(json.dumps(row)+'\n' for row in rows).encode())
+                with patch('builtins.open', return_value=stream), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    self.assertEqual(main(['input.jsonl', *flags]), 0)
+                self.assertEqual(err.getvalue(), '')
+                self.assertNotIn(secret, out.getvalue())
+                if flags:
+                    operations = json.loads(out.getvalue())['connectionOperations']
+                else:
+                    objects = [json.loads(line[line.index('{"'):]) for line in out.getvalue().splitlines()
+                               if '{"' in line]
+                    operations = [value for value in objects
+                                  if 'counterTotals' in value and 'lastActiveStage' in value]
+                self.assertEqual(len(operations), 1)
+                classified = operations[0]['classifications']
+                self.assertEqual(classified['driveShiftState'], {'EMPTY': 1, 'unobserved': 1})
+                self.assertEqual(classified['driveTimestampStatus'], {'ABSENT': 1, 'unobserved': 1})
+                for key in ('driveShiftState', 'driveTimestampStatus'):
+                    self.assertIsNone(operations[0]['lastObservation']['rxResponse'][key])
+
+    def test_schema37_preserves_existing_approach_recovery_boundaries(self):
+        for version in (36, 37, 38, 39):
+            for second_start, allowed in ((3699, False), (3700, True), (39700, True), (39701, False)):
+                with self.subTest(version=version, second_start=second_start):
+                    report = parse(*(dict(row, version=version)
+                        for row in recovery_rows(second_start=second_start)))
+                    trial = report['trials'][0]
+                    self.assertEqual(trial['approachRecoveryReadCount'], int(allowed))
+                    self.assertEqual(trial['approachCompleteReadCount'], int(allowed))
+                    self.assertEqual('REPEATED_APPROACH_READ' in
+                        [issue['code'] for issue in report['issues']], not allowed)
+
+
+class NativeEvidenceTests(unittest.TestCase):
+    def test_signed_and_uint32_ids_share_only_the_same_contract_tag(self):
+        self.assertEqual(uwb_session_tag(-123456789), uwb_session_tag(2**32-123456789))
+        self.assertEqual(uwb_session_tag(-123456789),
+            hashlib.sha256(b'hey-tesla/uwb-session/v1:\xf8\xa4\x32\xeb').hexdigest())
+        self.assertNotEqual(uwb_session_tag(-123456789), uwb_session_tag(-123456788))
+        self.assertRegex(uwb_session_tag(0), r'^[0-9a-f]{64}$')
+        for value in (True, False, 1.0, '123', None, -(2**31)-1, 2**32, [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, '^INVALID_UWB_SESSION_ID$'):
+                uwb_session_tag(value)
+
+    def test_schema_history_and_null_do_not_infer_native_observations(self):
+        raw = native_uwb()['state']
+        for version in range(1, 31):
+            self.assertEqual(uwb_native_state(raw, 1000, version), dict.fromkeys(UWB_NATIVE_KEYS))
+            row = dict(native_uwb(), version=version)
+            report = parse(row)
+            self.assertEqual(report['uwbNativeSessions'], [])
+        report = parse(dict(uwb('TESLA_UWB_COMPLETE'), version=31))
+        self.assertEqual(report['uwbNativeSessions'], [])
+        self.assertIsNone(report['uwbEvents'][0]['nativeObservation'])
+        self.assertTrue(all(report['uwbEvents'][0]['state'][key] is None for key in UWB_NATIVE_KEYS))
+        self.assertNotIn('uwbSystemMatches', report)
+
+    def test_native_counts_require_matching_events_and_exclude_repeated_snapshots(self):
+        rows = [native_uwb('STARTING'), native_uwb('OPENED', 1),
+                native_uwb('PEER_STARTED', 2), native_uwb('PEER_STOPPED', 3)]
+        rows += [dict(native_uwb('PEER_STOPPED', 4), event='TESLA_UWB_COMPLETE'),
+                 native_uwb('PEER_STOPPED', 5), native_uwb('CLOSED', 6, uwbNativeCloseRequested=True)]
+        rows += [dict(native_uwb('CLOSED', 7, uwbNativeCloseRequested=True), event='TESLA_UWB_LOCAL_CLOSED')]
+        report = parse(*rows)
+        session = report['uwbNativeSessions'][0]
+        self.assertEqual(session['eventCounts'],
+            dict(STARTING=1, OPENED=1, PEER_STARTED=1, PEER_STOPPED=1, CLOSED=1))
+        self.assertEqual(len(session['events']), 5)
+        for index in (4, 5, 7):
+            self.assertIsNone(report['uwbEvents'][index]['nativeObservation'])
+        self.assertEqual(session['events'][3]['uwbNativePeerIndex'], 4)
+        self.assertFalse(session['events'][3]['uwbNativeCloseRequested'])
+        self.assertTrue(session['events'][4]['uwbNativeCloseRequested'])
+        other = parse(native_uwb(), native_uwb(offset=1, session_id=42))
+        self.assertEqual(len(other['uwbNativeSessions']), 2)
+    def test_native_reused_tag_is_independent_between_gatt_operations(self):
+        rows = []
+        for operation in (100, 200):
+            for event, since in (('STARTING', 0), ('OPENED', 1), ('CLOSED', 2)):
+                rows.append(native_uwb(event, len(rows),
+                    uwbGattOperationStartedElapsedMs=operation,
+                    uwbNativeElapsedSinceStartMs=since))
+        report = parse(*rows)
+        sessions = report['uwbNativeSessions']
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual([session['operationStartedElapsedMs'] for session in sessions], [100, 200])
+        for session in sessions:
+            self.assertEqual(session['eventCounts'], {'STARTING': 1, 'OPENED': 1, 'CLOSED': 1})
+            self.assertTrue(session['startingObserved'])
+            self.assertTrue(session['closedObserved'])
+        self.assertTrue(all(point['nativeObservation'] is not None for point in report['uwbEvents']))
+
+    def test_native_closed_then_starting_reopens_seen_scope_without_counting_snapshots(self):
+        def observed(event, offset, since):
+            return native_uwb(event, offset, uwbGattOperationStartedElapsedMs=100,
+                              uwbNativeElapsedSinceStartMs=since)
+        rows = [
+            observed('STARTING', 0, 0), observed('STARTING', 1, 0),
+            observed('OPENED', 2, 1), observed('CLOSED', 3, 2),
+            dict(observed('CLOSED', 4, 2), event='TESLA_UWB_COMPLETE'),
+            observed('CLOSED', 5, 2), observed('STARTING', 6, 0),
+            dict(observed('STARTING', 7, 0), event='TESLA_UWB_CLEANING_UP'),
+            observed('STARTING', 8, 0), observed('OPENED', 9, 1),
+            observed('CLOSED', 10, 2),
+            dict(observed('CLOSED', 11, 2), event='TESLA_UWB_LOCAL_CLOSED'),
+        ]
+        report = parse(*rows)
+        sessions = report['uwbNativeSessions']
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual([session['lifecycleIndex'] for session in sessions], [0, 1])
+        for session in sessions:
+            self.assertEqual(session['operationStartedElapsedMs'], 100)
+            self.assertEqual(session['eventCounts'], {'STARTING': 1, 'OPENED': 1, 'CLOSED': 1})
+            self.assertTrue(session['startingObserved'])
+            self.assertTrue(session['closedObserved'])
+        for index in (1, 4, 5, 7, 8, 11):
+            self.assertIsNone(report['uwbEvents'][index]['nativeObservation'])
+        self.assertIsNotNone(report['uwbEvents'][6]['nativeObservation'])
+
+    def test_native_explicit_restart_does_not_invent_missing_closed_callback(self):
+        rows = [
+            native_uwb('STARTING', uwbNativeElapsedSinceStartMs=0),
+            native_uwb('OPENED', 1, uwbNativeElapsedSinceStartMs=1),
+            native_uwb('STARTING', 2, uwbNativeElapsedSinceStartMs=0),
+            native_uwb('OPENED', 3, uwbNativeElapsedSinceStartMs=1),
+        ]
+        sessions = parse(*rows)['uwbNativeSessions']
+        self.assertEqual(len(sessions), 2)
+        for session in sessions:
+            self.assertIsNone(session['operationStartedElapsedMs'])
+            self.assertTrue(session['startingObserved'])
+            self.assertFalse(session['closedObserved'])
+            self.assertEqual(session['eventCounts'], {'STARTING': 1, 'OPENED': 1})
+
+    def test_native_missing_starting_keeps_boundaries_unobserved_instead_of_inferring_from_time(self):
+        rows = [
+            native_uwb('OPENED', uwbGattOperationStartedElapsedMs=100, uwbNativeElapsedSinceStartMs=5),
+            native_uwb('CLOSED', 1, uwbGattOperationStartedElapsedMs=100, uwbNativeElapsedSinceStartMs=10),
+            native_uwb('PEER_STARTED', 2, uwbGattOperationStartedElapsedMs=100, uwbNativeElapsedSinceStartMs=0),
+            native_uwb('PEER_STOPPED', 3, uwbGattOperationStartedElapsedMs=200, uwbNativeElapsedSinceStartMs=0),
+        ]
+        sessions = parse(*rows)['uwbNativeSessions']
+        self.assertEqual(len(sessions), 3)
+        self.assertEqual([session['operationStartedElapsedMs'] for session in sessions], [100, 100, 200])
+        self.assertTrue(all(not session['startingObserved'] for session in sessions))
+        self.assertEqual([session['closedObserved'] for session in sessions], [True, False, False])
+        self.assertTrue(all('STARTING' not in session['eventCounts'] for session in sessions))
+        missing_operation = parse(
+            native_uwb('PEER_STARTED', uwbNativeElapsedSinceStartMs=10),
+            native_uwb('PEER_STOPPED', 1, uwbNativeElapsedSinceStartMs=0))
+        unknown, = missing_operation['uwbNativeSessions']
+        self.assertIsNone(unknown['operationStartedElapsedMs'])
+        self.assertFalse(unknown['startingObserved'])
+        self.assertFalse(unknown['closedObserved'])
+        self.assertEqual(unknown['eventCounts'], {'PEER_STARTED': 1, 'PEER_STOPPED': 1})
+
+
+    def test_native_fields_reject_bad_types_ranges_and_sensitive_strings(self):
+        secret = 'SYNTHETIC-PRIVATE-SESSION-VIN-MAC-STS'
+        raw = native_uwb()['state']
+        invalid = {
+            'uwbNativeSessionTag': [secret, 'A'*64, 'a'*63],
+            'uwbNativeConfigId': [0, 6, '1', 1.0, True],
+            'uwbNativeChannel': [0, 8, 10, '9', False],
+            'uwbNativePreambleIndex': [8, 13, '10', True],
+            'uwbNativeUpdateRate': [0, 4, '1', True],
+            'uwbNativePeerCount': [0, -1, 2**31, '5', True],
+            'uwbNativeEvent': [secret, 'closed', 'CLOSED ', 4, True],
+            'uwbNativePeerIndex': [-1, 5, '4', True],
+            'uwbNativeElapsedSinceStartMs': [-1, 1001, '123', True],
+            'uwbNativeCloseRequested': [0, 1, 'false', secret],
+        }
+        for key, values in invalid.items():
+            for value in values + [None, [], {'raw': secret}]:
+                with self.subTest(key=key, value=value):
+                    safe = uwb_native_state(dict(raw, **{key: value}), 1000, 31)
+                    self.assertIsNone(safe[key])
+                    self.assertNotIn(secret, json.dumps(safe))
+        malformed = parse(native_uwb(uwbNativePeerIndex=True))
+        self.assertIsNone(malformed['uwbEvents'][0]['nativeObservation'])
+        self.assertEqual(malformed['uwbNativeSessions'][0]['eventCounts'], {})
+
+    def test_dump_unique_match_ignores_opened_map_and_does_not_match_time(self):
+        report = parse(native_uwb())
+        result = match_uwb_system(uwb_dump(uwb_metric(), uwb_metric(42)), report)
+        self.assertEqual(len(result['metrics']), 2)
+        self.assertEqual(result['matches'][0]['status'], 'UNIQUE_TAG_MATCH')
+        metric = result['matches'][0]['metrics'][0]
+        self.assertEqual(metric['rangingCount'], 61)
+        self.assertEqual(metric['validRangingCount'], 0)
+        self.assertEqual(metric['initTime'], '10-29 16:32:10.123')
+        self.assertEqual(result['timeBasis'], 'MONTH_DAY_WITHOUT_YEAR_OR_ZONE')
+        self.assertEqual(result['interpretation'], 'TAG_CORRELATION_ONLY')
+        unmatched = match_uwb_system(uwb_dump(uwb_metric(42)), report)
+        self.assertEqual(unmatched['matches'][0]['status'], 'UNMATCHED')
+        self.assertEqual(unmatched['matches'][0]['metrics'], [])
+        self.assertEqual(unmatched['metrics'][0]['initTime'], metric['initTime'])
+
+    def test_dump_reused_signed_unsigned_tag_is_ambiguous_even_for_identical_rows(self):
+        report = parse(native_uwb())
+        for rows in ((uwb_metric(), uwb_metric()), (uwb_metric(), uwb_metric(2**32-123456789))):
+            result = match_uwb_system(uwb_dump(*rows), report)
+            self.assertEqual(result['matches'][0]['status'], 'AMBIGUOUS_TAG_MATCH')
+            self.assertEqual(len(result['matches'][0]['metrics']), 2)
+
+    def test_dump_only_allows_metric_fields_and_masks_packages(self):
+        report = parse(native_uwb())
+        for package in ('android', 'com.teslamotors.tesla', 'com.google.android.gms', 'PRIVATE-PACKAGE'):
+            result = match_uwb_system(uwb_dump(uwb_metric(packageName=package,
+                privateKey='PRIVATE-KEY', uid='PRIVATE-UID', mac='PRIVATE-MAC')), report)
+            metric = result['metrics'][0]
+            self.assertEqual(metric['packageName'], package if package != 'PRIVATE-PACKAGE' else 'OTHER')
+            self.assertEqual(set(metric), {'sessionTag', 'initTime', 'packageName', 'activeDurationMs',
+                'rangingCount', 'validRangingCount', 'parallelSessionCount', 'channel', 'rangingIntervalMs'})
+            self.assertNotIn('PRIVATE-', json.dumps(result))
+        self.assertFalse(match_uwb_system(io.StringIO(uwb_metric()), report)['sectionObserved'])
+        nonmetric = match_uwb_system(uwb_dump('sessionId=-123456789, rangingCount=61\n'), report)
+        self.assertEqual(nonmetric['metrics'], [])
+        self.assertEqual(nonmetric['matches'][0]['status'], 'UNMATCHED')
+
+    def test_dump_rejects_invalid_ids_timestamps_and_numeric_types_without_raw_errors(self):
+        report = parse(native_uwb())
+        secret = 'SYNTHETIC-PRIVATE-DUMP'
+        for raw in (secret, 'true', '1.0', '-2147483649', '4294967296', '9'*100, '1, sessionId=2'):
+            result = match_uwb_system(uwb_dump(uwb_metric(sessionId=raw)), report)
+            self.assertEqual(result['metrics'], [])
+            self.assertEqual(result['matches'][0]['status'], 'UNMATCHED')
+            self.assertNotIn(secret, json.dumps(result))
+        for timestamp in (secret, '10-29 16:32:10.123 KST', '2026-10-29 16:32:10.123',
+                          '02-30 16:32:10.123', '10-29 24:00:00.000'):
+            result = match_uwb_system(uwb_dump(uwb_metric(initTime=timestamp)), report)
+            self.assertIsNone(result['metrics'][0]['initTime'])
+            self.assertNotIn(secret, json.dumps(result))
+        for key in ('activeDurationMs', 'rangingCount', 'validRangingCount',
+                    'parallelSessionCount', 'channel', 'rangingIntervalMs'):
+            for value in ('true', '1.0', '-1', '2147483648', secret, '{}'):
+                result = match_uwb_system(uwb_dump(uwb_metric(**{key: value})), report)
+                self.assertIsNone(result['metrics'][0][key])
+                self.assertNotIn(secret, json.dumps(result))
+        invalid_bytes = io.BytesIO(b'-- mRangingSessionList --\n\xffPRIVATE\n' +
+            ('initTime=' + 'PRIVATE' * MAX_LINE + '\n').encode())
+        result = match_uwb_system(invalid_bytes, report)
+        self.assertEqual([issue['code'] for issue in result['issues']], ['INVALID_UTF8', 'LINE_TOO_LONG'])
+        self.assertNotIn('PRIVATE', json.dumps(result))
+
+    def test_dump_cli_json_and_text_never_expose_ids_private_content_or_paths(self):
+        secret = 'SYNTHETIC-PRIVATE-DUMP'
+        log = (json.dumps(native_uwb()) + '\n').encode()
+        dump = uwb_dump(uwb_metric(packageName=secret, uid=secret, private=secret)).getvalue().encode()
+        for flags in ([], ['--json']):
+            streams = [io.BytesIO(log), io.BytesIO(dump)]
+            out, err = io.StringIO(), io.StringIO()
+            with patch('builtins.open', side_effect=streams), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(main(['input.jsonl', '--uwb-dump', 'dump.txt', *flags]), 0)
+            self.assertEqual(err.getvalue(), '')
+            self.assertNotIn(secret, out.getvalue())
+            self.assertNotIn('-123456789', out.getvalue())
+            if flags:
+                result = json.loads(out.getvalue())
+                self.assertEqual(result['uwbSystemMatches']['matches'][0]['status'], 'UNIQUE_TAG_MATCH')
+            else:
+                objects = [json.loads(line[line.index('{'):])
+                           for line in out.getvalue().splitlines() if '{' in line]
+                system = next(value for value in objects if 'interpretation' in value)
+                self.assertEqual(system['matches'][0]['status'], 'UNIQUE_TAG_MATCH')
+                self.assertEqual(system['interpretation'], 'TAG_CORRELATION_ONLY')
+        out, err = io.StringIO(), io.StringIO()
+        with patch('builtins.open', side_effect=[io.BytesIO(log), OSError(secret)]), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(main(['input.jsonl', '--uwb-dump', secret]), 2)
+        self.assertEqual(err.getvalue(), 'INPUT_READ_ERROR\n')
+        self.assertNotIn(secret, out.getvalue() + err.getvalue())
+
+
 class AnalysisTests(unittest.TestCase):
     def test_supported_schema_boundary_without_inventing_uwb_events(self):
-        report = parse(*(record(version=version) for version in range(1, 28)))
+        report = parse(*(record(version=version) for version in range(1, 40)))
         self.assertEqual(report['issues'], [])
-        self.assertEqual(report['counts']['analyzedRows'], 27)
+        self.assertEqual(report['counts']['analyzedRows'], 39)
         self.assertEqual(report['counts']['unsupportedRows'], 0)
-        self.assertEqual(set(report['versions']), {str(version) for version in range(1, 28)})
+        self.assertEqual(set(report['versions']), {str(version) for version in range(1, 40)})
         self.assertEqual(report['uwbEvents'], [])
         for version in range(1, 23):
             row = uwb()
             row['version'] = version
             self.assertEqual(parse(row)['uwbEvents'], [])
+
+    def test_v30_deadline_cause_is_version_gated_and_never_inferred_from_timeout(self):
+        for version in range(1, 31):
+            row = dict(uwb_gatt('TESLA_UWB_COMPLETE', uwbStage='TIMED_OUT',
+                uwbReason='DEADLINE_EXPIRED', uwbDeadlineCause='INITIAL_NEGOTIATION'),
+                version=version)
+            report = parse(row)
+            if version < 23:
+                self.assertEqual(report['uwbEvents'], [])
+            else:
+                expected = 'INITIAL_NEGOTIATION' if version == 30 else None
+                self.assertEqual(report['uwbEvents'][0]['state']['uwbDeadlineCause'], expected)
+                if version >= 25:
+                    self.assertEqual(report['uwbRxOperations'][0]['deadlineCause'], expected)
+                else:
+                    self.assertEqual(report['uwbRxOperations'], [])
+        for version in range(23, 31):
+            for reason in ('DEADLINE_EXPIRED', 'RANGING_TIMEOUT', 'GATT_WRITE_FAILED'):
+                report = parse(dict(uwb_gatt('TESLA_UWB_COMPLETE',
+                    uwbStage='TIMED_OUT', uwbReason=reason), version=version))
+                self.assertIsNone(report['uwbEvents'][0]['state']['uwbDeadlineCause'])
+                if report['uwbRxOperations']:
+                    self.assertIsNone(report['uwbRxOperations'][0]['deadlineCause'])
+
+    def test_v30_deadline_cause_has_exact_enum_allowlist_without_reason_or_raw_leaks(self):
+        causes = ('OPERATION', 'INITIAL_NEGOTIATION', 'PROTOCOL_STAGE', 'WRITE')
+        secret = 'PRIVATE-RAW-KEY-STS-VIN-MAC'
+        for cause in (*causes, None, 'UNKNOWN', 'operation', 'WRITE ', 'DEADLINE_EXPIRED',
+                      secret, True, 0, [], {'cause': secret}):
+            report = parse(dict(uwb_gatt('TESLA_UWB_COMPLETE', uwbDeadlineCause=cause,
+                uwbReason='DEADLINE_EXPIRED', rawDeadline=secret), version=30))
+            expected = cause if type(cause) is str and cause in causes else None
+            point, = report['uwbEvents']
+            self.assertEqual(point['state']['uwbDeadlineCause'], expected)
+            self.assertEqual(report['uwbRxOperations'][0]['deadlineCause'], expected)
+            self.assertEqual(point['state']['uwbReason'], 'DEADLINE_EXPIRED')
+            self.assertFalse(point['newDistanceReceived'])
+            self.assertNotIn(secret, json.dumps(report, allow_nan=False))
+            self.assertNotIn('rawDeadline', json.dumps(report, allow_nan=False))
+        for cause in causes:
+            point, = parse(dict(uwb_gatt(uwbReason=cause), version=30))['uwbEvents']
+            self.assertIsNone(point['state']['uwbReason'])
+            self.assertIsNone(point['state']['uwbDeadlineCause'])
+
+    def test_v30_summary_preserves_first_observed_cause_without_crossing_operation(self):
+        rows = [
+            dict(uwb_gatt(), version=30),
+            dict(uwb_gatt('TESLA_UWB_COMPLETE', 1, uwbReason='DEADLINE_EXPIRED',
+                uwbDeadlineCause='WRITE'), version=30),
+            dict(uwb_gatt('TESLA_UWB_COMPLETE', 2, uwbReason='GATT_WRITE_FAILED',
+                uwbDeadlineCause='OPERATION'), version=30),
+            dict(uwb_gatt('TESLA_UWB_STARTED', 3,
+                uwbGattOperationStartedElapsedMs=1003), version=30),
+        ]
+        report = parse(*rows)
+        self.assertEqual([op['deadlineCause'] for op in report['uwbRxOperations']], ['WRITE', None])
+        self.assertEqual([point['state']['uwbReason'] for point in report['uwbEvents']],
+            [None, 'DEADLINE_EXPIRED', 'GATT_WRITE_FAILED', None])
+        self.assertTrue(all(not point['newDistanceReceived'] for point in report['uwbEvents']))
+        self.assertTrue(all(op['observedEvents']['protocol'] == 0 for op in report['uwbRxOperations']))
+
+    def test_v30_deadline_cause_is_available_in_cli_json_and_sanitized_text(self):
+        rows = [dict(uwb_gatt('TESLA_UWB_COMPLETE', uwbReason='DEADLINE_EXPIRED',
+                    uwbDeadlineCause='INITIAL_NEGOTIATION'), version=30),
+                dict(uwb_gatt('TESLA_UWB_COMPLETE', 1, uwbReason='DEADLINE_EXPIRED',
+                    uwbDeadlineCause='PRIVATE-RAW-KEY'), version=29)]
+        payload = ''.join(json.dumps(row)+'\n' for row in rows).encode('utf-8')
+        for args in (['synthetic-input.jsonl'], ['synthetic-input.jsonl', '--json']):
+            out = io.StringIO()
+            with patch('builtins.open', return_value=io.BytesIO(payload)), contextlib.redirect_stdout(out):
+                self.assertEqual(main(args), 0)
+            text = out.getvalue()
+            self.assertNotIn('PRIVATE-RAW-KEY', text)
+            if '--json' in args:
+                report = json.loads(text)
+                self.assertEqual([point['state']['uwbDeadlineCause'] for point in report['uwbEvents']],
+                    ['INITIAL_NEGOTIATION', None])
+                self.assertEqual(report['uwbRxOperations'][0]['deadlineCause'], 'INITIAL_NEGOTIATION')
+            else:
+                points = [json.loads(line[line.index('{'):]) for line in text.splitlines()
+                    if 'GATT 현재 관측 ' in line]
+                self.assertEqual([point['uwbDeadlineCause'] for point in points],
+                    ['INITIAL_NEGOTIATION', None])
+
+    def test_v29_ignored_rx_is_version_gated_and_rejects_near_miss_enums(self):
+        state = {'uwbRxStep': 'IGNORED', 'uwbRxDisposition': 'RESPONSE_BEFORE_START'}
+        for version in range(1, 31):
+            with self.subTest(version=version):
+                safe = uwb_rx_state(state, 1000, version)
+                for key, value in state.items():
+                    self.assertEqual(safe[key], value if version >= 29 else None)
+        for key in state:
+            for value in ('ignored', 'IGNORED ', 'RESPONSE_BEFORE_START ',
+                          'response_before_start', 'PRIVATE-RAW-KEY', True, 0, [], {}):
+                safe = uwb_rx_state({key: value}, 1000, 29)
+                self.assertIsNone(safe[key])
+        # Each new literal remains invalid in the other field.
+        safe = uwb_rx_state(dict(uwbRxStep='RESPONSE_BEFORE_START',
+            uwbRxDisposition='IGNORED'), 1000, 29)
+        self.assertIsNone(safe['uwbRxStep'])
+        self.assertIsNone(safe['uwbRxDisposition'])
+
+    def test_v29_ignored_rx_counts_once_without_refreshing_past_zero_distance(self):
+        protocol = dict(uwb_rx(uwbGattEvent='PROTOCOL', uwbGattRxNotificationCount=1,
+            uwbRxFrameCount=1, uwbRxProtocolCount=1,
+            uwbRxStep='IGNORED', uwbRxDisposition='RESPONSE_BEFORE_START',
+            uwbRxProtocolReceivedElapsedMs=99, uwbRxProtocolObservedElapsedMs=900,
+            uwbStage='AUTHENTICATING', uwbBackendOpened=False, uwbValidDistanceCount=0,
+            uwbStartedPeerCount=0, uwbLastDistanceMeters=0.0,
+            uwbLastReceivedElapsedMs=90), version=29)
+        rows = [protocol,
+            dict(protocol, elapsedMs=1001, wallMs=BASE+1),
+            dict(protocol, event='TESLA_UWB_COMPLETE', elapsedMs=1002, wallMs=BASE+2)]
+        distance = dict(uwb(offset=3, uwbLastDistanceMeters=0.0,
+            uwbLastReceivedElapsedMs=1003), version=29)
+        report = parse(*rows, distance)
+        points = report['uwbEvents']
+        self.assertEqual([point['rxObservation']['newProtocol'] for point in points],
+            [True, False, False, False])
+        self.assertEqual([point['newDistanceReceived'] for point in points],
+            [False, False, False, True])
+        for point in points[:3]:
+            state = point['state']
+            self.assertEqual(state['uwbLastDistanceMeters'], 0.0)
+            self.assertEqual(state['uwbLastReceivedElapsedMs'], 90)
+            self.assertEqual(state['uwbValidDistanceCount'], 0)
+            self.assertIs(state['uwbBackendOpened'], False)
+            self.assertIsNone(state['uwbRxAuthEvidence'])
+            self.assertIsNone(state['uwbRxFiraKind'])
+        operation, = report['uwbRxOperations']
+        self.assertEqual(operation['counterTotals'], {'notification': 1, 'frame': 1, 'protocol': 1})
+        self.assertEqual(operation['observedEvents'], {'notification': 0, 'frame': None, 'protocol': 1})
+        self.assertEqual(operation['classifications']['uwbRxStep'], {'IGNORED': 1})
+        self.assertEqual(operation['classifications']['uwbRxDisposition'], {'RESPONSE_BEFORE_START': 1})
+        self.assertEqual(operation['classifications']['uwbRxAuthEvidence'], {'unobserved': 1})
+        self.assertEqual(operation['classifications']['uwbRxFiraKind'], {'unobserved': 1})
+        self.assertEqual(points[-1]['state']['uwbLastDistanceMeters'], 0.0)
+        self.assertEqual(points[-1]['state']['uwbLastReceivedElapsedMs'], 1003)
+
+    def test_v29_ignored_approach_does_not_create_authenticated_status_or_recovery(self):
+        for version in range(9, 31):
+            row = dict(approach(responseDisposition='RESPONSE_BEFORE_START',
+                rxFrameCount=1, rxProtocolCount=1, stage='HANDSHAKING'), version=version)
+            trial = parse(row)['trials'][0]
+            summary = trial['approachReadAttempts'][0]['lastSummary']
+            self.assertEqual(summary['responseDisposition'],
+                'RESPONSE_BEFORE_START' if version >= 29 else None)
+            self.assertFalse(summary['bodyVerified'])
+            self.assertFalse(summary['driveVerified'])
+            self.assertIsNone(summary['bodyReceivedElapsedMs'])
+            self.assertIsNone(summary['driveReceivedElapsedMs'])
+            self.assertEqual(trial['approachCompleteReadCount'], 0)
+            self.assertEqual(trial['approachRecoveryReadCount'], 0)
+        for value in ('RESPONSE_BEFORE_START ', 'response_before_start', 'IGNORED',
+                      'PRIVATE-RAW-KEY', True, 0, [], {}):
+            row = dict(approach(responseDisposition=value), version=29)
+            summary = parse(row)['trials'][0]['approachReadAttempts'][0]['lastSummary']
+            self.assertIsNone(summary['responseDisposition'])
+        report = parse(*(dict(row, version=29) for row in recovery_rows()))
+        self.assertEqual(report['issues'], [])
+        self.assertEqual(report['trials'][0]['approachRecoveryReadCount'], 1)
+
+    def test_v29_ignored_sidecar_is_not_handshake_result_or_phone_freshness(self):
+        for version in (28, 29, 30):
+            row = dict(navigation('SIDECAR_RX', disposition='RESPONSE_BEFORE_START',
+                vehicleFixPresent=False), version=version)
+            report = parse(row)
+            observation = report['navigationEvents'][0]['observation']
+            self.assertEqual(observation['disposition'],
+                'RESPONSE_BEFORE_START' if version >= 29 else None)
+            self.assertIsNone(observation['authEvidence'])
+            self.assertIs(observation['vehicleFixPresent'], False)
+            operation, = report['navigationOperations']
+            self.assertEqual(operation['kindCounts'], {'SIDECAR_RX': 1})
+            self.assertEqual(operation['phoneInputKindCounts'], {})
+            self.assertEqual(operation['presentationStatusCounts'], {})
+            self.assertIsNone(operation['lastResult'])
+            self.assertIsNone(operation['lastTerminal'])
+            self.assertEqual(report['uwbRxOperations'], [])
+        for value in ('RESPONSE_BEFORE_START ', 'response_before_start', 'IGNORED',
+                      'PRIVATE-RAW-KEY', True, 0, [], {}):
+            row = dict(navigation('SIDECAR_RX', disposition=value), version=29)
+            self.assertIsNone(parse(row)['navigationEvents'][0]['observation']['disposition'])
+
+    def test_v32_navigation_invalid_time_remains_distinct_in_reports(self):
+        rows = [dict(row, version=32) for row in (
+            navigation('DISPLAY_STATUS_CHANGED', status='VEHICLE_LOCATION_TIME_INVALID'),
+            navigation('SOURCE_STOPPED', 1, reason='VEHICLE_FIX_TIME_INVALID', collecting=False),
+            navigation('RESULT', 2, reason='LOCATION_STATE_TIME_INVALID', vehicleFixPresent=False))]
+        report = parse(*rows)
+        self.assertEqual(report['issues'], [])
+        operation, = report['navigationOperations']
+        self.assertEqual(operation['presentationStatusCounts'], {'VEHICLE_LOCATION_TIME_INVALID': 1})
+        self.assertEqual(operation['phoneInputKindCounts'], {'SOURCE_STOPPED': 1})
+        self.assertEqual(report['navigationEvents'][1]['observation']['reason'], 'VEHICLE_FIX_TIME_INVALID')
+        self.assertIs(report['navigationEvents'][1]['observation']['collecting'], False)
+        self.assertEqual(operation['lastResult']['observation']['reason'], 'LOCATION_STATE_TIME_INVALID')
+        self.assertIs(operation['lastResult']['observation']['vehicleFixPresent'], False)
+        self.assertEqual(report['uwbEvents'], [])
+        payload = ''.join(json.dumps(row)+'\n' for row in rows).encode()
+        for flags in ([], ['--json']):
+            out = io.StringIO()
+            with patch('builtins.open', return_value=io.BytesIO(payload)), contextlib.redirect_stdout(out):
+                self.assertEqual(main(['synthetic-input.jsonl', *flags]), 0)
+            if flags:
+                self.assertEqual(json.loads(out.getvalue()), report)
+            else:
+                for value in ('VEHICLE_LOCATION_TIME_INVALID', 'VEHICLE_FIX_TIME_INVALID',
+                              'LOCATION_STATE_TIME_INVALID'):
+                    self.assertIn(value, out.getvalue())
+
+    def test_pre_v32_navigation_does_not_accept_new_time_classifications(self):
+        for version in range(28, 32):
+            for reason in ('VEHICLE_FIX_TIME_INVALID', 'LOCATION_STATE_TIME_INVALID'):
+                with self.subTest(version=version, reason=reason):
+                    row = dict(navigation('DISPLAY_STATUS_CHANGED',
+                        status='VEHICLE_LOCATION_TIME_INVALID', reason=reason), version=version)
+                    report = parse(row)
+                    observation, = [point['observation'] for point in report['navigationEvents']]
+                    self.assertIsNone(observation['status'])
+                    self.assertIsNone(observation['reason'])
+                    self.assertEqual(report['navigationOperations'][0]['presentationStatusCounts'],
+                        {'unobserved': 1})
+
+    def test_navigation_expiry_is_not_reclassified_as_invalid_time(self):
+        for version in range(28, 33):
+            with self.subTest(version=version):
+                rows = [dict(row, version=version) for row in (
+                    navigation('DISPLAY_STATUS_CHANGED', status='VEHICLE_LOCATION_STALE'),
+                    navigation('SOURCE_STOPPED', 1, reason='VEHICLE_FIX_EXPIRED', collecting=False),
+                    navigation('RESULT', 2, reason='LOCATION_FIX_TIME_FUTURE', vehicleFixPresent=False))]
+                report = parse(*rows)
+                operation, = report['navigationOperations']
+                self.assertEqual(operation['presentationStatusCounts'], {'VEHICLE_LOCATION_STALE': 1})
+                self.assertEqual(report['navigationEvents'][1]['observation']['reason'], 'VEHICLE_FIX_EXPIRED')
+                self.assertEqual(operation['lastResult']['observation']['reason'], 'LOCATION_FIX_TIME_FUTURE')
+                for value in ('VEHICLE_LOCATION_TIME_INVALID', 'VEHICLE_FIX_TIME_INVALID',
+                              'LOCATION_STATE_TIME_INVALID'):
+                    self.assertNotIn(value, json.dumps(report))
+
+    def test_v28_navigation_exact_allowlist_and_context_without_raw_values(self):
+        secret = 'SYNTHETIC-PRIVATE-GPS-HEADING-VIN-ADDRESS-UUID-TOKEN-EXCEPTION'
+        row = navigation('SIDECAR_RX', reason='LOCATION_PROTOCOL_INVALID',
+            status='WAITING_FOR_VEHICLE_LOCATION', disposition='ACK_WAITING',
+            authEvidence='ACKNOWLEDGED', candidate=0, attempt=0,
+            **{key: index % 2 == 0 for index, key in enumerate(NAVIGATION_BOOL_KEYS)})
+        expected = dict(row['navigationObservation'])
+        for key in ('latitude', 'longitude', 'gpsTime', 'heading', 'vin', 'address',
+                    'uuid', 'key', 'token', 'exception', 'rawPayload', secret):
+            row['navigationObservation'][key] = secret
+        row['state'] = {'navigationObservation': {'exception': secret}, 'latitude': secret}
+        row['exception'] = secret
+        report = parse(row)
+        self.assertEqual(report['issues'], [])
+        point, = report['navigationEvents']
+        self.assertEqual(point, dict(line=1, processId=P, segment=1, trialId=T,
+            recordWallMs=BASE, recordElapsedMs=1000, clockAlignmentWarning=False,
+            event='VEHICLE_NAVIGATION_OBSERVATION', observation=expected))
+        self.assertEqual(set(point['observation']), set(NAVIGATION_KEYS))
+        self.assertNotIn(secret, json.dumps(report, allow_nan=False))
+        operation, = report['navigationOperations']
+        self.assertTrue(operation['scopeComplete'])
+        self.assertEqual(operation['kindCounts'], {'SIDECAR_RX': 1})
+        self.assertEqual(report['uwbEvents'], [])
+
+    def test_v28_navigation_requires_exact_version_event_and_typed_object(self):
+        rows = [dict(navigation(), version=version) for version in range(1, 28)]
+        rows += [dict(navigation(offset=index), event=event)
+                 for index, event in enumerate(('BLE_EVIDENCE', 'TESLA_UWB_AUTHENTICATED',
+                     'VEHICLE_NAVIGATION_OBSERVATION_EXTRA', None, [], {}))]
+        rows += [dict(navigation(), navigationObservation=value)
+                 for value in (None, False, 1, 'PRIVATE-RAW', [], {})]
+        rows += [dict(navigation(), processId='PRIVATE-RAW')]
+        report = parse(*rows)
+        self.assertEqual(report['navigationEvents'], [])
+        self.assertEqual(report['navigationOperations'], [])
+        self.assertNotIn('PRIVATE-RAW', json.dumps(report))
+        # A typed sidecar payload on primary UWB RX must not be reclassified.
+        primary = uwb_rx_observation(uwbGattEvent='PROTOCOL', uwbRxProtocolCount=1,
+            uwbRxDisposition='FIRA_REQUEST', uwbRxStep='UWB_INPUT')
+        injected = dict(primary, version=28,
+            navigationObservation=navigation()['navigationObservation'])
+        baseline = parse(dict(primary, version=28))
+        report = parse(injected)
+        self.assertEqual(report['uwbEvents'], baseline['uwbEvents'])
+        self.assertEqual(report['uwbRxOperations'], baseline['uwbRxOperations'])
+        self.assertEqual(report['navigationEvents'], [])
+
+    def test_v28_navigation_rejects_invalid_enums_and_boolean_integer_coercion(self):
+        for value in (True, False, -1, 1.0, '1', 2**63, [], {}):
+            with self.subTest(number=value):
+                safe = parse(navigation(candidate=value, attempt=value))['navigationEvents'][0]['observation']
+                self.assertIsNone(safe['candidate'])
+                self.assertIsNone(safe['attempt'])
+        for value in (0, 1, 2**63-1):
+            safe = parse(navigation(candidate=value, attempt=value))['navigationEvents'][0]['observation']
+            self.assertEqual((safe['candidate'], safe['attempt']), (value, value))
+        for value in (None, 'SIDECAR_STARTED ', 'sidecar_started', 'UNKNOWN',
+                      'PRIVATE-RAW-ENUM', True, 1, [], {}):
+            self.assertEqual(parse(navigation(kind=value))['navigationEvents'], [])
+        for key in ('reason', 'status', 'disposition', 'authEvidence'):
+            for value in ('PRIVATE-RAW-ENUM', '', 'unknown', True, 1, [], {}):
+                with self.subTest(key=key, value=value):
+                    report = parse(navigation(**{key: value}))
+                    self.assertIsNone(report['navigationEvents'][0]['observation'][key])
+                    self.assertNotIn('PRIVATE-RAW-ENUM', json.dumps(report))
+            self.assertEqual(parse(navigation(**{key: 'UNKNOWN'}))['navigationEvents'][0]['observation'][key],
+                'UNKNOWN')
+        for value in (0, 1, 'true', [], {}, None):
+            safe = parse(navigation(**dict.fromkeys(NAVIGATION_BOOL_KEYS, value)))['navigationEvents'][0]['observation']
+            self.assertTrue(all(safe[key] is None for key in NAVIGATION_BOOL_KEYS))
+        for value in (True, False):
+            safe = parse(navigation(**dict.fromkeys(NAVIGATION_BOOL_KEYS, value)))['navigationEvents'][0]['observation']
+            self.assertTrue(all(safe[key] is value for key in NAVIGATION_BOOL_KEYS))
+
+    def test_v28_navigation_exact_protocol_literals_and_skipped_before_start(self):
+        for disposition in ('ROUTE_MISMATCH', 'STATUS_INCOMPLETE'):
+            row = navigation('SIDECAR_RX', disposition=disposition,
+                authEvidence='REQUEST_REJECTED', reason='LOCATION_REQUEST_REJECTED')
+            safe = parse(row)['navigationEvents'][0]['observation']
+            self.assertEqual(safe['disposition'], disposition)
+            self.assertEqual(safe['authEvidence'], 'REQUEST_REJECTED')
+            self.assertEqual(safe['reason'], 'LOCATION_REQUEST_REJECTED')
+        report = parse(
+            navigation('SIDECAR_SKIPPED', reason='OPERATION_ENDED_BEFORE_START'),
+            navigation('TERMINAL', 1, reason='OWNER_ENDED'))
+        operation, = report['navigationOperations']
+        self.assertEqual(operation['kindCounts'], {'SIDECAR_SKIPPED': 1, 'TERMINAL': 1})
+        self.assertIsNone(operation['lastResult'])
+        self.assertEqual(report['navigationEvents'][0]['observation']['reason'],
+            'OPERATION_ENDED_BEFORE_START')
+        self.assertEqual(operation['lastTerminal']['observation']['reason'], 'OWNER_ENDED')
+
+    def test_v28_navigation_attempt_result_phone_input_and_presentation_stay_separate(self):
+        rows = [
+            approach('TESLA_APPROACH_READ_STARTED', stage='PAUSING_SCAN'),
+            navigation('SIDECAR_STARTED', 1),
+            navigation('HANDSHAKE_TX_COMPLETE', 2),
+            navigation('SIDECAR_RX', 3, disposition='ACK_WAITING', authEvidence='ACKNOWLEDGED',
+                requestUuidMatches=True, toRouteMatches=True),
+            navigation('HANDSHAKE_ACCEPTED', 4),
+            navigation('QUERY_TX_COMPLETE', 5),
+            navigation('PHONE_LOCATION_FIRST_VALID', 6, collecting=True),
+            navigation('HEADING_FIRST_VALID', 7),
+            navigation('DISPLAY_STATUS_CHANGED', 8, status='WAITING_FOR_VEHICLE_LOCATION'),
+            navigation('RESULT', 9, reason='LOCATION_COORDINATES_MISSING', vehicleFixPresent=False),
+            navigation('TERMINAL', 10, reason='ATTEMPT_ENDED'),
+            navigation('SIDECAR_STARTED', 11, attempt=2),
+            navigation('RESULT', 12, attempt=2, vehicleFixPresent=True),
+            navigation('DISPLAY_STATUS_CHANGED', 13, attempt=2, status='DISTANCE_ONLY'),
+            navigation('SOURCE_STOPPED', 14, attempt=2, cleanupSucceeded=False),
+            navigation('TERMINAL', 15, attempt=2, reason='CLEANUP_FAILED'),
+        ]
+        report = parse(*rows)
+        first, second = report['navigationOperations']
+        read, = report['trials'][0]['approachReadAttempts']
+        self.assertEqual((first['processId'], first['segment'], first['candidate'], first['attempt']),
+            (read['processId'], read['segment'], read['candidate'], read['attempt']))
+        self.assertEqual(first['trialId'], report['trials'][0]['trialId'])
+        self.assertEqual(first['kindCounts'], {kind: 1 for kind in (
+            'SIDECAR_STARTED', 'HANDSHAKE_TX_COMPLETE', 'SIDECAR_RX', 'HANDSHAKE_ACCEPTED',
+            'QUERY_TX_COMPLETE', 'PHONE_LOCATION_FIRST_VALID', 'HEADING_FIRST_VALID',
+            'DISPLAY_STATUS_CHANGED', 'RESULT', 'TERMINAL')})
+        self.assertEqual(first['phoneInputKindCounts'],
+            {'PHONE_LOCATION_FIRST_VALID': 1, 'HEADING_FIRST_VALID': 1})
+        self.assertEqual(first['presentationStatusCounts'], {'WAITING_FOR_VEHICLE_LOCATION': 1})
+        self.assertFalse(first['lastResult']['observation']['vehicleFixPresent'])
+        self.assertEqual(first['lastResult']['recordElapsedMs'], 1009)
+        self.assertEqual(first['lastTerminal']['observation']['reason'], 'ATTEMPT_ENDED')
+        self.assertEqual(second['attempt'], 2)
+        self.assertNotIn('HANDSHAKE_ACCEPTED', second['kindCounts'])
+        self.assertTrue(second['lastResult']['observation']['vehicleFixPresent'])
+        self.assertIsNone(second['lastResult']['observation']['collecting'])
+        self.assertEqual(second['phoneInputKindCounts'], {'SOURCE_STOPPED': 1})
+        self.assertEqual(second['presentationStatusCounts'], {'DISTANCE_ONLY': 1})
+        self.assertEqual(second['lastTerminal']['observation']['reason'], 'CLEANUP_FAILED')
+        self.assertEqual(report['uwbEvents'], [])
+
+    def test_v28_navigation_scope_respects_trial_process_clock_and_unknown_identity(self):
+        rows = [navigation('RESULT', vehicleFixPresent=True),
+            navigation(offset=1, candidate=2),
+            navigation(offset=2, attempt=2),
+            dict(navigation(offset=3), trialId=U),
+            dict(navigation(offset=4), processId=Q),
+            dict(navigation(offset=5), processId=Q, elapsedMs=10),
+            dict(navigation(offset=6, candidate=None), processId=Q, elapsedMs=11),
+            dict(navigation(offset=7, candidate=None), processId=Q, elapsedMs=12),
+            dict(navigation(offset=8, attempt=None), processId=Q, elapsedMs=13),
+            dict(navigation(offset=9), processId=Q, trialId=None, elapsedMs=14)]
+        report = parse(*rows)
+        operations = report['navigationOperations']
+        self.assertEqual(len(operations), len(rows))
+        self.assertEqual([op['scopeComplete'] for op in operations],
+            [True, True, True, True, True, True, False, False, False, True])
+        self.assertEqual([op['segment'] for op in operations], [1, 1, 1, 1, 2, 3, 3, 3, 3, 3])
+        self.assertTrue(all(op['lastResult'] is None for op in operations[1:]))
+        self.assertIsNone(operations[-1]['trialId'])
+        excluded = parse(*rows, exclude=(T,))
+        self.assertEqual(len(excluded['navigationEvents']), 2)
+        self.assertEqual([point['trialId'] for point in excluded['navigationEvents']], [U, None])
+
+    def test_v28_navigation_cli_json_and_text_keep_privacy_and_no_success_promotion(self):
+        secret = 'SYNTHETIC-PRIVATE-NAVIGATION-EXCEPTION'
+        rows = [navigation('HANDSHAKE_TX_COMPLETE'),
+            navigation('HANDSHAKE_ACCEPTED', 1, authEvidence='HMAC_MISMATCH'),
+            navigation('QUERY_TX_COMPLETE', 2),
+            navigation('PHONE_INPUT_UNAVAILABLE', 3, reason='HEADING_UNRELIABLE'),
+            navigation('DISPLAY_STATUS_CHANGED', 4, status='WAITING_FOR_PHONE_LOCATION'),
+            navigation('RESULT', 5, reason='LOCATION_TIMEOUT', vehicleFixPresent=False,
+                rawCoordinates=secret, heading=secret, gpsTime=secret, exception=secret),
+            navigation('TERMINAL', 6, reason='ATTEMPT_ENDED')]
+        payload = ''.join(json.dumps(row)+'\n' for row in rows).encode()
+        for json_output in (False, True):
+            out = io.StringIO()
+            args = ['synthetic-input.jsonl'] + (['--json'] if json_output else [])
+            with patch('builtins.open', return_value=io.BytesIO(payload)), contextlib.redirect_stdout(out):
+                self.assertEqual(main(args), 0)
+            self.assertNotIn(secret, out.getvalue())
+            if json_output:
+                report = json.loads(out.getvalue())
+                self.assertEqual(len(report['navigationEvents']), 7)
+                self.assertEqual(report['uwbEvents'], [])
+                self.assertEqual(report['navigationOperations'][0]['lastResult']['observation']['reason'],
+                    'LOCATION_TIMEOUT')
+            else:
+                text = out.getvalue()
+                self.assertIn('LOCATION_TIMEOUT', text)
+                self.assertIn('HMAC_MISMATCH', text)
+
+    def test_v28_navigation_absence_does_not_mean_not_attempted_or_permission_denied(self):
+        for version in (1, 27, 28):
+            row = dict(record(version=version), navigationObservation=navigation()['navigationObservation'])
+            report = parse(row)
+            self.assertEqual(report['navigationEvents'], [])
+            self.assertEqual(report['navigationOperations'], [])
+
+    def test_navigation_schema_updates_keep_existing_approach_recovery_interpretation(self):
+        for version in (28, 31, 32):
+            report = parse(*(dict(row, version=version) for row in recovery_rows()))
+            self.assertEqual(report['issues'], [])
+            self.assertEqual(report['trials'][0]['approachRecoveryReadCount'], 1)
 
     def test_v24_manual_uwb_keeps_null_trial_and_record_context_before_trial_filter(self):
         row = uwb()
@@ -170,11 +2057,10 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(report['trials'], [])
         self.assertEqual(report['counts']['unassignedRows'], 1)
         point = report['uwbEvents'][0]
-        self.assertEqual({key: point[key] for key in
-            ('line', 'processId', 'segment', 'trialId', 'recordWallMs', 'recordElapsedMs', 'event')},
-            dict(line=1, processId=P, segment=1, trialId=None, recordWallMs=BASE,
-                recordElapsedMs=1000, event='TESLA_UWB_DISTANCE_RECEIVED'))
-        self.assertEqual(point['state'], row['state'])
+        self.assertIsNone(point['trialId'])
+        self.assertEqual(point['processId'], P)
+        self.assertEqual(point['recordWallMs'], BASE)
+        self.assertEqual(point['recordElapsedMs'], 1000)
         self.assertTrue(point['newDistanceReceived'])
         assigned = dict(uwb(offset=10), trialId=T)
         excluded = parse(row, assigned, exclude=(T,))
@@ -195,7 +2081,6 @@ class AnalysisTests(unittest.TestCase):
         report = parse(current, legacy, legacy_with_unknown_fields)
         self.assertEqual(report['issues'], [])
         self.assertEqual(len(report['uwbEvents']), 3)
-        self.assertEqual(report['uwbEvents'][0]['state'], current['state'])
         for point in report['uwbEvents'][1:]:
             self.assertTrue(point['newDistanceReceived'])
             self.assertEqual(point['state']['uwbLastDistanceMeters'], 1.25)
@@ -249,7 +2134,7 @@ class AnalysisTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 row = uwb(uwbLastAzimuthRaw=raw, uwbLastElevationRaw=raw)
                 point = parse(row)['uwbEvents'][0]
-                self.assertEqual(point['state'], row['state'])
+                self.assertEqual(json.dumps(point['state']['uwbLastElevationRaw']), json.dumps(raw))
                 self.assertEqual(json.dumps(point['state']['uwbLastAzimuthRaw']), json.dumps(raw))
                 self.assertTrue(point['newDistanceReceived'])
         for raw in (None, True, False, 0, 1, -1, 2**63, '1.25', float('inf'),
@@ -312,8 +2197,19 @@ class AnalysisTests(unittest.TestCase):
             uwbLastElevationRaw=-0.75, uwbLastElevationConfidence=None)
         report = parse(first, second, third)
         self.assertEqual(report['issues'], [])
-        self.assertEqual([point['state'] for point in report['uwbEvents']],
-            [row['state'] for row in (first, second, third)])
+        missing = report['uwbEvents'][1]['state']
+        self.assertEqual(missing['uwbLastPeerIndex'], 1)
+        self.assertEqual(missing['uwbLastDistanceMeters'], 2.5)
+        for key in ('uwbLastAzimuthRaw', 'uwbLastAzimuthConfidence',
+                    'uwbLastElevationRaw', 'uwbLastElevationConfidence'):
+            self.assertIsNone(missing[key])
+        partial = report['uwbEvents'][2]['state']
+        self.assertEqual(partial['uwbLastPeerIndex'], 1)
+        self.assertEqual(partial['uwbLastDistanceMeters'], 3.0)
+        self.assertIsNone(partial['uwbLastAzimuthRaw'])
+        self.assertEqual(partial['uwbLastAzimuthConfidence'], 0)
+        self.assertEqual(partial['uwbLastElevationRaw'], -0.75)
+        self.assertIsNone(partial['uwbLastElevationConfidence'])
         self.assertTrue(all(point['newDistanceReceived'] for point in report['uwbEvents']))
 
     def test_uwb_integer_enums_counters_and_closed_sdk_reason_are_typed(self):
@@ -371,6 +2267,23 @@ class AnalysisTests(unittest.TestCase):
             self.assertFalse(point['newDistanceReceived'])
             self.assertIsNone(point['state']['uwbLastDistanceMeters'])
 
+    def test_initial_device_info_completion_cannot_become_distance_or_protocol_receipt(self):
+        event = 'TESLA_UWB_INITIAL_DEVICE_INFO_SENT'
+        for version in range(1, 28):
+            self.assertEqual(parse(dict(uwb(event), version=version))['uwbEvents'], [])
+        receipt = dict(uwb_rx_observation(uwbGattEvent='PROTOCOL', uwbRxProtocolCount=1,
+            uwbRxStep='WAITING', uwbRxInputKind='ENCRYPTED_RESPONSE', uwbRxAead='VERIFIED',
+            uwbRxDisposition='FIRA_UNRECOGNIZED'), version=28)
+        completion = dict(uwb(event, offset=1), version=28)
+        completion['state'].update(receipt['state'])
+        report = parse(receipt, completion)
+        self.assertEqual(report['issues'], [])
+        self.assertEqual([point['event'] for point in report['uwbEvents']],
+            ['TESLA_UWB_GATT_OBSERVATION', event])
+        self.assertFalse(report['uwbEvents'][1]['newDistanceReceived'])
+        self.assertFalse(report['uwbEvents'][1]['rxObservation']['newProtocol'])
+        self.assertEqual(report['uwbRxOperations'][0]['observedEvents']['protocol'], 1)
+
     def test_uwb_repeated_past_snapshots_only_mark_distance_event_as_new(self):
         events = ('TESLA_UWB_DISTANCE_RECEIVED', 'TESLA_UWB_PEER_STARTED',
             'TESLA_UWB_BACKEND_OPENED', 'TESLA_UWB_CLEANING_UP', 'TESLA_UWB_COMPLETE',
@@ -384,13 +2297,10 @@ class AnalysisTests(unittest.TestCase):
             [True] + [False] * (len(events) - 1))
         self.assertTrue(all(point['state']['uwbLastDistanceMeters'] == 1.25
             for point in report['uwbEvents']))
-        self.assertTrue(all(point['state'] == uwb(uwbClosedReason=999)['state']
-            for point in report['uwbEvents']))
 
-    def test_v23_and_v24_keep_v22_ble_and_recognition_results_unchanged(self):
+    def test_v22_to_v25_keep_ble_counts_when_recognition_coexists(self):
         payload = {'candidates': [{'text': '취소', 'confidence': 0.9}],
             'policy': {'accepted': False, 'reason': 'FRUNK_VOICE_CANCELED'}}
-        reports = []
         for version in (22, 23, 24, 25):
             report = parse(record(version=version, event='BLE_FIELD_TRIAL_FINISHED',
                 bleTrial={'attempt': 1, 'status': 'COMPLETE', 'notificationCount': 0},
@@ -401,13 +2311,6 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual(report['trials'][0]['completeAttemptCount'], 1)
             self.assertEqual(report['trials'][0]['candidateTypedCount'], 1)
             self.assertEqual(report['uwbEvents'], [])
-            # 버전 표식 이외에는 기존 소비자 보고서 계약이 동일해야 한다.
-            report.pop('versions')
-            report['trials'][0].pop('versions')
-            reports.append(report)
-        self.assertEqual(reports[0], reports[1])
-        self.assertEqual(reports[0], reports[2])
-        self.assertEqual(reports[0], reports[3])
 
     def test_uwb_json_cli_exports_sanitized_typed_state_and_fixed_event_only(self):
         rows = [uwb(uwbLastDistanceMeters=float('inf'), uwbOpenFailedReason=999,
@@ -433,35 +2336,12 @@ class AnalysisTests(unittest.TestCase):
                     'uwbLastElevationRaw', 'uwbLastElevationConfidence',
                     'uwbAzimuthSupported', 'uwbElevationSupported'):
             self.assertIsNone(point['state'][key])
-        self.assertEqual(report['uwbEvents'][1]['state'], rows[2]['state'])
-        self.assertEqual(report['uwbEvents'][2]['state'], rows[3]['state'])
         self.assertEqual([point['newDistanceReceived'] for point in report['uwbEvents']],
             [False, True, False])
         self.assertNotIn('private-', out.getvalue())
         self.assertNotIn('private-address', out.getvalue())
         self.assertNotIn('PRIVATE_VIN', out.getvalue())
 
-    def test_uwb_text_cli_keeps_same_sample_raw_observations_including_past_snapshots(self):
-        rows = [uwb(), uwb('TESLA_UWB_CAPABILITIES_RECEIVED', offset=1),
-            uwb('TESLA_UWB_PEER_STOPPED', offset=2), uwb('TESLA_UWB_COMPLETE', offset=3),
-            uwb(offset=4, uwbLastPeerIndex=1, uwbLastDistanceMeters=2.5,
-                uwbLastFrameworkTimestampMs=456, uwbLastReceivedElapsedMs=1004,
-                uwbLastAzimuthRaw=None, uwbLastAzimuthConfidence=None,
-                uwbLastElevationRaw=-0.75, uwbLastElevationConfidence=0)]
-        payload = ''.join(json.dumps(row)+'\n' for row in rows).encode('utf-8')
-        out = io.StringIO()
-        with patch('builtins.open', return_value=io.BytesIO(payload)), contextlib.redirect_stdout(out):
-            code = main(['synthetic-input.jsonl'])
-        self.assertEqual(code, 0)
-        objects = [json.loads(line[line.index('{'):])
-            for line in out.getvalue().splitlines() if '{' in line]
-        samples = [value for value in objects if 'uwbLastPeerIndex' in value]
-        keys = ('uwbLastPeerIndex', 'uwbLastDistanceMeters', 'uwbLastConfidence',
-            'uwbLastFrameworkTimestampMs', 'uwbLastReceivedElapsedMs',
-            'uwbLastAzimuthRaw', 'uwbLastAzimuthConfidence',
-            'uwbLastElevationRaw', 'uwbLastElevationConfidence',
-            'uwbAzimuthSupported', 'uwbElevationSupported')
-        self.assertEqual(samples, [{key: row['state'][key] for key in keys} for row in rows])
 
     def test_v25_gatt_keeps_raw_status_admission_and_completion_as_independent_observations(self):
         for status in (133, 8, 0, -9876, -(2**31), 2**31-1):
@@ -471,7 +2351,10 @@ class AnalysisTests(unittest.TestCase):
                         uwbGattConnectAccepted=accepted, uwbGattDescriptorRequestStatus=201,
                         uwbGattDescriptorCallbackStatus=0)
                     point = parse(row)['uwbEvents'][0]
-                    self.assertEqual(point['state'], row['state'])
+                    self.assertEqual(point['state']['uwbGattConnectionStatus'], status)
+                    self.assertEqual(point['state']['uwbGattConnectionState'], 0)
+                    self.assertEqual(point['state']['uwbGattDescriptorRequestStatus'], 201)
+                    self.assertEqual(point['state']['uwbGattDescriptorCallbackStatus'], 0)
                     self.assertIs(point['state']['uwbGattConnectAccepted'], accepted)
                     self.assertIs(point['state']['uwbGattConnectedObserved'], False)
                     self.assertEqual(point['state']['uwbGattRxNotificationCount'], 0)
@@ -561,16 +2444,17 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual(code, 0)
             if '--json' in args:
                 points = json.loads(out.getvalue())['uwbEvents']
-                self.assertEqual([point['state'] for point in points], [row['state'] for row in rows])
+                observations = [point['state'] for point in points]
                 self.assertTrue(all(not point['newDistanceReceived'] for point in points))
                 timings = [point['gattTimingMs'] for point in points]
             else:
                 objects = [json.loads(line[line.index('{'):])
                     for line in out.getvalue().splitlines() if '{' in line]
                 observations = [value for value in objects if 'uwbGattStage' in value]
-                self.assertEqual(observations, [{key: row['state'][key] for key in GATT_KEYS}
-                    for row in rows])
                 timings = [value for value in objects if 'operationElapsedMs' in value]
+            self.assertEqual([state['uwbGattConnectionStatus'] for state in observations], [133, 8, 0])
+            self.assertEqual([state['uwbGattConnectAccepted'] for state in observations], [False, True, None])
+            self.assertTrue(all(state['uwbGattConnectedObserved'] is False for state in observations))
             self.assertEqual([timing['snapshotAgeMs'] for timing in timings], [100, 101, 102])
             self.assertEqual([timing['connectCallElapsedMs'] for timing in timings], [10, 10, 10])
 
@@ -829,6 +2713,28 @@ class AnalysisTests(unittest.TestCase):
                 value if type(value) is str and value in ('CURRENT', 'PREVIOUS', 'UNMATCHED') else None)
             self.assertEqual(state['uwbRxBodyBytes'], 0)
             self.assertEqual(state['uwbRxBodyFields'], '')
+
+    def test_v28_preserves_v27_primary_protocol_body_and_correlation_summary(self):
+        for byte_count, status, fields, correlation in (
+            (0, 'COMPLETE', '', 'CURRENT'),
+            (2, 'COMPLETE', '1/0/1', 'PREVIOUS'),
+            (3, 'MALFORMED', '1/0/1', 'UNMATCHED'),
+            (18, 'TRUNCATED', ','.join(['1/0/1'] * 8), 'CURRENT'),
+        ):
+            with self.subTest(status=status, fields=fields, correlation=correlation):
+                protocol = uwb_rx_observation(uwbGattEvent='PROTOCOL',
+                    uwbGattRxNotificationCount=2, uwbRxFrameCount=1, uwbRxProtocolCount=1,
+                    uwbRxBodyBytes=byte_count, uwbRxBodyStatus=status,
+                    uwbRxBodyFields=fields, uwbRxRequestCorrelation=correlation)
+                old = parse(protocol)
+                new = parse(dict(protocol, version=28))
+                expected = dict(zip(RX_OBSERVATION_KEYS, (byte_count, status, fields, correlation)))
+                self.assertEqual({key: new['uwbEvents'][0]['state'][key]
+                    for key in RX_OBSERVATION_KEYS}, expected)
+                self.assertEqual(new['uwbEvents'], old['uwbEvents'])
+                self.assertEqual(new['uwbRxOperations'], old['uwbRxOperations'])
+                self.assertEqual(new['navigationEvents'], [])
+                self.assertEqual(new['issues'], [])
 
     def test_v27_shape_and_correlation_count_only_distinct_new_protocol_events(self):
         protocol = uwb_rx_observation(uwbGattEvent='PROTOCOL', uwbGattRxNotificationCount=2,
@@ -1112,7 +3018,7 @@ class AnalysisTests(unittest.TestCase):
                     self.assertIsNone(summary[key])
 
     def test_v19_recovery_and_independent_version_rounds_preserve_policy_boundaries(self):
-        for first_version, second_version in ((18, 18), (19, 19), (20, 20), (21, 21), (22, 22), (23, 23), (24, 24), (23, 24), (24, 23), (22, 23), (23, 22), (21, 22), (22, 21), (20, 21), (21, 20), (18, 20), (20, 19), (18, 19), (19, 18), (17, 17)):
+        for first_version, second_version in ((18, 18), (19, 19), (20, 20), (21, 21), (22, 22), (23, 23), (24, 24), (25, 25), (26, 26), (27, 27), (28, 28), (29, 29), (30, 30), (29, 30), (30, 29), (23, 24), (24, 23), (22, 23), (23, 22), (21, 22), (22, 21), (20, 21), (21, 20), (18, 20), (20, 19), (18, 19), (19, 18), (17, 17)):
             for second_start in (3699, 3700, 39700, 39701):
                 with self.subTest(versions=(first_version, second_version), start=second_start):
                     rows = recovery_rows(second_start=second_start)
@@ -2236,7 +4142,7 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(report['issues'][0]['code'], 'CLOCK_MISMATCH')
 
     def test_malformed_future_and_partial_do_not_hide_valid_rows(self):
-        text = '{bad}\n' + json.dumps(record(version=28))+'\n'+json.dumps(record())+'\n{"version":'
+        text = '{bad}\n' + json.dumps(record(version=40))+'\n'+json.dumps(record())+'\n{"version":'
         report = analyze(io.StringIO(text))
         self.assertEqual(report['counts']['analyzedRows'], 1)
         self.assertEqual(report['counts']['unsupportedRows'], 1)

@@ -2,7 +2,6 @@ package com.heytesla.app.vehicle.protocol
 
 import com.heytesla.app.vehicle.key.TeslaBleCredential
 import com.heytesla.app.vehicle.key.p256PublicKeyFromBytes
-import com.heytesla.app.vehicle.navigation.VehicleCoordinateObservation
 
 import com.google.protobuf.ByteString
 import com.tesla.generated.carserver.server.CarServer
@@ -22,21 +21,21 @@ import javax.crypto.spec.SecretKeySpec
 internal enum class TeslaBlePhase { WAITING_FOR_CARD, HANDSHAKING, READING_STATUS }
 
 internal enum class TeslaBleQuery {
-    BODY_STATUS, DRIVE_STATE, LOCATION_STATE;
+    BODY_STATUS, DRIVE_STATE;
 
     val verifiedEventCode: String
         get() = when (this) {
             BODY_STATUS -> "TESLA_KEY_STATUS_VERIFIED"
             DRIVE_STATE -> "TESLA_KEY_DRIVE_STATE_VERIFIED"
-            LOCATION_STATE -> "TESLA_KEY_LOCATION_STATE_VERIFIED"
         }
 }
 
-internal enum class TeslaBlePurpose { READ_ONLY, FRUNK_OPEN, UWB }
+internal enum class TeslaBlePurpose { READ_ONLY, FRUNK_OPEN, VEHICLE_WAKE }
 
 internal enum class TeslaFrunkReply { ACKNOWLEDGED, REJECTED, UNCONFIRMED }
+internal enum class TeslaWakeReply { ACKNOWLEDGED, REJECTED, UNCONFIRMED, NOMINAL_ACK }
 
-internal enum class TeslaGear { P, R, N, D, UNKNOWN }
+enum class TeslaGear { P, R, N, D, UNKNOWN }
 
 /** 인증된 읽기 결과일 뿐 차량 감지·주차 안전허가·제어 권한이 아니다. */
 internal data class TeslaDriveState(
@@ -51,13 +50,17 @@ internal data class TeslaReadOnlyStatus(
     val driveState: TeslaDriveState? = null,
     /** 이번 BODY 수신 시점의 원 enum code. DRIVE 준비 여부나 제어 허가가 아니다. */
     val bodyVehicleSleepStatus: Int? = null,
+    /** AEAD 검증을 통과한 BODY frame의 원 ingress 시각. 처리 시각이나 HELLO 시각이 아니다. */
+    val bodyReceivedAtElapsedRealtime: Long? = null,
+    /** 상관 일치·AEAD 검증된 DRIVE의 명시 INVALID만 표시한다. UNKNOWN 전체나 진단 문자열이 아니다. */
+    val driveShiftStateInvalid: Boolean = false,
 )
 
 /**
  * 차량 인증 대기·실패의 typed 근거. eventCode는 고정 literal이며 화면/로그 이벤트 이름이다.
  * 실패 이유 문구가 아니라 이 값으로 원인을 구분한다. 문구는 조정될 수 있다.
  */
-internal enum class TeslaBleAuthEvidence(val eventCode: String) {
+enum class TeslaBleAuthEvidence(val eventCode: String) {
     ACKNOWLEDGED("TESLA_KEY_AUTH_ACKNOWLEDGED"),
     REQUEST_REJECTED("TESLA_KEY_AUTH_REQUEST_REJECTED"),
     /** 인증 전 응답이 미등록을 주장한 경우. 차량 신원이나 실제 미등록을 증명하지 않는다. */
@@ -74,21 +77,23 @@ internal enum class TeslaBleAuthEvidence(val eventCode: String) {
 }
 
 internal sealed interface TeslaBleStep {
-    data class Send(val payload: ByteArray, val phase: TeslaBlePhase, val actuator: Boolean = false) : TeslaBleStep {
-        override fun toString(): String = "Send(phase=$phase, actuator=$actuator)"
+    data class Send(
+        val payload: ByteArray,
+        val phase: TeslaBlePhase,
+        val actuator: Boolean = false,
+        val wake: Boolean = false,
+    ) : TeslaBleStep {
+        init { require(!actuator || !wake) }
+        override fun toString(): String = "Send(phase=$phase, actuator=$actuator, wake=$wake)"
     }
+    /** 현재 conversation 시작 전 수신분. phase·인증·응답 대기 상태를 갱신하지 않는다. */
+    data object Ignored : TeslaBleStep
     data class Waiting(val phase: TeslaBlePhase, val authEvidence: TeslaBleAuthEvidence? = null) : TeslaBleStep
     data class Complete(val status: TeslaReadOnlyStatus) : TeslaBleStep
     data class FrunkResult(val reply: TeslaFrunkReply) : TeslaBleStep
+    /** 응답 분류일 뿐 실제 기상, DRIVE 준비나 P의 증거가 아니다. NOMINAL_ACK는 비인증이다. */
+    data class WakeResult(val reply: TeslaWakeReply) : TeslaBleStep
     data class Failed(val reason: String, val authEvidence: TeslaBleAuthEvidence? = null) : TeslaBleStep
-    class LocationResult(val observation: VehicleCoordinateObservation?, val reason: String?) : TeslaBleStep {
-        override fun toString(): String = "LocationResult"
-    }
-    data object UwbReady : TeslaBleStep
-    class UwbInput(val message: TeslaFiraMessage) : TeslaBleStep {
-        override fun toString(): String = "UwbInput"
-    }
-    data class UwbDeviceInfoRequest(val request: TeslaUwbAppDeviceInfoRequest) : TeslaBleStep
 }
 
 /**
@@ -96,7 +101,9 @@ internal sealed interface TeslaBleStep {
  * pkg/vehicle/security.go SendAddKeyRequestWithRole: raw legacy PRESENT_KEY envelope.
  * pkg/protocol/protocol.md: fresh domain별 handshake, HMAC, personalized AES-GCM, response hash.
  * pkg/vehicle/state.go·infotainment.go: DRIVE_STATE는 domain3 GetVehicleData.getDriveState만 요청.
- * now는 elapsedRealtime 같은 monotonic milliseconds. 자동 재전송·세션 캐시 없음.
+ * now는 elapsedRealtime 같은 monotonic milliseconds. 세션 캐시 없음. 자동 재전송은 없고,
+ * sessionRetransmitWindowMs를 받은 READ_ONLY DRIVE_STATE만 HELLO 대기를 그 창으로 늘리고 호출자가
+ * retransmitSessionRequest로 같은 route/UUID의 sessionInfo 요청을 다시 보낼 수 있다(wake 직후 domain3 기동 대기).
  * HELLO에서 상관관계가 맞는 fault0·operation_status OK ACK는 성공이 아니라 대기이며
  * phase/전체 deadline을 연장하지 않는다(공식 internal/dispatcher/dispatcher.go tryStartSession).
  * 등록 보고는 인증 전의 비인증 legacy 관측이며, 차량에 키가 저장됐다는 증거가 아니다.
@@ -110,16 +117,18 @@ internal class TeslaBleConversation(
     private val purpose: TeslaBlePurpose = TeslaBlePurpose.READ_ONLY,
     private val authorizeFrunk: (() -> String?)? = null,
     private val frunkDeadline: Long? = null,
+    private val authorizeWake: (() -> String?)? = null,
+    private val wakeDeadline: Long? = null,
     private val onResponseObservation: ((TeslaBleResponseObservation) -> Unit)? = null,
-    private val serviceOwned: Boolean = false,
-    private val wallNow: () -> Long = System::currentTimeMillis,
+    private val sessionRetransmitWindowMs: Long? = null,
     private val now: () -> Long,
 ) : Closeable {
-    private enum class State { NEW, CARD, HELLO, STATUS, FIRA, TERMINAL, CLOSED }
+    private enum class State { NEW, CARD, HELLO, STATUS, TERMINAL, CLOSED }
+    private enum class ActionReply { ACKNOWLEDGED, REJECTED, UNCONFIRMED }
     private var state = State.NEW
     private val domain = when (query) {
         TeslaBleQuery.BODY_STATUS -> UniversalMessage.Domain.DOMAIN_VEHICLE_SECURITY
-        TeslaBleQuery.DRIVE_STATE, TeslaBleQuery.LOCATION_STATE -> UniversalMessage.Domain.DOMAIN_INFOTAINMENT
+        TeslaBleQuery.DRIVE_STATE -> UniversalMessage.Domain.DOMAIN_INFOTAINMENT
     }
     private var credential: TeslaBleCredential? = credential
     private val personalization = vin.copyOf()
@@ -137,7 +146,6 @@ internal class TeslaBleConversation(
     private var startedAt = 0L
     private var phaseStartedAt = 0L
     private var lastNow = 0L
-    private var serviceRanging = false
     private var sessionAt = 0L
     private var vehicleClock = 0L
     private var commandCounter = 0L
@@ -150,6 +158,7 @@ internal class TeslaBleConversation(
     private var responseToKind: String? = null
     private var responsePayloadKind: String? = null
     private var responseDomainMismatchReason: String? = null
+    private var responseDomainMismatchVcsecSleepStatus: Int? = null
     private var responseRequestUuidPresent: Boolean? = null
     private var responseRequestUuidMatches: Boolean? = null
     private var responseToRouteMatches: Boolean? = null
@@ -158,34 +167,29 @@ internal class TeslaBleConversation(
     private var responseOperationStatus: Int? = null
     private var responseInputKind: TeslaBleRxInputKind? = null
     private var responseAead = TeslaBleRxAead.NOT_ATTEMPTED
-    private var responseFiraKind: TeslaBleRxFiraKind? = null
-    private var responseBodySummary: TeslaBleRxBodySummary? = null
     private var responseRequestCorrelation: TeslaBleRxRequestCorrelation? = null
+    private var responseDriveShiftState: String? = null
+    private var responseDriveTimestampStatus: String? = null
 
     @Volatile
     var registrationReported: Boolean = false
         private set
 
-    /** 서비스 첫 유효거리 이후만 전체 기한을 해제한다. 인증·OOB 준비의 기한은 보존한다. */
-    @Synchronized
-    fun continueServiceRanging() {
-        check(serviceOwned && purpose == TeslaBlePurpose.UWB && state == State.FIRA)
-        serviceRanging = true
-    }
-
     @Synchronized
     fun start(register: Boolean): TeslaBleStep {
         if (state != State.NEW) return fail("키 시험 작업이 이미 시작되었거나 종료되었습니다")
         return guarded {
-            if (query == TeslaBleQuery.LOCATION_STATE && (register || purpose != TeslaBlePurpose.READ_ONLY)) {
-                return@guarded fail("LOCATION_READ_ONLY_REQUIRED")
-            }
             if (purpose == TeslaBlePurpose.FRUNK_OPEN &&
                 (register || query != TeslaBleQuery.BODY_STATUS || authorizeFrunk == null || frunkDeadline == null)
             ) return@guarded fail("FRUNK_PURPOSE_INVALID")
-            if (purpose == TeslaBlePurpose.UWB && (register || query != TeslaBleQuery.BODY_STATUS)) {
-                return@guarded fail("UWB_PURPOSE_INVALID")
-            }
+            if (purpose == TeslaBlePurpose.VEHICLE_WAKE &&
+                (register || query != TeslaBleQuery.BODY_STATUS || authorizeWake == null || wakeDeadline == null ||
+                    authorizeFrunk != null || frunkDeadline != null)
+            ) return@guarded fail("WAKE_PURPOSE_INVALID")
+            if (sessionRetransmitWindowMs != null && (register || query != TeslaBleQuery.DRIVE_STATE ||
+                    purpose != TeslaBlePurpose.READ_ONLY || sessionRetransmitWindowMs !in
+                    RESPONSE_TIMEOUT_MS..SESSION_RETRANSMIT_WINDOW_MAX_MS)
+            ) return@guarded fail("SESSION_RETRANSMIT_INVALID")
             if (register && query != TeslaBleQuery.BODY_STATUS) {
                 return@guarded fail("앱 키 등록은 기본 차량 상태 조회에서만 허용됩니다")
             }
@@ -197,6 +201,9 @@ internal class TeslaBleConversation(
             startedAt = now()
             require(startedAt >= 0)
             lastNow = startedAt
+            if (purpose == TeslaBlePurpose.VEHICLE_WAKE && startedAt >= checkNotNull(wakeDeadline)) {
+                return@guarded fail("WAKE_EXPIRED")
+            }
             publicKey = requireNotNull(credential).publicKeyBytes()
             p256PublicKeyFromBytes(publicKey)
             if (register) {
@@ -209,49 +216,75 @@ internal class TeslaBleConversation(
 
     @Synchronized
     fun receive(payload: ByteArray, receivedAtElapsedRealtime: Long = now()): TeslaBleStep {
-        responseDisposition = if (state == State.CARD) "RESPONSE_WAITING" else "RESPONSE_INVALID"
-        if (onResponseObservation != null) {
-            responseFromPresent = null
-            responseFromKind = null
-            responseFromDomain = null
-            responseToPresent = null
-            responseToKind = null
-            responsePayloadKind = null
-            responseDomainMismatchReason = null
-            responseRequestUuidPresent = null
-            responseRequestUuidMatches = null
-            responseToRouteMatches = null
-            responseSignedStatusPresent = null
-            responseSignedMessageFault = null
-            responseOperationStatus = null
-            responseInputKind = null
-            responseAead = TeslaBleRxAead.NOT_ATTEMPTED
-            responseFiraKind = null
-            responseBodySummary = null
-            responseRequestCorrelation = null
+        resetResponseObservation()
+        val step = receiveResponse(payload, receivedAtElapsedRealtime)
+        recordResponseObservation(step)
+        return step
+    }
+
+    private fun receiveResponse(payload: ByteArray, receivedAtElapsedRealtime: Long): TeslaBleStep {
+        if (state == State.NEW || state == State.TERMINAL || state == State.CLOSED) {
+            return fail("활성 키 시험 작업이 없습니다")
         }
-        val step = if (state == State.NEW || state == State.TERMINAL || state == State.CLOSED) {
-            fail("활성 키 시험 작업이 없습니다")
-        } else guarded {
+        return guarded {
             require(payload.size <= TESLA_BLE_MAX_FRAME_BYTES)
             val current = now()
             if (current < lastNow) return@guarded fail("키 시험 시간 기준이 변경되었습니다")
             lastNow = current
-            require(receivedAtElapsedRealtime in startedAt..current)
-            if (!serviceRanging && current - startedAt >= TOTAL_TIMEOUT_MS ||
-                (state == State.HELLO || state == State.STATUS) && current - phaseStartedAt >= RESPONSE_TIMEOUT_MS
+            require(receivedAtElapsedRealtime in 0..current)
+            if (current - startedAt >= TOTAL_TIMEOUT_MS ||
+                state == State.HELLO && current - phaseStartedAt >= (sessionRetransmitWindowMs ?: RESPONSE_TIMEOUT_MS) ||
+                state == State.STATUS && current - phaseStartedAt >= RESPONSE_TIMEOUT_MS
             ) return@guarded fail("키 시험 응답 시간이 초과되었습니다")
+            // 원 ingress 시각을 보존한다. 선행 수신분은 파싱·인증·명령 처리에 쓰지 않는다.
+            // 실제 시계 역행과 원래 기한의 만료는 위에서 먼저 거부한다.
+            if (receivedAtElapsedRealtime < startedAt) {
+                responseDisposition = "RESPONSE_BEFORE_START"
+                return@guarded TeslaBleStep.Ignored
+            }
             when (state) {
                 State.CARD -> receiveRegistration(payload, current)
                 State.HELLO -> receiveHandshake(payload, current, receivedAtElapsedRealtime)
                 State.STATUS -> receiveStatus(payload, receivedAtElapsedRealtime)
-                State.FIRA -> receiveFira(payload, receivedAtElapsedRealtime)
                 else -> fail("활성 키 시험 작업이 없습니다")
             }
         }
+    }
+
+    private fun resetResponseObservation() {
+        responseDisposition = if (state == State.CARD) "RESPONSE_WAITING" else "RESPONSE_INVALID"
+        if (onResponseObservation == null) return
+        responseFromPresent = null
+        responseFromKind = null
+        responseFromDomain = null
+        responseToPresent = null
+        responseToKind = null
+        responsePayloadKind = null
+        responseDomainMismatchReason = null
+        responseDomainMismatchVcsecSleepStatus = null
+        responseRequestUuidPresent = null
+        responseRequestUuidMatches = null
+        responseToRouteMatches = null
+        responseSignedStatusPresent = null
+        responseSignedMessageFault = null
+        responseOperationStatus = null
+        responseInputKind = null
+        responseAead = TeslaBleRxAead.NOT_ATTEMPTED
+        responseRequestCorrelation = null
+        responseDriveShiftState = null
+        responseDriveTimestampStatus = null
+    }
+
+    private fun recordResponseObservation(step: TeslaBleStep) {
         if (step is TeslaBleStep.Failed && responseDisposition == "RESPONSE_WAITING") {
             responseDisposition = "RESPONSE_REJECTED"
         }
+        val verifiedDrive = onResponseObservation != null && step is TeslaBleStep.Complete &&
+            responseDisposition == "STATUS_VERIFIED" && domain.number == 3 &&
+            responseFromPresent == true && responseFromKind == "DOMAIN" && responseFromDomain == 3 &&
+            responseToPresent == true && responseToKind == "ROUTING_ADDRESS" &&
+            responseRequestUuidPresent == true && responseRequestUuidMatches == true && responseToRouteMatches == true &&
+            responseInputKind == TeslaBleRxInputKind.ENCRYPTED_RESPONSE && responseAead == TeslaBleRxAead.VERIFIED
         // 판정 완료 뒤 관측만 전달한다. callback 예외는 보안 검증 실패로 위장하지 않는다.
         try {
             onResponseObservation?.invoke(TeslaBleResponseObservation(
@@ -259,35 +292,34 @@ internal class TeslaBleConversation(
                 fromPresent = responseFromPresent, fromKind = responseFromKind, fromDomain = responseFromDomain,
                 toPresent = responseToPresent, toKind = responseToKind, payloadKind = responsePayloadKind,
                 domainMismatchReason = responseDomainMismatchReason,
+                domainMismatchVcsecSleepStatus = responseDomainMismatchVcsecSleepStatus,
                 requestUuidPresent = responseRequestUuidPresent, requestUuidMatches = responseRequestUuidMatches,
                 toRouteMatches = responseToRouteMatches,
                 signedStatusPresent = responseSignedStatusPresent,
                 signedMessageFault = responseSignedMessageFault, operationStatus = responseOperationStatus,
                 step = when (step) {
+                    TeslaBleStep.Ignored -> TeslaBleRxStep.IGNORED
                     is TeslaBleStep.Waiting -> TeslaBleRxStep.WAITING
                     is TeslaBleStep.Send -> TeslaBleRxStep.SEND
                     is TeslaBleStep.Complete -> TeslaBleRxStep.COMPLETE
-                    is TeslaBleStep.LocationResult -> TeslaBleRxStep.COMPLETE
                     is TeslaBleStep.FrunkResult -> TeslaBleRxStep.FRUNK_RESULT
+                    is TeslaBleStep.WakeResult -> TeslaBleRxStep.WAKE_RESULT
                     is TeslaBleStep.Failed -> TeslaBleRxStep.FAILED
-                    TeslaBleStep.UwbReady -> TeslaBleRxStep.UWB_READY
-                    is TeslaBleStep.UwbInput -> TeslaBleRxStep.UWB_INPUT
-                    is TeslaBleStep.UwbDeviceInfoRequest -> TeslaBleRxStep.WAITING
                 },
-                inputKind = responseInputKind, aead = responseAead, firaKind = responseFiraKind,
+                inputKind = responseInputKind, aead = responseAead,
                 authEvidence = when (step) {
                     is TeslaBleStep.Waiting -> step.authEvidence
                     is TeslaBleStep.Failed -> step.authEvidence
                     else -> null
                 },
-                bodySummary = responseBodySummary, requestCorrelation = responseRequestCorrelation,
+                requestCorrelation = responseRequestCorrelation,
+                driveShiftState = responseDriveShiftState.takeIf { verifiedDrive },
+                driveTimestampStatus = responseDriveTimestampStatus.takeIf { verifiedDrive },
             ))
         } catch (failure: Exception) {
             if (step is TeslaBleStep.Send) step.payload.fill(0)
-            if (step is TeslaBleStep.UwbInput) step.message.close()
             throw failure
         }
-        return step
     }
 
     private inline fun guarded(action: () -> TeslaBleStep): TeslaBleStep = try {
@@ -362,21 +394,30 @@ internal class TeslaBleConversation(
         return TeslaBleStep.Send(request.toByteArray(), TeslaBlePhase.HANDSHAKING)
     }
 
+    /**
+     * wake 직후 domain3가 첫 HELLO를 놓쳤을 때만 쓴다. identity·phaseStartedAt을 바꾸지 않으므로
+     * SESSION_INFO HMAC metadata와 상관관계는 그대로이고 HELLO 창도 연장되지 않는다.
+     */
+    @Synchronized
+    fun retransmitSessionRequest(): TeslaBleStep {
+        if (sessionRetransmitWindowMs == null || state != State.HELLO || !requestIdentityActive) return TeslaBleStep.Ignored
+        return guarded {
+            val current = now()
+            if (current < lastNow) return@guarded fail("키 시험 시간 기준이 변경되었습니다")
+            lastNow = current
+            if (current - startedAt >= TOTAL_TIMEOUT_MS || current - phaseStartedAt >= sessionRetransmitWindowMs) {
+                return@guarded fail("키 시험 응답 시간이 초과되었습니다")
+            }
+            val request = requestBuilder().setSessionInfoRequest(
+                UniversalMessage.SessionInfoRequest.newBuilder().setPublicKey(ByteString.copyFrom(publicKey)),
+            ).build()
+            TeslaBleStep.Send(request.toByteArray(), TeslaBlePhase.HANDSHAKING)
+        }
+    }
+
     private fun receiveHandshake(payload: ByteArray, current: Long, receivedAtElapsedRealtime: Long): TeslaBleStep {
         val response = UniversalMessage.RoutableMessage.parseFrom(payload)
         captureResponseObservation(response)
-        if (purpose == TeslaBlePurpose.UWB &&
-            response.payloadCase == UniversalMessage.RoutableMessage.PayloadCase.PROTOBUF_MESSAGE_AS_BYTES &&
-            !response.hasSignatureData()
-        ) {
-            val body = response.protobufMessageAsBytes.toByteArray()
-            val input = try { TeslaFiraProtocol.decode(body) } catch (_: Exception) { null }
-                finally { body.fill(0) }
-            if (input != null) {
-                input.close()
-                return TeslaBleStep.Waiting(TeslaBlePhase.HANDSHAKING)
-            }
-        }
         if (!matchesRequest(response)) return TeslaBleStep.Waiting(TeslaBlePhase.HANDSHAKING)
         // 공식 pkg/protocol/error.go GetError: fault가 있으면 다른 어떤 판정보다 먼저 실패다.
         val fault = response.signedMessageStatus.signedMessageFaultValue
@@ -481,11 +522,10 @@ internal class TeslaBleConversation(
             tag.fill(0)
             encodedInfo.fill(0)
         }
-        val next = if (purpose == TeslaBlePurpose.UWB) {
-            state = State.FIRA
-            TeslaBleStep.UwbReady
-        } else sendStatusRequest(current)
-        responseDisposition = "SESSION_READY"
+        val next = sendStatusRequest(current)
+        responseDisposition = if (purpose == TeslaBlePurpose.VEHICLE_WAKE && next is TeslaBleStep.Failed) {
+            "RESPONSE_REJECTED"
+        } else "SESSION_READY"
         return next
     }
 
@@ -512,54 +552,45 @@ internal class TeslaBleConversation(
             response.signedMessageStatus.operationStatus == UniversalMessage.OperationStatus_E.OPERATIONSTATUS_OK
 
     private fun sendStatusRequest(current: Long): TeslaBleStep {
+        var requestTime = current
         if (purpose == TeslaBlePurpose.FRUNK_OPEN) {
             checkNotNull(authorizeFrunk).invoke()?.let { return fail(it) }
+        } else if (purpose == TeslaBlePurpose.VEHICLE_WAKE) {
+            checkNotNull(authorizeWake).invoke()?.let { return fail(it) }
+            // 권한 callback 중 흘러간 시간도 TTL에 반영한다. 원 deadline을 연장하지 않는다.
+            requestTime = now()
+            if (requestTime < lastNow) return fail("WAKE_CLOCK_CHANGED")
+            lastNow = requestTime
+            if (requestTime >= checkNotNull(wakeDeadline)) return fail("WAKE_EXPIRED")
         }
-        val plaintext = if (purpose == TeslaBlePurpose.FRUNK_OPEN) {
-            // pinned actions.go OpenFrunk → vcsec.go executeClosureAction. RKE 숫자를 확장하지 않는다.
-            Vcsec.UnsignedMessage.newBuilder().setClosureMoveRequest(
-                Vcsec.ClosureMoveRequest.newBuilder()
-                    .setFrontTrunk(Vcsec.ClosureMoveType_E.CLOSURE_MOVE_TYPE_MOVE),
-            ).build().toByteArray()
-        } else when (query) {
-            TeslaBleQuery.BODY_STATUS -> Vcsec.UnsignedMessage.newBuilder().setInformationRequest(
-                Vcsec.InformationRequest.newBuilder()
-                    .setInformationRequestType(Vcsec.InformationRequestType.INFORMATION_REQUEST_TYPE_GET_STATUS),
-            ).build().toByteArray()
-            TeslaBleQuery.DRIVE_STATE -> CarServer.Action.newBuilder().setVehicleAction(
-                CarServer.VehicleAction.newBuilder().setGetVehicleData(
-                    CarServer.GetVehicleData.newBuilder().setGetDriveState(CarServer.GetDriveState.getDefaultInstance()),
-                ),
-            ).build().toByteArray()
-            TeslaBleQuery.LOCATION_STATE -> CarServer.Action.newBuilder().setVehicleAction(
-                CarServer.VehicleAction.newBuilder().setGetVehicleData(
-                    CarServer.GetVehicleData.newBuilder().setGetLocationState(CarServer.GetLocationState.getDefaultInstance()),
-                ),
-            ).build().toByteArray()
-        }
-        return encryptRequest(current, plaintext)
-    }
-
-    /** FiRa bodies use exactly the existing personalized session AEAD, never a raw STS send. */
-    @Synchronized
-    fun sendFira(plaintext: ByteArray): TeslaBleStep = try {
-        guarded {
-            if (purpose != TeslaBlePurpose.UWB || state != State.FIRA) {
-                return@guarded fail("UWB_AUTHENTICATED_SESSION_REQUIRED")
+        val plaintext = when (purpose) {
+            TeslaBlePurpose.FRUNK_OPEN ->
+                // pinned actions.go OpenFrunk → vcsec.go executeClosureAction.
+                Vcsec.UnsignedMessage.newBuilder().setClosureMoveRequest(
+                    Vcsec.ClosureMoveRequest.newBuilder()
+                        .setFrontTrunk(Vcsec.ClosureMoveType_E.CLOSURE_MOVE_TYPE_MOVE),
+                ).build().toByteArray()
+            TeslaBlePurpose.VEHICLE_WAKE ->
+                // pinned vcsec.go wakeupRKE → executeRKEAction. 다른 RKE 권한은 생성하지 않는다.
+                Vcsec.UnsignedMessage.newBuilder()
+                    .setRKEAction(Vcsec.RKEAction_E.RKE_ACTION_WAKE_VEHICLE).build().toByteArray()
+            TeslaBlePurpose.READ_ONLY -> when (query) {
+                TeslaBleQuery.BODY_STATUS -> Vcsec.UnsignedMessage.newBuilder().setInformationRequest(
+                    Vcsec.InformationRequest.newBuilder()
+                        .setInformationRequestType(Vcsec.InformationRequestType.INFORMATION_REQUEST_TYPE_GET_STATUS),
+                ).build().toByteArray()
+                TeslaBleQuery.DRIVE_STATE -> CarServer.Action.newBuilder().setVehicleAction(
+                    CarServer.VehicleAction.newBuilder().setGetVehicleData(
+                        CarServer.GetVehicleData.newBuilder().setGetDriveState(CarServer.GetDriveState.getDefaultInstance()),
+                    ),
+                ).build().toByteArray()
             }
-            val current = now()
-            if (current < lastNow || !serviceRanging && current - startedAt >= TOTAL_TIMEOUT_MS) {
-                return@guarded fail("UWB_SESSION_EXPIRED")
-            }
-            lastNow = current
-            encryptRequest(current, plaintext)
         }
-    } finally {
-        plaintext.fill(0)
+        return encryptRequest(requestTime, plaintext)
     }
 
     private fun encryptRequest(current: Long, plaintext: ByteArray): TeslaBleStep {
-        // Every path, including FiRa, owns and clears the supplied plaintext.
+        // Every request owns and clears the supplied plaintext.
         try {
             return encryptOwnedRequest(current, plaintext)
         } finally {
@@ -577,6 +608,11 @@ internal class TeslaBleConversation(
             if (remaining < 1_000L) return fail("FRUNK_COMMAND_EXPIRED")
             minOf(currentVehicleClock + COMMAND_TTL_SECONDS,
                 vehicleClock + (checkNotNull(frunkDeadline) - sessionAt) / 1_000L)
+        } else if (purpose == TeslaBlePurpose.VEHICLE_WAKE) {
+            val deadline = checkNotNull(wakeDeadline)
+            if (current >= deadline || deadline - current < 1_000L) return fail("WAKE_EXPIRED")
+            minOf(currentVehicleClock + COMMAND_TTL_SECONDS,
+                vehicleClock + (deadline - sessionAt) / 1_000L)
         } else currentVehicleClock + COMMAND_TTL_SECONDS
         require(expires in 1..MAX_EPOCH_SECONDS)
         newRequestIdentity()
@@ -609,118 +645,17 @@ internal class TeslaBleConversation(
                         )
                         .setAESGCMPersonalizedData(signature),
                 ).build()
-            state = if (purpose == TeslaBlePurpose.UWB) State.FIRA else State.STATUS
+            state = State.STATUS
             phaseStartedAt = current
             return TeslaBleStep.Send(request.toByteArray(), TeslaBlePhase.READING_STATUS,
-                actuator = purpose == TeslaBlePurpose.FRUNK_OPEN)
+                actuator = purpose == TeslaBlePurpose.FRUNK_OPEN,
+                wake = purpose == TeslaBlePurpose.VEHICLE_WAKE)
         } finally {
             metadata.fill(0)
             aad.fill(0)
             nonce.fill(0)
             encrypted.fill(0)
         }
-    }
-
-    private fun receiveFira(payload: ByteArray, receivedAt: Long): TeslaBleStep {
-        val response = UniversalMessage.RoutableMessage.parseFrom(payload)
-        if (response.hasSignatureData()) return receiveStatus(payload, receivedAt)
-        val wrapped = response.hasFromDestination() || response.hasToDestination()
-        if (wrapped) captureResponseObservation(response)
-        if (onResponseObservation != null) {
-            responseInputKind = if (wrapped) TeslaBleRxInputKind.WRAPPED_PLAINTEXT else TeslaBleRxInputKind.RAW_FIRA
-        }
-        val body = if (wrapped) {
-            if (!response.hasFromDestination() ||
-                response.fromDestination.subDestinationCase != UniversalMessage.Destination.SubDestinationCase.DOMAIN ||
-                response.fromDestination.domain != UniversalMessage.Domain.DOMAIN_VEHICLE_SECURITY
-            ) {
-                responseDisposition = "DOMAIN_MISMATCH"
-                captureDomainMismatch(response)
-                return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
-            }
-            if (response.payloadCase != UniversalMessage.RoutableMessage.PayloadCase.PROTOBUF_MESSAGE_AS_BYTES) {
-                responseDisposition = "RESPONSE_WAITING"
-                return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
-            }
-            response.protobufMessageAsBytes.toByteArray()
-        } else payload
-        try {
-            // Plaintext requests are negotiation input only, not authenticated vehicle acceptance.
-            return receiveFiraBody(body, if (wrapped) response else null)
-        } finally {
-            if (wrapped) body.fill(0)
-        }
-    }
-
-    private fun decodeFira(body: ByteArray): TeslaFiraMessage? {
-        val input = try {
-            TeslaFiraProtocol.decode(body)
-        } catch (failure: Exception) {
-            if (onResponseObservation != null) {
-                responseFiraKind = TeslaBleRxFiraKind.INVALID
-                responseDisposition = "FIRA_INVALID"
-                captureFiraBodySummary(body)
-            }
-            throw failure
-        }
-        if (onResponseObservation != null) {
-            responseFiraKind = when (input) {
-                is TeslaFiraMessage.Request -> TeslaBleRxFiraKind.REQUEST
-                is TeslaFiraMessage.Stop -> TeslaBleRxFiraKind.STOP
-                null -> TeslaBleRxFiraKind.UNRECOGNIZED
-            }
-            responseDisposition = when (input) {
-                is TeslaFiraMessage.Request -> "FIRA_REQUEST"
-                is TeslaFiraMessage.Stop -> "FIRA_STOP"
-                null -> "FIRA_UNRECOGNIZED"
-            }
-            if (input == null) captureFiraBodySummary(body)
-        }
-        return input
-    }
-
-    private fun captureFiraBodySummary(body: ByteArray) {
-        if (onResponseObservation == null || purpose != TeslaBlePurpose.UWB) return
-        responseBodySummary = try {
-            summarizeTeslaBleRxBody(body)
-        } catch (_: Exception) {
-            // 진단 실패는 원래 decode 결과나 예외를 바꾸지 않는다.
-            null
-        }
-    }
-
-    private fun receiveFiraBody(
-        body: ByteArray,
-        plaintextEnvelope: UniversalMessage.RoutableMessage? = null,
-    ): TeslaBleStep {
-        val deviceInfoRequest = try {
-            TeslaUwbAppDeviceInfoProtocol.decodeRequest(body)
-        } catch (failure: TeslaUwbAppDeviceInfoException) {
-            responseDisposition = "RESPONSE_REJECTED"
-            captureFiraBodySummary(body)
-            throw failure
-        } catch (_: Exception) {
-            // No field 44 was observed. Let the original decoder own malformed FiRa/body
-            // classification, safe summaries and the original protocol failure.
-            null
-        }
-        if (deviceInfoRequest != null) {
-            // Only newly supported metadata gains this guard. Preserve legacy FiRa/stop routing.
-            if (plaintextEnvelope?.hasToDestination() == true && !matchesRequest(plaintextEnvelope)) {
-                return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
-            }
-            if (plaintextEnvelope != null && !plaintextEnvelope.requestUuid.isEmpty &&
-                !bytesMatch(plaintextEnvelope.requestUuid, requestUuid)) {
-                responseDisposition = "REQUEST_UUID_MISMATCH"
-                return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
-            }
-            // Metadata is neither a FiRa ACK nor authentication approval. Existing observation
-            // enums remain unchanged; dispatch uses its own typed step.
-            responseDisposition = "RESPONSE_WAITING"
-            return TeslaBleStep.UwbDeviceInfoRequest(deviceInfoRequest)
-        }
-        return decodeFira(body)?.let { TeslaBleStep.UwbInput(it) }
-            ?: TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
     }
 
     private fun receiveStatus(payload: ByteArray, receivedAtElapsedRealtime: Long): TeslaBleStep {
@@ -730,13 +665,22 @@ internal class TeslaBleConversation(
             responseInputKind = TeslaBleRxInputKind.ENCRYPTED_RESPONSE
         }
         if (!matchesRequest(response)) return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
-        if (purpose == TeslaBlePurpose.UWB && !response.hasSignatureData()) {
-            return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
+        if (purpose == TeslaBlePurpose.VEHICLE_WAKE && !response.hasSignatureData()) {
+            if (response.signedMessageStatus.signedMessageFaultValue != 0 ||
+                response.hasSignedMessageStatus() &&
+                response.signedMessageStatus.operationStatus == UniversalMessage.OperationStatus_E.OPERATIONSTATUS_ERROR
+            ) return finishAction(ActionReply.REJECTED)
+            if (response.hasSignedMessageStatus() &&
+                response.signedMessageStatus.operationStatus == UniversalMessage.OperationStatus_E.OPERATIONSTATUS_WAIT
+            ) return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
+            // 정확한 payload 없는 명목 OK만 분리한다. 인증된 깨움 ACK로 승격하지 않는다.
+            return if (isNominalAck(response)) finishWake(TeslaWakeReply.NOMINAL_ACK)
+                else finishAction(ActionReply.UNCONFIRMED)
         }
         if (purpose == TeslaBlePurpose.FRUNK_OPEN && !response.hasSignatureData()) {
             // 공식 closure terminal은 payload 없는 nominal ACK도 허용한다. 이는 AEAD 인증된
             // ACK나 OPEN 증거가 아니므로 별도 fresh BODY 조회로만 넘어간다.
-            return finishFrunk(TeslaFrunkReply.UNCONFIRMED)
+            return finishAction(ActionReply.UNCONFIRMED)
         }
         if (purpose == TeslaBlePurpose.READ_ONLY && query == TeslaBleQuery.BODY_STATUS) {
             // 공식 vcsec.go unmarshalVCSECResponse는 GetError를 먼저 확인하고 payload 없는
@@ -789,34 +733,26 @@ internal class TeslaBleConversation(
             }
             if (onResponseObservation != null) responseAead = TeslaBleRxAead.VERIFIED
             responseCounters.add(counter) // 검증에 성공한 counter만 소비한다.
-            if (purpose == TeslaBlePurpose.UWB) {
+            if (purpose == TeslaBlePurpose.FRUNK_OPEN || purpose == TeslaBlePurpose.VEHICLE_WAKE) {
                 if (response.signedMessageStatus.signedMessageFaultValue != 0) {
-                    responseDisposition = "RESPONSE_REJECTED"
-                    return fail("UWB_ENCRYPTED_RESPONSE_REJECTED")
-                }
-                return receiveFiraBody(plaintext)
-            }
-            if (purpose == TeslaBlePurpose.FRUNK_OPEN) {
-                if (response.signedMessageStatus.signedMessageFaultValue != 0) {
-                    return finishFrunk(TeslaFrunkReply.REJECTED)
+                    return finishAction(ActionReply.REJECTED)
                 }
                 if (response.hasSignedMessageStatus() &&
                     response.signedMessageStatus.operationStatus != UniversalMessage.OperationStatus_E.OPERATIONSTATUS_OK
                 ) {
                     return if (response.signedMessageStatus.operationStatus == UniversalMessage.OperationStatus_E.OPERATIONSTATUS_WAIT) {
                         TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
-                    } else finishFrunk(TeslaFrunkReply.REJECTED)
+                    } else finishAction(ActionReply.REJECTED)
                 }
-                return receiveFrunkResult(plaintext)
+                return receiveActionResult(plaintext)
             }
             if (response.signedMessageStatus.signedMessageFaultValue != 0) {
                 responseDisposition = "RESPONSE_REJECTED"
                 return fail("차량이 상태 조회 요청을 거부했습니다")
             }
             return when (query) {
-                TeslaBleQuery.BODY_STATUS -> receiveBodyStatus(plaintext)
+                TeslaBleQuery.BODY_STATUS -> receiveBodyStatus(plaintext, receivedAtElapsedRealtime)
                 TeslaBleQuery.DRIVE_STATE -> receiveDriveState(plaintext, receivedAtElapsedRealtime)
-                TeslaBleQuery.LOCATION_STATE -> receiveLocationState(plaintext, receivedAtElapsedRealtime)
             }
         } finally {
             metadata.fill(0)
@@ -827,37 +763,64 @@ internal class TeslaBleConversation(
         }
     }
 
-    private fun receiveFrunkResult(plaintext: ByteArray): TeslaBleStep {
+    private fun receiveActionResult(plaintext: ByteArray): TeslaBleStep {
         val response = Vcsec.FromVCSECMessage.parseFrom(plaintext)
-        if (response.hasNominalError()) return finishFrunk(TeslaFrunkReply.REJECTED)
+        if (response.hasNominalError()) return finishAction(ActionReply.REJECTED)
         if (response.hasCommandStatus()) {
-            // 공식 executeClosureAction.done: CommandStatus가 있으면 아직 terminal이 아니다.
-            // WAIT/OK는 대기이고 명시 ERROR만 거절이다. signedMessageStatus 오류도 보존한다.
+            // pinned executeClosureAction/executeRKEAction.done: CommandStatus는 terminal이 아니다.
+            // WAIT/OK는 원 기한 안에서 대기하고 명시 ERROR만 거절한다.
             val status = response.commandStatus
             if (status.operationStatus == Vcsec.OperationStatus_E.OPERATIONSTATUS_ERROR ||
                 status.hasSignedMessageStatus() && status.signedMessageStatus.signedMessageInformationValue != 0
-            ) return finishFrunk(TeslaFrunkReply.REJECTED)
+            ) return finishAction(ActionReply.REJECTED)
             if (status.operationStatus != Vcsec.OperationStatus_E.OPERATIONSTATUS_OK &&
                 status.operationStatus != Vcsec.OperationStatus_E.OPERATIONSTATUS_WAIT
-            ) return finishFrunk(TeslaFrunkReply.UNCONFIRMED)
+            ) return finishAction(ActionReply.UNCONFIRMED)
             return TeslaBleStep.Waiting(TeslaBlePhase.READING_STATUS)
         }
-        // 빈 AEAD plaintext도 공식 nominal terminal 계약이다. OPEN은 후속 BODY에서만 관측한다.
-        return finishFrunk(TeslaFrunkReply.ACKNOWLEDGED)
+        // 빈 AEAD plaintext는 nominal terminal이다. 물리 기상이나 OPEN의 증거는 아니다.
+        return finishAction(ActionReply.ACKNOWLEDGED)
     }
 
-    private fun finishFrunk(reply: TeslaFrunkReply): TeslaBleStep.FrunkResult {
-        responseDisposition = when (reply) {
-            TeslaFrunkReply.ACKNOWLEDGED -> "FRUNK_ACKNOWLEDGED"
-            TeslaFrunkReply.REJECTED -> "RESPONSE_REJECTED"
-            TeslaFrunkReply.UNCONFIRMED -> "FRUNK_UNCONFIRMED"
+    private fun finishAction(reply: ActionReply): TeslaBleStep {
+        val step = when (purpose) {
+            TeslaBlePurpose.FRUNK_OPEN -> {
+                responseDisposition = when (reply) {
+                    ActionReply.ACKNOWLEDGED -> "FRUNK_ACKNOWLEDGED"
+                    ActionReply.REJECTED -> "RESPONSE_REJECTED"
+                    ActionReply.UNCONFIRMED -> "FRUNK_UNCONFIRMED"
+                }
+                TeslaBleStep.FrunkResult(when (reply) {
+                    ActionReply.ACKNOWLEDGED -> TeslaFrunkReply.ACKNOWLEDGED
+                    ActionReply.REJECTED -> TeslaFrunkReply.REJECTED
+                    ActionReply.UNCONFIRMED -> TeslaFrunkReply.UNCONFIRMED
+                })
+            }
+            TeslaBlePurpose.VEHICLE_WAKE -> return finishWake(when (reply) {
+                ActionReply.ACKNOWLEDGED -> TeslaWakeReply.ACKNOWLEDGED
+                ActionReply.REJECTED -> TeslaWakeReply.REJECTED
+                ActionReply.UNCONFIRMED -> TeslaWakeReply.UNCONFIRMED
+            })
+            TeslaBlePurpose.READ_ONLY -> error("Read-only conversation cannot finish an action")
         }
         state = State.TERMINAL
         eraseEphemeral()
-        return TeslaBleStep.FrunkResult(reply)
+        return step
     }
 
-    private fun receiveBodyStatus(plaintext: ByteArray): TeslaBleStep {
+    private fun finishWake(reply: TeslaWakeReply): TeslaBleStep.WakeResult {
+        responseDisposition = when (reply) {
+            TeslaWakeReply.ACKNOWLEDGED -> "WAKE_ACKNOWLEDGED"
+            TeslaWakeReply.REJECTED -> "RESPONSE_REJECTED"
+            TeslaWakeReply.UNCONFIRMED -> "WAKE_UNCONFIRMED"
+            TeslaWakeReply.NOMINAL_ACK -> "WAKE_NOMINAL_ACK"
+        }
+        state = State.TERMINAL
+        eraseEphemeral()
+        return TeslaBleStep.WakeResult(reply)
+    }
+
+    private fun receiveBodyStatus(plaintext: ByteArray, receivedAtElapsedRealtime: Long): TeslaBleStep {
         val vcsec = Vcsec.FromVCSECMessage.parseFrom(plaintext)
         if (vcsec.hasNominalError()) {
             responseDisposition = "RESPONSE_REJECTED"
@@ -876,7 +839,8 @@ internal class TeslaBleConversation(
             closures.frontTrunkValue in 0..6
         ) closures.frontTrunkValue else null
         return complete(TeslaReadOnlyStatus(lock, frontTrunk,
-            bodyVehicleSleepStatus = status.vehicleSleepStatusValue.takeIf { it >= 0 }))
+            bodyVehicleSleepStatus = status.vehicleSleepStatusValue.takeIf { it >= 0 },
+            bodyReceivedAtElapsedRealtime = receivedAtElapsedRealtime))
     }
 
     private fun receiveDriveState(plaintext: ByteArray, receivedAtElapsedRealtime: Long): TeslaBleStep {
@@ -904,23 +868,30 @@ internal class TeslaBleConversation(
             drive.timestamp.seconds in MIN_TIMESTAMP_SECONDS..MAX_TIMESTAMP_SECONDS &&
             drive.timestamp.nanos in 0..999_999_999
         ) drive.timestamp.seconds * 1_000L + drive.timestamp.nanos / 1_000_000L else null
-        return complete(TeslaReadOnlyStatus(driveState = TeslaDriveState(gear, timestamp, receivedAtElapsedRealtime)))
+        if (onResponseObservation != null) {
+            responseDriveShiftState = if (!drive.hasShiftState()) "ABSENT" else when (drive.shiftState.typeCase) {
+                Vehicle.ShiftState.TypeCase.INVALID -> "INVALID"
+                Vehicle.ShiftState.TypeCase.P -> "P"
+                Vehicle.ShiftState.TypeCase.R -> "R"
+                Vehicle.ShiftState.TypeCase.N -> "N"
+                Vehicle.ShiftState.TypeCase.D -> "D"
+                Vehicle.ShiftState.TypeCase.SNA -> "SNA"
+                // lite의 unknown 필드는 직접 읽을 수 없다. 재직렬화 없이 빈 oneof와 미지원 wire 필드를 구분한다.
+                else -> if (drive.shiftState.serializedSize == 0) "EMPTY" else "UNRECOGNIZED"
+            }
+            responseDriveTimestampStatus = when {
+                !drive.hasTimestamp() -> "ABSENT"
+                timestamp == null -> "INVALID"
+                timestamp <= 0 -> "NON_POSITIVE"
+                else -> "VALID"
+            }
+        }
+        return complete(TeslaReadOnlyStatus(
+            driveState = TeslaDriveState(gear, timestamp, receivedAtElapsedRealtime),
+            driveShiftStateInvalid = drive.shiftState.typeCase == Vehicle.ShiftState.TypeCase.INVALID,
+        ))
     }
 
-    private fun receiveLocationState(plaintext: ByteArray, receivedAt: Long): TeslaBleStep {
-        val response = CarServer.Response.parseFrom(plaintext)
-        val result = when {
-            response.actionStatus.result != CarServer.OperationStatus_E.OPERATIONSTATUS_OK ->
-                TeslaBleStep.LocationResult(null, "LOCATION_REQUEST_REJECTED")
-            !response.hasVehicleData() || !response.vehicleData.hasLocationState() ->
-                TeslaBleStep.LocationResult(null, "LOCATION_STATE_MISSING")
-            else -> TeslaLocationStateParser.parse(response.vehicleData.locationState, receivedAt, wallNow())
-        }
-        responseDisposition = if (result.observation != null) "STATUS_VERIFIED" else "STATUS_INCOMPLETE"
-        state = State.TERMINAL
-        eraseEphemeral()
-        return result
-    }
 
     private fun complete(status: TeslaReadOnlyStatus): TeslaBleStep.Complete {
         responseDisposition = "STATUS_VERIFIED"
@@ -955,12 +926,10 @@ internal class TeslaBleConversation(
             message.toDestination.subDestinationCase == UniversalMessage.Destination.SubDestinationCase.ROUTING_ADDRESS &&
                 bytesMatch(message.toDestination.routingAddress, route)
         } else null
-        if (purpose == TeslaBlePurpose.UWB) {
-            responseRequestCorrelation = try {
-                observedRequestCorrelation(message)
-            } catch (_: Exception) {
-                null
-            }
+        responseRequestCorrelation = try {
+            observedRequestCorrelation(message)
+        } catch (_: Exception) {
+            null
         }
         responsePayloadKind = when (message.payloadCase) {
             UniversalMessage.RoutableMessage.PayloadCase.SESSION_INFO -> "SESSION_INFO"
@@ -1025,6 +994,28 @@ internal class TeslaBleConversation(
                 "FROM_NOT_DOMAIN"
             else -> "DOMAIN_DIFFERENT"
         }
+        responseDomainMismatchVcsecSleepStatus = vcsecBroadcastSleepStatus(message)
+    }
+
+    /**
+     * 진단 전용: domain2(VCSEC)의 UUID 없는 DOMAIN 수신처 broadcast에서 sleep 상태 enum 정수만 읽는다.
+     * 비인증 값이므로 P 판정·기상 판정·제어 허용에 절대 쓰지 않는다. 파싱 실패는 무시한다.
+     */
+    private fun vcsecBroadcastSleepStatus(message: UniversalMessage.RoutableMessage): Int? {
+        if (!message.hasFromDestination() ||
+            message.fromDestination.subDestinationCase != UniversalMessage.Destination.SubDestinationCase.DOMAIN ||
+            message.fromDestination.domain != UniversalMessage.Domain.DOMAIN_VEHICLE_SECURITY ||
+            !message.hasToDestination() ||
+            message.toDestination.subDestinationCase != UniversalMessage.Destination.SubDestinationCase.DOMAIN ||
+            !message.uuid.isEmpty ||
+            message.payloadCase != UniversalMessage.RoutableMessage.PayloadCase.PROTOBUF_MESSAGE_AS_BYTES
+        ) return null
+        val vcsec = try {
+            Vcsec.FromVCSECMessage.parseFrom(message.protobufMessageAsBytes)
+        } catch (_: Exception) {
+            return null
+        }
+        return if (vcsec.hasVehicleStatus()) vcsec.vehicleStatus.vehicleSleepStatusValue else null
     }
 
     private fun matchesRequest(message: UniversalMessage.RoutableMessage): Boolean {
@@ -1057,7 +1048,7 @@ internal class TeslaBleConversation(
         previousRequestUuid?.fill(0)
         previousRoute = null
         previousRequestUuid = null
-        if (onResponseObservation != null && purpose == TeslaBlePurpose.UWB && requestIdentityActive) {
+        if (onResponseObservation != null && requestIdentityActive) {
             previousRoute = route
             previousRequestUuid = requestUuid
         } else {
@@ -1118,6 +1109,7 @@ internal class TeslaBleConversation(
     private companion object {
         const val TOTAL_TIMEOUT_MS = 180_000L
         const val RESPONSE_TIMEOUT_MS = 15_000L
+        const val SESSION_RETRANSMIT_WINDOW_MAX_MS = 30_000L
         const val COMMAND_TTL_SECONDS = 10L
         const val UINT32_MAX = 0xffff_ffffL
         const val MAX_EPOCH_SECONDS = 1L shl 30

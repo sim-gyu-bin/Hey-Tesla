@@ -29,7 +29,7 @@
             android:name="org.altbeacon.beacon.service.BeaconService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice|location"
+            android:foregroundServiceType="connectedDevice"
             android:isolatedProcess="false"
             android:label="beacon" />
         <service

@@ -4,6 +4,7 @@ import com.heytesla.app.vehicle.key.TeslaBleCredential
 import com.heytesla.app.vehicle.protocol.TeslaBleConversation
 import com.heytesla.app.vehicle.protocol.TeslaBlePurpose
 import com.heytesla.app.vehicle.protocol.TeslaBleQuery
+import com.heytesla.app.vehicle.protocol.TeslaBleResponseObservation
 import com.heytesla.app.vehicle.protocol.TeslaBleStep
 import com.heytesla.app.vehicle.protocol.TeslaFrunkReply
 
@@ -12,6 +13,7 @@ internal class TeslaFrunkSequence(
     private var credential: TeslaBleCredential?,
     private val vin: ByteArray,
     val policy: TeslaFrunkPolicy,
+    private val onResponseObservation: ((TeslaBleResponseObservation) -> Unit)?,
     private val now: () -> Long,
 ) : AutoCloseable {
     private enum class Stage { NEW, DRIVE, ACTION, BODY, TERMINAL, CLOSED }
@@ -42,6 +44,7 @@ internal class TeslaFrunkSequence(
             purpose = if (next == Stage.ACTION) TeslaBlePurpose.FRUNK_OPEN else TeslaBlePurpose.READ_ONLY,
             authorizeFrunk = if (next == Stage.ACTION) policy::authorizeActuator else null,
             frunkDeadline = policy.deadline.takeIf { next == Stage.ACTION },
+            onResponseObservation = onResponseObservation,
             now = now)
         return checkNotNull(conversation).start(false)
     }
@@ -52,6 +55,12 @@ internal class TeslaFrunkSequence(
         }
         policy.readinessReason()?.let { return TeslaBleStep.Failed(it) }
         val step = checkNotNull(conversation).receive(payload, receivedAt)
+        if (step is TeslaBleStep.WakeResult || step is TeslaBleStep.Send && step.wake) {
+            if (step is TeslaBleStep.Send) step.payload.fill(0)
+            policy.cancel()
+            stage = Stage.TERMINAL
+            return TeslaBleStep.Failed("FRUNK_PURPOSE_INVALID")
+        }
         return when (stage) {
             Stage.DRIVE -> {
                 if (step !is TeslaBleStep.Complete) step else {

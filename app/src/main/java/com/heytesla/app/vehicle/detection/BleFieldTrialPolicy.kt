@@ -56,8 +56,8 @@ internal class BleFieldTrialPolicy(
         }
     }
 
-    /** 첫 유효거리 이후 종료는 coordinator의 수신 신선도 정책만 소유한다. */
-    fun serviceRanging(attempt: Long) {
+    /** 최초 P 확인 뒤에는 연결 모니터의 신선도 watchdog이 종료를 소유한다. */
+    fun serviceMonitoring(attempt: Long) {
         if (currentAttempt == attempt && accepting && !attemptCancelRequested) attemptDeadline = null
     }
 
@@ -105,7 +105,7 @@ internal class BleFieldTrialPolicy(
     val waitingForDeparture: Boolean
         get() = accepting && present && currentAttempt == null
 
-    /** 현재 소스 만료와 최초 측정 예산만 예약한다. timer 자체는 후보를 만들지 않는다. */
+    /** 현재 광고 만료와 최초 연결 예산만 예약한다. timer 자체는 후보를 만들지 않는다. */
     val nextWakeAt: Long?
         get() {
             if (!accepting) return null

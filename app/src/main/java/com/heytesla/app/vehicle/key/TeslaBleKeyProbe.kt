@@ -14,21 +14,18 @@ import com.heytesla.app.vehicle.frunk.TeslaFrunkConsentGate
 import com.heytesla.app.vehicle.frunk.TeslaFrunkPolicy
 import com.heytesla.app.vehicle.frunk.TeslaFrunkResult
 import com.heytesla.app.vehicle.frunk.TeslaFrunkSequence
-import com.heytesla.app.vehicle.navigation.VehicleCoordinateObservation
 import com.heytesla.app.vehicle.protocol.TeslaBleConversation
 import com.heytesla.app.vehicle.protocol.TeslaBlePurpose
 import com.heytesla.app.vehicle.protocol.TeslaBleQuery
-import com.heytesla.app.vehicle.uwb.AndroidTeslaUwbAppDeviceInfoSource
-import com.heytesla.app.vehicle.uwb.AndroidTeslaUwbPlatform
-import com.heytesla.app.vehicle.uwb.AndroidTeslaUwbScheduler
-import com.heytesla.app.vehicle.uwb.TeslaServiceUwbGattAdmission
-import com.heytesla.app.vehicle.uwb.TeslaServiceUwbRequest
-import com.heytesla.app.vehicle.uwb.TeslaUwbGattEvent
-import com.heytesla.app.vehicle.uwb.TeslaUwbGattObservation
-import com.heytesla.app.vehicle.uwb.TeslaUwbNegotiation
-import com.heytesla.app.vehicle.uwb.TeslaUwbProbeState
-import com.heytesla.app.vehicle.uwb.TeslaUwbStage
-
+import com.heytesla.app.vehicle.protocol.TeslaDriveState
+import com.heytesla.app.vehicle.connection.TeslaConnectionState
+import com.heytesla.app.vehicle.connection.TeslaConnectionStage
+import com.heytesla.app.vehicle.connection.TeslaConnectionPreparationPhase
+import com.heytesla.app.vehicle.connection.TeslaGattDeadlineCause
+import com.heytesla.app.vehicle.connection.TeslaGattEvent
+import com.heytesla.app.vehicle.connection.TeslaGattObservation
+import com.heytesla.app.vehicle.connection.TeslaServiceConnectionGattAdmission
+import com.heytesla.app.vehicle.connection.TeslaServiceConnectionRequest
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.KeyguardManager
@@ -74,14 +71,13 @@ internal class TeslaBleKeyProbe(
         val register: Boolean,
         val query: TeslaBleQuery,
         deadline: Long,
-        val frunk: TeslaFrunkPolicy? = null,
-        val uwbRequested: Boolean = false,
-        val serviceUwb: TeslaServiceUwbRequest? = null,
+        frunk: TeslaFrunkPolicy? = null,
+        val serviceConnection: TeslaServiceConnectionRequest? = null,
         val serviceFinished: ((BleProbeState, Boolean) -> Unit)? = null,
     ) {
         val startedElapsedMs = runtime.now()
         var stageStartedElapsedMs = startedElapsedMs
-        val serviceGattAdmission = if (serviceUwb != null) TeslaServiceUwbGattAdmission() else null
+        val serviceGattAdmission = if (serviceConnection != null) TeslaServiceConnectionGattAdmission() else null
         var connectedObserved = false
         var serviceFound = false
         var txFound = false
@@ -96,11 +92,9 @@ internal class TeslaBleKeyProbe(
         var cleanupStarted = false
         var terminal = TeslaKeyStage.FAILED
         var gatt: NativeTransport? = null
-        var nativeUwbReady = false
         val session: TeslaBleKeySession = TeslaBleKeySession(
             deadline = deadline, register = register, query = query,
-            frunk = frunk, uwbRequested = uwbRequested, now = runtime::now,
-            deviceInfoSource = if (uwbRequested) AndroidTeslaUwbAppDeviceInfoSource(app) { nativeUwbReady } else null,
+            frunk = frunk, serviceConnection = serviceConnection != null, wallNow = wallNow, now = runtime::now,
             post = { runtime.handler.post(it) },
             postDelayed = { task, delay -> runtime.handler.postDelayed(task, delay) },
             remove = runtime.handler::removeCallbacks,
@@ -108,47 +102,64 @@ internal class TeslaBleKeyProbe(
                 override var state: TeslaKeyProbeState
                     get() = this@TeslaBleKeyProbe.state.value
                     set(value) { this@TeslaBleKeyProbe.state.value = value }
-                override val uwbStage get() = runtime.teslaUwbState.value.stage
                 override fun allowed() = platformAllowed(this@Operation)
                 override fun onStop(stage: TeslaKeyStage, reason: String?) = finishStopped(this@Operation, stage, reason)
                 override fun onEvent(event: String) = runtime.event(event)
                 override fun onStage() {
                     stageStartedElapsedMs = runtime.now()
-                    publishServiceGatt(this@Operation, TeslaUwbGattEvent.STAGE)
+                    if (serviceConnection != null && current === this@Operation && !session.sealed) {
+                        val before = runtime.teslaConnectionState.value
+                        if (before.stage != TeslaConnectionStage.MONITORING && before.stage != TeslaConnectionStage.EXECUTING) {
+                            runtime.teslaConnectionState.value = before.copy(stage =
+                                if (state.stage == TeslaKeyStage.HANDSHAKING || state.stage == TeslaKeyStage.READING_STATUS) {
+                                    when (session.preparationPhase) {
+                                        TeslaConnectionPreparationPhase.BODY -> TeslaConnectionStage.CHECKING_VEHICLE
+                                        TeslaConnectionPreparationPhase.WAKE -> TeslaConnectionStage.WAKING_VEHICLE
+                                        TeslaConnectionPreparationPhase.DRIVE -> TeslaConnectionStage.AUTHENTICATING
+                                    }
+                                } else TeslaConnectionStage.CONNECTING)
+                        }
+                    }
+                    publishServiceGatt(this@Operation, TeslaGattEvent.STAGE)
                 }
-                override fun onGatt(event: TeslaUwbGattEvent) = publishServiceGatt(this@Operation, event)
+                override fun onGatt(event: TeslaGattEvent) = publishServiceGatt(this@Operation, event)
                 override fun onFrunk() = publishFrunk(this@Operation)
+                override fun onParkState(drive: TeslaDriveState?, reason: String?) {
+                    val request = serviceConnection ?: return
+                    if (current !== this@Operation) return
+                    val before = runtime.teslaConnectionState.value
+                    runtime.teslaConnectionState.value = before.copy(
+                        stage = if (reason != null) TeslaConnectionStage.STOPPED
+                            else if (before.stage == TeslaConnectionStage.EXECUTING) before.stage
+                            else TeslaConnectionStage.MONITORING,
+                        gear = drive?.gear ?: state.status?.driveState?.gear,
+                        parkFresh = reason == null && drive != null, reason = reason)
+                    runtime.serviceParkStateChanged(request, drive, reason)
+                }
+                override fun onExecuting() {
+                    if (current !== this@Operation || serviceConnection == null) return
+                    runtime.teslaConnectionState.value = runtime.teslaConnectionState.value.copy(
+                        stage = TeslaConnectionStage.EXECUTING)
+                    runtime.event("TESLA_FRUNK_COMMAND_REQUESTED")
+                }
+                override fun onStopping(reason: String) {
+                    serviceConnection?.let { runtime.serviceConnectionStopping(it, reason) }
+                }
                 override fun onNotification(receivedAtElapsedMs: Long) {
                     lastRxElapsedMs = receivedAtElapsedMs
                     if (firstRxElapsedMs == null) firstRxElapsedMs = receivedAtElapsedMs
                     if (rxNotificationCount < Long.MAX_VALUE) rxNotificationCount++
                 }
-                override fun onUwbAuthenticating() {
-                    if (runtime.teslaUwbState.value.stage != TeslaUwbStage.AUTHENTICATING) {
-                        runtime.teslaUwbState.value = runtime.teslaUwbState.value.copy(stage = TeslaUwbStage.AUTHENTICATING)
-                        runtime.event("TESLA_UWB_AUTHENTICATING")
-                    }
-                }
-                override fun coordinatesWanted(): Boolean {
-                    val request = serviceUwb ?: return false
-                    return current === this@Operation && !session.sealed &&
-                        runtime.serviceCoordinatesWanted(request)
-                }
-                override fun onCoordinates(observation: VehicleCoordinateObservation?, reason: String?) {
-                    val request = serviceUwb ?: return
-                    if (allowed(this@Operation) && runtime.serviceCoordinatesWanted(request)) {
-                        runtime.serviceCoordinateResult(request, observation, reason)
-                    }
-                }
             },
             transport = { gatt },
         ).also {
-            it.gattObservation = if (serviceUwb != null) TeslaUwbGattObservation(
-                stage = TeslaKeyStage.PREPARING_KEY, event = TeslaUwbGattEvent.STAGE,
+            it.gattObservation = if (serviceConnection != null) TeslaGattObservation(
+                stage = TeslaKeyStage.PREPARING_KEY, event = TeslaGattEvent.STAGE,
                 operationStartedElapsedMs = startedElapsedMs, stageStartedElapsedMs = startedElapsedMs,
                 observedElapsedMs = startedElapsedMs, rxFrameCount = 0L, rxProtocolCount = 0L,
             ) else null
         }
+        val frunk: TeslaFrunkPolicy? get() = session.frunkPolicy
         var frunkParkPublished = false
         var handshakeStarted = false
         val connectRetry = TeslaGattConnectRetry(
@@ -173,9 +184,9 @@ internal class TeslaBleKeyProbe(
                     advertisementAgeAtConnectMs = null
                 }
                 publishServiceGatt(this, when (event) {
-                    "TESLA_APPROACH_GATT_RETRY_SCHEDULED" -> TeslaUwbGattEvent.RETRY_SCHEDULED
-                    "TESLA_APPROACH_GATT_RETRY_STARTED" -> TeslaUwbGattEvent.RETRY_STARTED
-                    else -> TeslaUwbGattEvent.RETRY_CANCELED
+                    "TESLA_APPROACH_GATT_RETRY_SCHEDULED" -> TeslaGattEvent.RETRY_SCHEDULED
+                    "TESLA_APPROACH_GATT_RETRY_STARTED" -> TeslaGattEvent.RETRY_STARTED
+                    else -> TeslaGattEvent.RETRY_CANCELED
                 })
             },
             failed = { stop(this, TeslaKeyStage.FAILED, "GATT_CONNECT_FAILED") },
@@ -216,32 +227,30 @@ internal class TeslaBleKeyProbe(
     fun start(input: String, register: Boolean, query: TeslaBleQuery = TeslaBleQuery.BODY_STATUS) =
         startOperation(input, register, query)
 
-    fun startUwb(input: String) = startOperation(input, false, TeslaBleQuery.BODY_STATUS, uwb = true)
 
-    fun startServiceUwb(request: TeslaServiceUwbRequest, finished: (BleProbeState, Boolean) -> Unit) {
+    fun startServiceConnection(request: TeslaServiceConnectionRequest, finished: (BleProbeState, Boolean) -> Unit) {
         mainThread()
         fun blocked(reason: String) {
-            runtime.teslaUwbState.value = TeslaUwbProbeState(stage = TeslaUwbStage.BLOCKED,
-                serviceOwned = true, rangingPermission = runtime.granted(Manifest.permission.RANGING), reason = reason)
-            runtime.event("TESLA_UWB_BLOCKED")
+            runtime.teslaConnectionState.value = TeslaConnectionState(stage = TeslaConnectionStage.BLOCKED, reason = reason)
+            runtime.event("TESLA_CONNECTION_BLOCKED")
             request.clear()
             finished(BleProbeState(status = BleProbeStatus.BLOCKED, reason = reason, localClosed = true), false)
         }
         if (current != null || runtime.teslaKeyReserved()) { blocked("LEASE_UNAVAILABLE"); return }
         runtime.refresh()
-        runtime.serviceUwbOwnerReason(request)?.let { blocked(it); return }
+        runtime.serviceConnectionOwnerReason(request)?.let { blocked(it); return }
         val vin = runtime.vehicleVinSnapshot() ?: run { blocked("VIN_NOT_REGISTERED"); return }
-        val token = runtime.acquireServiceUwb(request) ?: run { blocked("LEASE_UNAVAILABLE"); return }
+        val token = runtime.acquireServiceConnection(request) ?: run { blocked("LEASE_UNAVAILABLE"); return }
         val op = Operation(token, vin.toByteArray(Charsets.US_ASCII), false, TeslaBleQuery.BODY_STATUS,
-            request.deadline, uwbRequested = true, serviceUwb = request, serviceFinished = finished)
+            request.deadline, serviceConnection = request, serviceFinished = finished)
         current = op
         op.associationId = request.associationId
         state.value = TeslaKeyProbeState(stage = TeslaKeyStage.PREPARING_KEY, outcome = TeslaKeyOutcome.PENDING)
-        runtime.teslaUwbState.value = TeslaUwbProbeState(stage = TeslaUwbStage.PREPARING,
-            serviceOwned = true, rangingPermission = true, gatt = op.session.gattObservation)
-        runtime.event("TESLA_UWB_STARTED")
-        publishServiceGatt(op, TeslaUwbGattEvent.STAGE)
-        op.session.stageDeadline = minOf(op.session.deadline, runtime.now() + PREPARE_MS)
+        runtime.teslaConnectionState.value = TeslaConnectionState(stage = TeslaConnectionStage.PREPARING,
+            gatt = op.session.gattObservation)
+        runtime.event("TESLA_CONNECTION_STARTED")
+        publishServiceGatt(op, TeslaGattEvent.STAGE)
+        op.session.setStageDeadline(minOf(op.session.deadline, runtime.now() + PREPARE_MS))
         if (!allowed(op)) return
         op.preparing = true
         op.session.watch()
@@ -254,19 +263,43 @@ internal class TeslaBleKeyProbe(
             if (!allowed(op)) return@launch
             if (credential == null) { stop(op, TeslaKeyStage.BLOCKED, "EXISTING_KEY_UNAVAILABLE"); return@launch }
             try {
-                op.session.conversation = TeslaBleConversation(credential, op.vin, purpose = TeslaBlePurpose.UWB,
-                    onResponseObservation = { response ->
-                        // callback은 RAM에만 보관한다. 실제 drain 반환 경계에서 한 번 발행한다.
+                op.session.configureConnection(body = {
+                    TeslaBleConversation(credential, op.vin, query = TeslaBleQuery.BODY_STATUS,
+                        onResponseObservation = { response ->
+                            if (current === op && !op.session.sealed) op.session.pendingRxResponse = response
+                        }, now = runtime::now)
+                }, wake = { authorize, deadline ->
+                    TeslaBleConversation(credential, op.vin, query = TeslaBleQuery.BODY_STATUS,
+                        purpose = TeslaBlePurpose.VEHICLE_WAKE, authorizeWake = authorize, wakeDeadline = deadline,
+                        onResponseObservation = { response ->
+                            if (current === op && !op.session.sealed) op.session.pendingRxResponse = response
+                        }, now = runtime::now)
+                }, drive = { sessionRetransmit ->
+                    TeslaBleConversation(credential, op.vin, query = TeslaBleQuery.DRIVE_STATE,
+                        sessionRetransmitWindowMs = if (sessionRetransmit) TeslaBleKeySession.SESSION_RETRANSMIT_WINDOW_MS else null,
+                        onResponseObservation = { response ->
+                            if (current === op && !op.session.sealed) op.session.pendingRxResponse = response
+                        }, now = runtime::now)
+                }, command = { policy ->
+                    TeslaFrunkSequence(credential, op.vin, policy, onResponseObservation = { response ->
                         if (current === op && !op.session.sealed) op.session.pendingRxResponse = response
-                    }, serviceOwned = true, now = runtime::now)
-                op.session.locationConversationFactory = {
-                    TeslaBleConversation(credential, op.vin, query = TeslaBleQuery.LOCATION_STATE,
-                        purpose = TeslaBlePurpose.READ_ONLY, wallNow = wallNow, now = runtime::now)
-                }
+                    }, now = runtime::now)
+                })
                 state.value = state.value.copy(credentialReady = true)
-                prepareUwb(op)
+                connect(op)
             } catch (_: Exception) { stop(op, TeslaKeyStage.FAILED, "KEY_PREPARATION_FAILED") }
         }
+    }
+
+    /** Parent must already consume the voice gate and confirm microphone/recognizer cleanup. */
+    fun dispatchServiceFrunk(request: TeslaServiceConnectionRequest, commandAcceptedAtElapsedMs: Long): Boolean {
+        mainThread()
+        val op = current ?: return false
+        if (op.serviceConnection !== request || op.session.sealed || !allowed(op) ||
+            op.gatt?.liveReady != true || op.gattConnectionState != BluetoothProfile.STATE_CONNECTED ||
+            !state.value.subscriptionConfirmed) return false
+        frunkConsent.claim(commandAcceptedAtElapsedMs, runtime.now())?.let { return false }
+        return op.session.dispatchServiceFrunk(TeslaFrunkPolicy(commandAcceptedAtElapsedMs, runtime::now, wallNow))
     }
 
     /** DIRECT_MIC 최종 명령 인정과 오디오 lease 반환을 마친 runtime만 호출한다. */
@@ -287,10 +320,9 @@ internal class TeslaBleKeyProbe(
     }
 
     private fun startOperation(input: String, register: Boolean, query: TeslaBleQuery,
-        frunk: TeslaFrunkPolicy? = null, uwb: Boolean = false) {
+        frunk: TeslaFrunkPolicy? = null) {
         mainThread()
         if (current != null || runtime.teslaKeyReserved()) {
-            if (uwb) runtime.event("TESLA_UWB_BLOCKED")
             runtime.event(if (frunk != null) "TESLA_FRUNK_BLOCKED" else "TESLA_KEY_START_BLOCKED")
             return
         }
@@ -301,25 +333,13 @@ internal class TeslaBleKeyProbe(
             return
         }
         val normalized = input.trim().uppercase(Locale.ROOT)
-        fun blockUwb(reason: String) {
-            if (!uwb) return
-            runtime.teslaUwbState.value = TeslaUwbProbeState(stage = TeslaUwbStage.BLOCKED,
-                rangingPermission = runtime.granted(Manifest.permission.RANGING), reason = reason)
-            runtime.event("TESLA_UWB_BLOCKED")
-        }
         if (!normalized.matches(Regex("[A-HJ-NPR-Z0-9]{17}"))) {
-            blockUwb("VIN_FORMAT_INVALID")
             state.value = TeslaKeyProbeState(stage = TeslaKeyStage.BLOCKED, query = query,
                 frunkCommandRequested = frunk != null, reason = "VIN_FORMAT_INVALID")
             runtime.event(if (frunk != null) "TESLA_FRUNK_BLOCKED" else "TESLA_KEY_START_BLOCKED")
             return
         }
         runtime.refresh()
-        if (uwb) {
-            val blocked = runtime.uwbRangingBlockedReason()
-                ?: if (normalized != runtime.vehicleVinSnapshot()) "UWB_VIN_SNAPSHOT_CHANGED" else null
-            if (blocked != null) { blockUwb(blocked); return }
-        }
         if (frunk != null && normalized != runtime.vehicleVinSnapshot()) {
             state.value = TeslaKeyProbeState(stage = TeslaKeyStage.BLOCKED, query = query,
                 frunkCommandRequested = true, reason = "FRUNK_VIN_SNAPSHOT_CHANGED")
@@ -327,7 +347,6 @@ internal class TeslaBleKeyProbe(
             return
         }
         val token = runtime.acquireTeslaKey() ?: run {
-            blockUwb(runtime.teslaKeyBlockedReason() ?: "LEASE_UNAVAILABLE")
             state.value = TeslaKeyProbeState(stage = TeslaKeyStage.BLOCKED, query = query,
                 frunkCommandRequested = frunk != null,
                 reason = runtime.teslaKeyBlockedReason() ?: "LEASE_UNAVAILABLE")
@@ -335,20 +354,11 @@ internal class TeslaBleKeyProbe(
             return
         }
         val op = Operation(token, normalized.toByteArray(Charsets.US_ASCII), register, query,
-            frunk?.deadline ?: (runtime.now() + TOTAL_MS), frunk = frunk, uwbRequested = uwb)
+            frunk?.deadline ?: (runtime.now() + TOTAL_MS), frunk = frunk)
         current = op
         state.value = TeslaKeyProbeState(stage = TeslaKeyStage.PREPARING_KEY, registrationRequested = register,
             query = query, frunkCommandRequested = frunk != null)
-        if (uwb) {
-            runtime.teslaUwbState.value = TeslaUwbProbeState(stage = TeslaUwbStage.PREPARING,
-                rangingPermission = true)
-            runtime.event("TESLA_UWB_STARTED")
-        } else if (runtime.teslaUwbState.value.serviceOwned) {
-            // 실제 수동 lease 취득 뒤에만 지난 서비스 상태와 새 수동 작업의 출처를 분리한다.
-            runtime.teslaUwbState.value = TeslaUwbProbeState(
-                rangingPermission = runtime.granted(Manifest.permission.RANGING))
-        }
-        op.session.stageDeadline = minOf(op.session.deadline, runtime.now() + PREPARE_MS)
+        op.session.setStageDeadline(minOf(op.session.deadline, runtime.now() + PREPARE_MS))
         runtime.event(if (frunk != null) "TESLA_FRUNK_COMMAND_REQUESTED" else "TESLA_KEY_STARTED")
         try {
             val selected = singleAssociation()
@@ -375,64 +385,26 @@ internal class TeslaBleKeyProbe(
             if (op.session.sealed) { finishCleanup(op); return@launch }
             if (!allowed(op)) return@launch
             if (credential == null) {
-                stop(op, TeslaKeyStage.FAILED, if (op.frunk != null || op.uwbRequested) "EXISTING_KEY_UNAVAILABLE" else "KEY_PREPARATION_FAILED")
+                stop(op, TeslaKeyStage.FAILED, if (op.frunk != null) "EXISTING_KEY_UNAVAILABLE" else "KEY_PREPARATION_FAILED")
                 return@launch
             }
             try {
                 if (op.frunk != null) {
-                    op.session.frunkSequence = TeslaFrunkSequence(credential, op.vin, op.frunk, runtime::now)
+                    op.session.frunkSequence = TeslaFrunkSequence(credential, op.vin, checkNotNull(op.frunk),
+                        onResponseObservation = null, now = runtime::now)
                 } else {
                     op.session.conversation = TeslaBleConversation(credential, op.vin, query = op.query,
-                        purpose = if (op.uwbRequested) TeslaBlePurpose.UWB else TeslaBlePurpose.READ_ONLY,
+                        purpose = TeslaBlePurpose.READ_ONLY,
                         now = runtime::now)
                 }
                 state.value = state.value.copy(credentialReady = true)
                 runtime.event("TESLA_KEY_CREDENTIAL_READY")
-                if (op.uwbRequested) prepareUwb(op) else connect(op)
+                connect(op)
             } catch (_: Exception) { stop(op, TeslaKeyStage.FAILED, "KEY_PREPARATION_FAILED") }
         }
     }
 
-    private fun prepareUwb(op: Operation) {
-        op.session.stageDeadline = minOf(op.session.deadline, runtime.now() + 10_000L)
-        val coordinator = TeslaUwbNegotiation(AndroidTeslaUwbPlatform(app),
-            AndroidTeslaUwbScheduler(runtime.handler), runtime::now, wallNow,
-            object : TeslaUwbNegotiation.Listener {
-                override fun onCapabilitiesReady() {
-                    op.nativeUwbReady = true
-                    if (allowed(op)) connect(op)
-                }
-                override fun onSend(body: ByteArray, frameComplete: () -> Unit) {
-                    op.session.sendFira(body, frameComplete)
-                }
-                override fun onState(transform: (TeslaUwbProbeState) -> TeslaUwbProbeState, event: String) {
-                    if (current !== op) return
-                    val before = runtime.teslaUwbState.value
-                    val next = transform(before)
-                    if (!op.session.sealed && op.serviceUwb != null && next.stage == TeslaUwbStage.RANGING &&
-                        runtime.now() >= op.session.deadline) {
-                        stop(op, TeslaKeyStage.TIMED_OUT, "DEADLINE_EXPIRED")
-                        return
-                    }
-                    runtime.teslaUwbState.value = if (op.session.sealed) before.copy(
-                        stage = if (before.stage == TeslaUwbStage.CLEANUP_FAILED) before.stage else TeslaUwbStage.CLEANING_UP,
-                        livePeerIndices = emptySet(),
-                        closedReason = next.closedReason, openFailedReason = next.openFailedReason)
-                    else next.copy(gatt = before.gatt)
-                    if (!op.session.sealed && op.serviceUwb?.ranging == false && next.stage == TeslaUwbStage.RANGING) {
-                        if (!op.session.continueServiceRanging()) return
-                    }
-                    runtime.event(event)
-                }
-                override fun onFinish(stage: TeslaKeyStage, reason: String?) {
-                    stop(op, stage, reason)
-                }
-            }, serviceOwned = op.serviceUwb != null)
-        op.session.uwb = coordinator
-        coordinator.prepare()
-    }
-
-    private fun serviceGattSnapshot(op: Operation, event: TeslaUwbGattEvent) = checkNotNull(op.session.gattObservation).copy(
+    private fun serviceGattSnapshot(op: Operation, event: TeslaGattEvent) = checkNotNull(op.session.gattObservation).copy(
         stage = state.value.stage, event = event,
         operationStartedElapsedMs = op.startedElapsedMs,
         stageStartedElapsedMs = op.stageStartedElapsedMs, observedElapsedMs = runtime.now(),
@@ -449,13 +421,14 @@ internal class TeslaBleKeyProbe(
         connectedObserved = op.connectedObserved, serviceFound = op.serviceFound,
         txFound = op.txFound, rxFound = op.rxFound,
         subscriptionConfirmed = state.value.subscriptionConfirmed, rxNotificationCount = op.rxNotificationCount,
+        write = op.session.lastWrite,
     )
 
-    private fun publishServiceGatt(op: Operation, event: TeslaUwbGattEvent) {
-        if (op.serviceUwb == null || current !== op) return
+    private fun publishServiceGatt(op: Operation, event: TeslaGattEvent) {
+        if (op.serviceConnection == null || current !== op) return
         op.session.gattObservation = serviceGattSnapshot(op, event)
-        runtime.teslaUwbState.value = runtime.teslaUwbState.value.copy(gatt = op.session.gattObservation)
-        runtime.event("TESLA_UWB_GATT_OBSERVATION")
+        runtime.teslaConnectionState.value = runtime.teslaConnectionState.value.copy(gatt = op.session.gattObservation)
+        runtime.event("TESLA_CONNECTION_GATT_OBSERVATION")
     }
 
     private fun recordNativeGattStatus(op: Operation, status: Int) {
@@ -484,27 +457,14 @@ internal class TeslaBleKeyProbe(
             stop(op, TeslaKeyStage.FAILED, "GATT_CALLBACK_FAILED")
             return false
         }
-        if (op.uwbRequested) {
-            if (op.serviceUwb == null && runtime.state.value.bleDetectionEnabled) {
-                stop(op, TeslaKeyStage.CANCELED, "DIAGNOSTIC_EXCLUSIVITY_LOST")
-                return false
-            }
-            if (!runtime.granted(Manifest.permission.RANGING)) {
-                stop(op, TeslaKeyStage.CANCELED, "RANGING_PERMISSION_REQUIRED")
-                return false
-            }
-            if (!vinMatches(op)) {
-                stop(op, TeslaKeyStage.CANCELED, "UWB_VIN_SNAPSHOT_CHANGED")
-                return false
-            }
-        }
-        if (op.frunk != null && !vinMatches(op)) {
-            stop(op, TeslaKeyStage.CANCELED, "FRUNK_VIN_SNAPSHOT_CHANGED")
+        if ((op.frunk != null || op.serviceConnection != null) && !vinMatches(op)) {
+            stop(op, TeslaKeyStage.CANCELED, if (op.serviceConnection != null)
+                "CONNECTION_VIN_SNAPSHOT_CHANGED" else "FRUNK_VIN_SNAPSHOT_CHANGED")
             return false
         }
         val reason = runtime.teslaKeyReadinessReason(op.token,
             requireFresh = op.serviceGattAdmission?.requireFresh ?: true,
-            serviceUwb = op.serviceUwb) ?: deviceReadiness(op)
+            serviceConnection = op.serviceConnection) ?: deviceReadiness(op)
         if (reason != null) { stop(op, TeslaKeyStage.CANCELED, reason); return false }
         return true
     }
@@ -530,14 +490,13 @@ internal class TeslaBleKeyProbe(
         when {
             !runtime.granted(Manifest.permission.BLUETOOTH_CONNECT) -> "BLUETOOTH_PERMISSION_REQUIRED"
             bluetooth?.adapter?.isEnabled != true -> "BLUETOOTH_OFF"
-            op.uwbRequested && op.serviceUwb == null && app.getSystemService(PowerManager::class.java)?.isInteractive != true -> "SCREEN_ON_REQUIRED"
-            op.frunk != null && app.getSystemService(PowerManager::class.java)?.isInteractive != true -> "SCREEN_ON_REQUIRED"
-            op.serviceUwb == null && app.getSystemService(KeyguardManager::class.java)?.isDeviceLocked != false -> "UNLOCKED_UI_REQUIRED"
+            op.frunk != null && op.serviceConnection == null && app.getSystemService(PowerManager::class.java)?.isInteractive != true -> "SCREEN_ON_REQUIRED"
+            op.serviceConnection == null && app.getSystemService(KeyguardManager::class.java)?.isDeviceLocked != false -> "UNLOCKED_UI_REQUIRED"
             else -> {
                 val selected = singleAssociation()
                 when {
                     selected == null -> "SINGLE_ASSOCIATION_REQUIRED"
-                    op.serviceUwb == null && selected.deviceMacAddress == null -> "ASSOCIATION_ADDRESS_UNAVAILABLE"
+                    op.serviceConnection == null && selected.deviceMacAddress == null -> "ASSOCIATION_ADDRESS_UNAVAILABLE"
                     op.associationId != null && selected.id != op.associationId -> "ASSOCIATION_CHANGED"
                     op.associationAddress != null && selected.deviceMacAddress != op.associationAddress -> "ASSOCIATION_CHANGED"
                     else -> null
@@ -552,8 +511,8 @@ internal class TeslaBleKeyProbe(
     private fun connectSettled(op: Operation) {
         if (!allowed(op)) return
         try {
-            val device = if (op.serviceUwb != null) {
-                op.serviceUwb.device ?: run { stop(op, TeslaKeyStage.BLOCKED, "SCAN_DEVICE_UNAVAILABLE"); return }
+            val device = if (op.serviceConnection != null) {
+                op.serviceConnection.device ?: run { stop(op, TeslaKeyStage.BLOCKED, "SCAN_DEVICE_UNAVAILABLE"); return }
             } else {
                 val selected = singleAssociation()
                     ?: run { stop(op, TeslaKeyStage.FAILED, "SINGLE_ASSOCIATION_REQUIRED"); return }
@@ -578,7 +537,7 @@ internal class TeslaBleKeyProbe(
 
     private fun retryConnect(op: Operation, manager: NativeTransport, status: Int): Boolean =
         op.connectRetry.retry(status, eligible = teslaGattConnectRetryEligible(
-            serviceUwb = op.serviceUwb != null,
+            serviceConnection = op.serviceConnection != null,
             register = op.register, stage = state.value.stage,
             transmissionAttempted = state.value.transmissionAttempted,
             handshakeStarted = op.handshakeStarted,
@@ -592,8 +551,9 @@ internal class TeslaBleKeyProbe(
         val allocating: Boolean get() = owner.allocating
         val connectionProgressed: Boolean get() = owner.connectionProgressed
         val canReconnect: Boolean get() = owner.canReconnect && nativeAutoConnect != null
-        override val canWrite: Boolean get() = owner.stage == TeslaNativeGattStage.READY && owner.pending == null &&
+        val liveReady: Boolean get() = owner.stage == TeslaNativeGattStage.READY &&
             owner.handle?.let(owner::accepts) == true
+        override val canWrite: Boolean get() = liveReady && owner.pending == null
         override val requestPending: Boolean get() = owner.pending != null
         override val txProperties: Int get() = checkNotNull(op.tx).properties
         private var nativeAutoConnect: Boolean? = null
@@ -614,10 +574,10 @@ internal class TeslaBleKeyProbe(
                 recordConnectReturned(returned != null)
                 if (returned == null) stop(op, TeslaKeyStage.FAILED, "GATT_CONNECT_FAILED")
             } catch (_: SecurityException) {
-                publishServiceGatt(op, TeslaUwbGattEvent.CONNECT_RESULT)
+                publishServiceGatt(op, TeslaGattEvent.CONNECT_RESULT)
                 stop(op, TeslaKeyStage.FAILED, "GATT_CONNECT_PERMISSION_DENIED")
             } catch (_: Exception) {
-                publishServiceGatt(op, TeslaUwbGattEvent.CONNECT_RESULT)
+                publishServiceGatt(op, TeslaGattEvent.CONNECT_RESULT)
                 stop(op, TeslaKeyStage.FAILED, "GATT_CONNECT_FAILED")
             } finally {
                 // 취소가 SDK 안에서 재진입했어도 실제 반환 handle을 먼저 소유하고 닫는다.
@@ -636,10 +596,10 @@ internal class TeslaBleKeyProbe(
                 }
                 if (accepted != true) stop(op, TeslaKeyStage.FAILED, "GATT_CONNECT_FAILED")
             } catch (_: SecurityException) {
-                publishServiceGatt(op, TeslaUwbGattEvent.CONNECT_RESULT)
+                publishServiceGatt(op, TeslaGattEvent.CONNECT_RESULT)
                 stop(op, TeslaKeyStage.FAILED, "GATT_CONNECT_PERMISSION_DENIED")
             } catch (_: Exception) {
-                publishServiceGatt(op, TeslaUwbGattEvent.CONNECT_RESULT)
+                publishServiceGatt(op, TeslaGattEvent.CONNECT_RESULT)
                 stop(op, TeslaKeyStage.FAILED, "GATT_CONNECT_FAILED")
             } finally {
                 if (op.session.sealed) finishCleanup(op)
@@ -653,7 +613,7 @@ internal class TeslaBleKeyProbe(
             op.gattConnectAccepted = null
             op.gattConnectIssuedElapsedMs = issued
             op.gattConnectReturnedElapsedMs = null
-            op.advertisementAgeAtConnectMs = op.serviceUwb?.sourceElapsedMs?.let {
+            op.advertisementAgeAtConnectMs = op.serviceConnection?.sourceElapsedMs?.let {
                 (issued - it).takeIf { age -> age >= 0 }
             }
         }
@@ -661,7 +621,7 @@ internal class TeslaBleKeyProbe(
         private fun recordConnectReturned(accepted: Boolean) {
             op.gattConnectReturnedElapsedMs = runtime.now()
             op.gattConnectAccepted = accepted
-            publishServiceGatt(op, TeslaUwbGattEvent.CONNECT_RESULT)
+            publishServiceGatt(op, TeslaGattEvent.CONNECT_RESULT)
         }
 
         fun seal() {
@@ -708,7 +668,7 @@ internal class TeslaBleKeyProbe(
                 if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
                     op.connectedObserved = true
                 }
-                publishServiceGatt(op, TeslaUwbGattEvent.CONNECTION_CALLBACK)
+                publishServiceGatt(op, TeslaGattEvent.CONNECTION_CALLBACK)
                 if (!allowed(op)) return@post
                 if (status != BluetoothGatt.GATT_SUCCESS || newState != BluetoothProfile.STATE_CONNECTED) {
                     if (owner.stage == TeslaNativeGattStage.CONNECTING && retryConnect(op, this, status)) return@post
@@ -796,7 +756,7 @@ internal class TeslaBleKeyProbe(
                 op.gattDescriptorRequestStatus = result
                 recordNativeGattStatus(op, result)
                 val accepted = owner.recordRequestResult(descriptorRequest, result)
-                publishServiceGatt(op, TeslaUwbGattEvent.STAGE)
+                publishServiceGatt(op, TeslaGattEvent.STAGE)
                 if (!accepted && allowed(op)) stop(op, TeslaKeyStage.FAILED, "GATT_SUBSCRIPTION_REJECTED")
             }
         }
@@ -816,7 +776,7 @@ internal class TeslaBleKeyProbe(
                     check(owner.ready())
                     state.value = state.value.copy(subscriptionConfirmed = true)
                 }
-                publishServiceGatt(op, TeslaUwbGattEvent.DESCRIPTOR_CALLBACK)
+                publishServiceGatt(op, TeslaGattEvent.DESCRIPTOR_CALLBACK)
                 if (!allowed(op)) return@post
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     stop(op, TeslaKeyStage.FAILED, "GATT_SUBSCRIPTION_FAILED")
@@ -824,7 +784,7 @@ internal class TeslaBleKeyProbe(
                 }
                 runtime.event("TESLA_KEY_SUBSCRIBED")
                 if (!allowed(op)) return@post
-                op.handshakeStarted = op.serviceUwb != null
+                op.handshakeStarted = op.serviceConnection != null
                 op.session.start()
             }
         }
@@ -901,6 +861,12 @@ internal class TeslaBleKeyProbe(
         state.value = before.copy(frunkCommandSent = policy.commandSent,
             frunkCommandAcknowledged = policy.commandAcknowledged, frunkOpenObserved = policy.openObserved,
             frunkFreshParkVerified = policy.driveVerified)
+        if (op.serviceConnection != null) {
+            runtime.teslaConnectionState.value = runtime.teslaConnectionState.value.copy(
+                frunkCommandSent = policy.commandSent,
+                frunkCommandAcknowledged = policy.commandAcknowledged,
+                frunkOpenObserved = policy.openObserved)
+        }
         if (policy.driveVerified && !op.frunkParkPublished) {
             op.frunkParkPublished = true
             runtime.event("TESLA_FRUNK_FRESH_P_VERIFIED")
@@ -919,6 +885,7 @@ internal class TeslaBleKeyProbe(
         op.settle.seal()
         op.connectRetry.seal()
         op.gatt?.seal()
+        publishFrunk(op)
         val before = state.value
         val outcome = when {
             op.frunk?.result == TeslaFrunkResult.REJECTED -> TeslaKeyOutcome.FAILED
@@ -934,14 +901,9 @@ internal class TeslaBleKeyProbe(
         op.stageStartedElapsedMs = runtime.now()
         state.value = before.copy(stage = TeslaKeyStage.CLEANING_UP, outcome = outcome, reason = reason,
             registrationUncertain = op.session.registrationAttempted && !before.registrationReported)
-        if (op.uwbRequested) {
-            runtime.teslaUwbState.value = runtime.teslaUwbState.value.copy(
-                stage = TeslaUwbStage.CLEANING_UP, reason = reason, livePeerIndices = emptySet())
-            runtime.event("TESLA_UWB_CLEANING_UP")
-        }
-        publishServiceGatt(op, TeslaUwbGattEvent.STAGE)
+        publishServiceGatt(op, TeslaGattEvent.STAGE)
         if (op.frunk != null) runtime.event(when {
-            op.frunk.commandRejected -> "TESLA_FRUNK_ACTION_REJECTED"
+            op.frunk?.commandRejected == true -> "TESLA_FRUNK_ACTION_REJECTED"
             outcome == TeslaKeyOutcome.UNKNOWN -> "TESLA_FRUNK_RESULT_UNKNOWN"
             terminal == TeslaKeyStage.CANCELED -> "TESLA_FRUNK_CANCELED"
             outcome == TeslaKeyOutcome.VERIFIED_STATUS -> "TESLA_FRUNK_COMPLETE"
@@ -974,9 +936,9 @@ internal class TeslaBleKeyProbe(
         state.value = state.value.copy(stage = if (failed) TeslaKeyStage.CLEANUP_FAILED else op.terminal,
             localClosed = op.gatt == null && !op.connectUncertain,
             reason = if (failed) "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED" else state.value.reason)
-        publishServiceGatt(op, if (failed) TeslaUwbGattEvent.CLEANUP_FAILED else TeslaUwbGattEvent.LOCAL_CLOSED)
-        val serviceResult = if (op.serviceUwb != null) {
-            checkNotNull(runtime.teslaUwbState.value.gatt).terminalBleState(
+        publishServiceGatt(op, if (failed) TeslaGattEvent.CLEANUP_FAILED else TeslaGattEvent.LOCAL_CLOSED)
+        val serviceResult = if (op.serviceConnection != null) {
+            checkNotNull(runtime.teslaConnectionState.value.gatt).terminalBleState(
                 status = if (failed) BleProbeStatus.CLEANUP_FAILED else when (op.terminal) {
                     TeslaKeyStage.COMPLETE -> BleProbeStatus.COMPLETE
                     TeslaKeyStage.CANCELED -> BleProbeStatus.CANCELED
@@ -989,40 +951,28 @@ internal class TeslaBleKeyProbe(
                 phaseElapsedMs = cleanupElapsedMs,
             )
         } else null
-        if (op.uwbRequested) {
-            val next = if (failed) TeslaUwbStage.CLEANUP_FAILED else when (op.terminal) {
-                TeslaKeyStage.COMPLETE -> TeslaUwbStage.COMPLETE
-                TeslaKeyStage.CANCELED -> TeslaUwbStage.CANCELED
-                TeslaKeyStage.TIMED_OUT -> TeslaUwbStage.TIMED_OUT
-                TeslaKeyStage.BLOCKED -> TeslaUwbStage.BLOCKED
-                else -> TeslaUwbStage.FAILED
-            }
-            runtime.teslaUwbState.value = runtime.teslaUwbState.value.copy(stage = next,
-                livePeerIndices = emptySet(),
-                reason = if (failed) "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED" else runtime.teslaUwbState.value.reason)
-            runtime.event(when (next) {
-                TeslaUwbStage.COMPLETE -> "TESLA_UWB_COMPLETE"
-                TeslaUwbStage.CANCELED -> "TESLA_UWB_CANCELED"
-                TeslaUwbStage.TIMED_OUT -> "TESLA_UWB_TIMED_OUT"
-                TeslaUwbStage.BLOCKED -> "TESLA_UWB_BLOCKED"
-                TeslaUwbStage.CLEANUP_FAILED -> "TESLA_UWB_CLEANUP_FAILED"
-                else -> "TESLA_UWB_FAILED"
-            })
+        if (op.serviceConnection != null) {
+            runtime.teslaConnectionState.value = runtime.teslaConnectionState.value.copy(
+                stage = when {
+                    failed -> TeslaConnectionStage.FAILED
+                    op.terminal == TeslaKeyStage.BLOCKED -> TeslaConnectionStage.BLOCKED
+                    op.terminal == TeslaKeyStage.COMPLETE || op.terminal == TeslaKeyStage.CANCELED -> TeslaConnectionStage.STOPPED
+                    else -> TeslaConnectionStage.FAILED
+                }, parkFresh = false, reason = state.value.reason)
         }
         if (failed) {
             runtime.retainTeslaKey(op.token)
             runtime.event("TESLA_KEY_CLEANUP_FAILED")
             if (op.frunk != null) runtime.event("TESLA_FRUNK_CLEANUP_FAILED")
-            op.serviceUwb?.clear()
+            op.serviceConnection?.clear()
             serviceResult?.let { op.serviceFinished?.invoke(it, true) }
             // current·lease를 유지한다. Activity 재생성/다시 취소로 close를 성공 처리하지 않는다.
         } else {
             current = null
             runtime.releaseTeslaKey(op.token)
             runtime.event("TESLA_KEY_LOCAL_CLOSED")
-            if (op.uwbRequested) runtime.event("TESLA_UWB_LOCAL_CLOSED")
             if (op.frunk != null) runtime.event("TESLA_FRUNK_LOCAL_CLOSED")
-            op.serviceUwb?.clear()
+            op.serviceConnection?.clear()
             serviceResult?.let { op.serviceFinished?.invoke(it, false) }
         }
     }
@@ -1045,7 +995,7 @@ internal class TeslaBleKeyProbe(
 
 /** 최초 133의 같은 handle 재접속만 허용한다. 서비스 광고 입장은 이 자격을 넓히지 않는다. */
 internal fun teslaGattConnectRetryEligible(
-    serviceUwb: Boolean,
+    serviceConnection: Boolean,
     register: Boolean,
     stage: TeslaKeyStage,
     transmissionAttempted: Boolean,
@@ -1053,6 +1003,6 @@ internal fun teslaGattConnectRetryEligible(
     connectionProgressed: Boolean,
     sameHandleReconnectable: Boolean,
     connected: Boolean,
-): Boolean = serviceUwb && !register && stage == TeslaKeyStage.CONNECTING &&
+): Boolean = serviceConnection && !register && stage == TeslaKeyStage.CONNECTING &&
     !transmissionAttempted && !handshakeStarted && !connectionProgressed &&
     sameHandleReconnectable && !connected

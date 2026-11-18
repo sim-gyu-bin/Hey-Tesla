@@ -1,6 +1,6 @@
 package com.heytesla.app.vehicle.ble
 
-import com.heytesla.app.vehicle.uwb.TeslaServiceUwbGattAdmission
+import com.heytesla.app.vehicle.connection.TeslaServiceConnectionGattAdmission
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -45,7 +45,7 @@ class TeslaNativeGattConnectionDeviceTest {
         })
         val handler = Handler(Looper.getMainLooper())
         val owner = TeslaNativeGattOwner<BluetoothGatt>()
-        val admission = TeslaServiceUwbGattAdmission()
+        val admission = TeslaServiceConnectionGattAdmission()
         val callbackFailure = AtomicReference<Throwable?>()
         val callbackEntries = AtomicInteger()
         val barrier = CountDownLatch(1)
@@ -115,7 +115,7 @@ class TeslaNativeGattConnectionDeviceTest {
         })
         val handler = Handler(Looper.getMainLooper())
         val owner = TeslaNativeGattOwner<BluetoothGatt>()
-        val admission = TeslaServiceUwbGattAdmission()
+        val admission = TeslaServiceConnectionGattAdmission()
         val barrier = CountDownLatch(1)
         val failure = AtomicReference<Throwable?>()
         val callbacks = AtomicInteger()

@@ -10,7 +10,6 @@ import com.heytesla.app.vehicle.ble.sealedWriteObservation
 import com.heytesla.app.vehicle.frunk.TeslaFrunkPolicy
 import com.heytesla.app.vehicle.frunk.TeslaFrunkResult
 import com.heytesla.app.vehicle.frunk.TeslaFrunkSequence
-import com.heytesla.app.vehicle.navigation.VehicleCoordinateObservation
 import com.heytesla.app.vehicle.protocol.TeslaBleAuthEvidence
 import com.heytesla.app.vehicle.protocol.TeslaBleConversation
 import com.heytesla.app.vehicle.protocol.TeslaBleFrameDecoder
@@ -19,17 +18,16 @@ import com.heytesla.app.vehicle.protocol.TeslaBleQuery
 import com.heytesla.app.vehicle.protocol.TeslaBleResponseObservation
 import com.heytesla.app.vehicle.protocol.TeslaBleStep
 import com.heytesla.app.vehicle.protocol.TeslaReadOnlyStatus
-import com.heytesla.app.vehicle.protocol.TeslaUwbAppDeviceBatteryState
-import com.heytesla.app.vehicle.protocol.TeslaUwbAppDeviceInfoProtocol
-import com.heytesla.app.vehicle.protocol.TeslaUwbAppDeviceInfoRequest
-import com.heytesla.app.vehicle.protocol.TeslaUwbAppDeviceInfoSource
-import com.heytesla.app.vehicle.uwb.TeslaUwbGattEvent
-import com.heytesla.app.vehicle.uwb.TeslaUwbGattObservation
-import com.heytesla.app.vehicle.uwb.TeslaUwbNegotiation
-import com.heytesla.app.vehicle.uwb.TeslaUwbStage
-
-import com.tesla.generated.universalmessage.UniversalMessage
+import com.heytesla.app.vehicle.protocol.TeslaWakeReply
 import java.util.ArrayDeque
+import com.heytesla.app.vehicle.connection.TeslaGattDeadlineCause
+import com.heytesla.app.vehicle.connection.TeslaGattEvent
+import com.heytesla.app.vehicle.connection.TeslaGattObservation
+import com.heytesla.app.vehicle.connection.TeslaParkMonitor
+import com.heytesla.app.vehicle.connection.TeslaConnectionPreparationPhase
+import com.heytesla.app.vehicle.connection.TeslaConnectionWakePolicy
+import com.heytesla.app.vehicle.protocol.TeslaDriveState
+import com.heytesla.app.vehicle.protocol.TeslaGear
 
 enum class TeslaKeyStage {
     IDLE, PREPARING_KEY, CONNECTING, DISCOVERING, NEGOTIATING_MTU, SUBSCRIBING,
@@ -74,9 +72,9 @@ internal class TeslaBleKeySession(
     var deadline: Long,
     private val register: Boolean,
     private val query: TeslaBleQuery,
-    private val frunk: TeslaFrunkPolicy? = null,
-    private val uwbRequested: Boolean = false,
-    private val deviceInfoSource: TeslaUwbAppDeviceInfoSource? = null,
+    private var frunk: TeslaFrunkPolicy? = null,
+    private val serviceConnection: Boolean = false,
+    private val wallNow: () -> Long = System::currentTimeMillis,
     private val now: () -> Long,
     private val post: (Runnable) -> Boolean,
     private val postDelayed: (Runnable, Long) -> Boolean,
@@ -84,23 +82,18 @@ internal class TeslaBleKeySession(
     private val listener: Listener,
     private val transport: () -> Transport?,
 ) {
-    init {
-        require(!uwbRequested || deviceInfoSource != null) { "UWB_DEVICE_INFO_SOURCE_REQUIRED" }
-    }
-
     interface Listener {
         var state: TeslaKeyProbeState
-        val uwbStage: TeslaUwbStage? get() = null
         fun allowed(): Boolean
         fun onStop(stage: TeslaKeyStage, reason: String?)
         fun onEvent(event: String) {}
         fun onStage() {}
-        fun onGatt(event: TeslaUwbGattEvent) {}
+        fun onGatt(event: TeslaGattEvent) {}
         fun onFrunk() {}
         fun onNotification(receivedAtElapsedMs: Long) {}
-        fun onUwbAuthenticating() {}
-        fun coordinatesWanted(): Boolean = false
-        fun onCoordinates(observation: VehicleCoordinateObservation?, reason: String?) {}
+        fun onParkState(drive: TeslaDriveState?, reason: String?) {}
+        fun onExecuting() {}
+        fun onStopping(reason: String) {}
     }
 
     interface Transport {
@@ -114,22 +107,12 @@ internal class TeslaBleKeySession(
 
     private data class ReceivedFrame(val payload: ByteArray, val receivedAtElapsedMs: Long)
     var conversation: TeslaBleConversation? = null
-    /** Set only while preparing the existing credential; consumed once after primary authentication. */
-    var locationConversationFactory: (() -> TeslaBleConversation)? = null
-    private var locationConversation: TeslaBleConversation? = null
-    private var locationAttempted = false
-    private var primaryAuthenticated = false
-    private var locationDeadline = Long.MAX_VALUE
-    private var locationOutgoing: ByteArray? = null
-    private var locationFrame = false
-    private var locationFrameAccepted = false
-    private var locationCancellationGeneration = 0L
-    private val locationResumeTask = Runnable { if (allowed()) drain() }
     var frunkSequence: TeslaFrunkSequence? = null
-    var uwb: TeslaUwbNegotiation? = null
-    var gattObservation: TeslaUwbGattObservation? = null
+    var gattObservation: TeslaGattObservation? = null
     var pendingRxResponse: TeslaBleResponseObservation? = null
     var stageDeadline = deadline
+        private set
+    private var stageDeadlineCause = TeslaGattDeadlineCause.PROTOCOL_STAGE
     var writeDeadline = Long.MAX_VALUE
         private set
     var sealed = false
@@ -150,29 +133,12 @@ internal class TeslaBleKeySession(
     private var frame: ByteArray? = null
     private var offset = 0
     private var frunkFrame = false
+    private var wakeFrame = false
     private val decoder = TeslaBleFrameDecoder()
     private val incoming = ArrayDeque<ReceivedFrame>()
     private var queuedBytes = 0
-    private val uwbOutgoing = ArrayDeque<Pair<ByteArray, () -> Unit>>()
-    private var uwbFrameComplete: (() -> Unit)? = null
-    private var completingUwbFrame = false
-    private var deviceInfoSubscribed = false
-    private var lastBatteryState: TeslaUwbAppDeviceBatteryState? = null
-    private var pendingBatteryChange: ByteArray? = null
-    private val deviceInfoCallbackLock = Any()
-    private var deviceInfoCallbackQueued = false
-    private var deviceInfoSourceClosed = false
-    private var deviceInfoCleanupFailed = false
-    @Volatile private var deviceInfoCallbackFailed = false
-    private val deviceInfoChangedTask = Runnable {
-        synchronized(deviceInfoCallbackLock) { deviceInfoCallbackQueued = false }
-        try {
-            if (allowed() && deviceInfoSubscribed) sendDeviceInfo(includeBatteryState = true, changedOnly = true)
-        } catch (_: Exception) {
-            stop(TeslaKeyStage.FAILED, "DEVICE_INFO_SOURCE_FAILED")
-        }
-    }
     private var watchdog: Runnable? = null
+    private var terminationStarted = false
     private var closeStarted = false
     private var closeFailed = false
     private var closeResult: Boolean? = null
@@ -186,6 +152,289 @@ internal class TeslaBleKeySession(
             catch (_: Exception) { stop(TeslaKeyStage.FAILED, "GATT_CALLBACK_FAILED") }
         },
     )
+
+    val frunkPolicy: TeslaFrunkPolicy? get() = frunk
+    private val park = if (serviceConnection) TeslaParkMonitor(now, wallNow) else null
+    private val wakePolicy = if (serviceConnection) TeslaConnectionWakePolicy(deadline, now) else null
+    private var preparation = TeslaConnectionPreparationPhase.BODY
+    val preparationPhase: TeslaConnectionPreparationPhase get() = preparation
+    private var bodyFactory: (() -> TeslaBleConversation)? = null
+    private var wakeFactory: ((authorize: () -> String?, deadline: Long) -> TeslaBleConversation)? = null
+    private var driveFactory: ((sessionRetransmit: Boolean) -> TeslaBleConversation)? = null
+    private var frunkFactory: ((TeslaFrunkPolicy) -> TeslaFrunkSequence)? = null
+    private var queryOutstanding = false
+    private var commandClaimed = false
+    private var connectionStarted = false
+    private var wakeCommandCreated = false
+    // 단발 깨움 ACK 시 한 번 고정한다. 재조회·수신·source timestamp로 연장하지 않는다.
+    private var initialDriveDeadline = Long.MAX_VALUE
+    private var initialDriveLastElapsed = 0L
+    private var initialDriveRetries = 0
+    private var initialDriveRetryPending = false
+    private var initialParkAccepted = false
+    private val connectionTask = Runnable {
+        try {
+            if (allowed() && !queryOutstanding && frame == null && writePump.idle) {
+                if (initialDriveRetryPending) {
+                    initialDriveRetryPending = false
+                    initialDriveRetries++
+                    listener.onEvent("TESLA_CONNECTION_DRIVE_RETRY")
+                    if (allowed()) startConnectionQuery() // 새 인증·새 identity, HELLO 재송신 창은 재무장하지 않는다.
+                } else if (commandClaimed) beginServiceFrunk() else startConnectionQuery()
+            }
+        } catch (_: Exception) { stop(TeslaKeyStage.FAILED, "CONNECTION_PROTOCOL_START_FAILED") }
+    }
+    private var sessionRetransmits = 0
+    private val sessionRetransmitTask = Runnable {
+        try { retransmitSessionRequest() } catch (_: Exception) { stop(TeslaKeyStage.FAILED, "CONNECTION_PROTOCOL_START_FAILED") }
+    }
+
+    /** Credential factories remain bound to this operation; no second transport is allocated. */
+    fun configureConnection(
+        body: () -> TeslaBleConversation,
+        wake: (authorize: () -> String?, deadline: Long) -> TeslaBleConversation,
+        drive: (sessionRetransmit: Boolean) -> TeslaBleConversation,
+        command: (TeslaFrunkPolicy) -> TeslaFrunkSequence,
+    ) {
+        check(serviceConnection && !register && frunk == null && driveFactory == null && !sealed)
+        bodyFactory = body
+        wakeFactory = wake
+        driveFactory = drive
+        frunkFactory = command
+    }
+
+    fun dispatchServiceFrunk(policy: TeslaFrunkPolicy): Boolean {
+        if (!serviceConnection || commandClaimed || !allowed() || park?.observed == null ||
+            park.readinessReason() != null || frunkFactory == null || transport()?.canWrite != true &&
+            transport()?.requestPending != true) return false
+        policy.readinessReason()?.let { return false }
+        commandClaimed = true // Claim before any callback can reenter.
+        frunk = policy
+        deadline = minOf(deadline, policy.deadline)
+        return try {
+            remove(connectionTask)
+            remove(sessionRetransmitTask)
+            listener.state = listener.state.copy(frunkCommandRequested = true)
+            listener.onExecuting()
+            if (!allowed()) false
+            else {
+                if (!queryOutstanding) scheduleConnection(0L)
+                !sealed
+            }
+        } catch (_: Exception) {
+            stop(TeslaKeyStage.FAILED, "CONNECTION_PROTOCOL_START_FAILED")
+            false
+        }
+    }
+
+    private fun scheduleConnection(delay: Long) {
+        val posted = try { postDelayed(connectionTask, delay) } catch (_: Exception) { false }
+        if (!posted) stop(TeslaKeyStage.FAILED, "GATT_CALLBACK_FAILED")
+    }
+
+    private fun startConnectionPreparation() {
+        check(!connectionStarted)
+        connectionStarted = true
+        startConnectionConversation(TeslaConnectionPreparationPhase.BODY)
+    }
+
+    private fun startConnectionQuery(afterWake: Boolean = false) =
+        startConnectionConversation(TeslaConnectionPreparationPhase.DRIVE, afterWake)
+
+    private fun startConnectionConversation(phase: TeslaConnectionPreparationPhase, afterWake: Boolean = false) {
+        if (!allowed() || queryOutstanding || commandClaimed) return
+        check(frame == null && writePump.idle && conversation == null)
+        clearIncoming()
+        decoder.clear()
+        preparation = phase
+        queryOutstanding = true
+        listener.state = listener.state.copy(
+            query = if (phase == TeslaConnectionPreparationPhase.DRIVE) TeslaBleQuery.DRIVE_STATE else TeslaBleQuery.BODY_STATUS,
+            phase = null, reason = null,
+        )
+        conversation = when (phase) {
+            TeslaConnectionPreparationPhase.BODY -> {
+                val factory = checkNotNull(bodyFactory)
+                bodyFactory = null
+                factory()
+            }
+            TeslaConnectionPreparationPhase.WAKE -> {
+                val factory = checkNotNull(wakeFactory)
+                wakeFactory = null // Consume before callbacks or construction can reenter.
+                authorizeConnectionWake()?.let { stop(TeslaKeyStage.CANCELED, it); return }
+                factory(::authorizeConnectionWake, checkNotNull(checkNotNull(wakePolicy).wakeDeadline))
+            }
+            TeslaConnectionPreparationPhase.DRIVE -> checkNotNull(driveFactory).invoke(afterWake)
+        }
+        if (phase == TeslaConnectionPreparationPhase.WAKE) {
+            listener.onEvent("TESLA_CONNECTION_WAKE_STARTED")
+            if (!allowed()) return
+        }
+        step(checkNotNull(conversation).start(false))
+        if (afterWake && phase == TeslaConnectionPreparationPhase.DRIVE && !sealed && queryOutstanding) {
+            // wake ACK 뒤 infotainment 기동 중 첫 HELLO가 유실될 수 있다. 같은 요청 재송신만 늘리고
+            // wake 재송신·P 추정은 없다. HANDSHAKING 진입 시 설정된 10초 기한을 이 창으로 대체한다.
+            setStageDeadline(minOf(deadline, now() + SESSION_RETRANSMIT_WINDOW_MS))
+            sessionRetransmits = 0
+            scheduleSessionRetransmit()
+        }
+    }
+
+    private fun scheduleSessionRetransmit() {
+        val posted = try { postDelayed(sessionRetransmitTask, SESSION_RETRANSMIT_INTERVAL_MS) } catch (_: Exception) { false }
+        if (!posted) stop(TeslaKeyStage.FAILED, "GATT_CALLBACK_FAILED")
+    }
+
+    private fun retransmitSessionRequest() {
+        if (!allowed() || preparation != TeslaConnectionPreparationPhase.DRIVE || !queryOutstanding ||
+            frunkSequence != null || commandClaimed || listener.state.stage != TeslaKeyStage.HANDSHAKING) return
+        val current = conversation ?: return
+        if (sessionRetransmits >= MAX_SESSION_RETRANSMITS) return
+        if (frame != null || !writePump.idle) {
+            scheduleSessionRetransmit() // 직전 쓰기 완료 전에는 이번 회차를 미룬다.
+            return
+        }
+        sessionRetransmits++
+        listener.onEvent("TESLA_CONNECTION_SESSION_RETRANSMIT")
+        if (!allowed()) return
+        val next = current.retransmitSessionRequest()
+        if (next == TeslaBleStep.Ignored) return
+        step(next)
+        if (!sealed && sessionRetransmits < MAX_SESSION_RETRANSMITS) scheduleSessionRetransmit()
+    }
+
+    private fun retireConnectionConversation() {
+        try { remove(sessionRetransmitTask) } catch (_: Exception) { closeFailed = true }
+        queryOutstanding = false
+        conversation?.close()
+        conversation = null
+    }
+
+    private fun completeConnectionBody(status: TeslaReadOnlyStatus) {
+        val policy = checkNotNull(wakePolicy)
+        policy.acceptBody(status)?.let { stop(TeslaKeyStage.FAILED, it); return }
+        retireConnectionConversation()
+        listener.state = listener.state.copy(status = status, outcome = TeslaKeyOutcome.PENDING)
+        listener.onEvent("TESLA_CONNECTION_BODY_VERIFIED")
+        if (!allowed()) return
+        if (policy.wakeRequired) {
+            startConnectionConversation(TeslaConnectionPreparationPhase.WAKE)
+        } else {
+            listener.onEvent(if (policy.awake) "TESLA_CONNECTION_WAKE_SKIPPED_AWAKE" else "TESLA_CONNECTION_WAKE_SKIPPED_UNKNOWN")
+            if (!allowed()) return
+            startConnectionQuery()
+        }
+    }
+
+    private fun completeConnectionWake(reply: TeslaWakeReply) {
+        if (!serviceConnection || preparation != TeslaConnectionPreparationPhase.WAKE ||
+            !queryOutstanding || conversation == null || frunkSequence != null || !wakeCommandCreated) {
+            stop(TeslaKeyStage.FAILED, if (serviceConnection) "CONNECTION_WAKE_RESULT_UNEXPECTED" else "WAKE_SEQUENCE_REQUIRED")
+            return
+        }
+        retireConnectionConversation()
+        when (reply) {
+            TeslaWakeReply.ACKNOWLEDGED -> {
+                beginInitialDriveWindow()
+                listener.onEvent("TESLA_CONNECTION_WAKE_ACKNOWLEDGED")
+                if (!allowed()) return
+                startConnectionQuery(afterWake = true) // ACK is neither P nor proof that the vehicle physically woke.
+            }
+            TeslaWakeReply.NOMINAL_ACK -> {
+                beginInitialDriveWindow()
+                listener.onEvent("TESLA_CONNECTION_WAKE_NOMINAL_ACK")
+                if (!allowed()) return
+                // An unsigned nominal ACK permits only a new authenticated read, never P or control.
+                startConnectionQuery(afterWake = true)
+            }
+            TeslaWakeReply.REJECTED -> {
+                listener.onEvent("TESLA_CONNECTION_WAKE_REJECTED")
+                stop(TeslaKeyStage.FAILED, "CONNECTION_WAKE_REJECTED")
+            }
+            TeslaWakeReply.UNCONFIRMED -> {
+                listener.onEvent("TESLA_CONNECTION_WAKE_UNCONFIRMED")
+                stop(TeslaKeyStage.FAILED, "CONNECTION_WAKE_UNCONFIRMED")
+            }
+        }
+    }
+
+    private fun beginInitialDriveWindow() {
+        if (initialDriveDeadline != Long.MAX_VALUE || initialParkAccepted) return
+        val current = now()
+        initialDriveLastElapsed = current
+        initialDriveDeadline = minOf(deadline, current + INITIAL_DRIVE_READY_MS)
+    }
+
+    private fun authorizeConnectionWake(): String? {
+        if (!allowed()) return listener.state.reason ?: "CONNECTION_OWNER_UNAVAILABLE"
+        if (!serviceConnection || preparation != TeslaConnectionPreparationPhase.WAKE ||
+            !queryOutstanding || commandClaimed || frunkSequence != null) return "CONNECTION_WAKE_FRAME_UNEXPECTED"
+        return checkNotNull(wakePolicy).authorizationReason()
+    }
+
+    private fun completeConnectionQuery(status: TeslaReadOnlyStatus) {
+        if (!queryOutstanding || conversation == null) {
+            stop(TeslaKeyStage.FAILED, "CONNECTION_QUERY_RESULT_UNEXPECTED")
+            return
+        }
+        when (preparation) {
+            TeslaConnectionPreparationPhase.BODY -> { completeConnectionBody(status); return }
+            TeslaConnectionPreparationPhase.WAKE -> {
+                stop(TeslaKeyStage.FAILED, "CONNECTION_QUERY_RESULT_UNEXPECTED")
+                return
+            }
+            TeslaConnectionPreparationPhase.DRIVE -> Unit
+        }
+        if (status.driveState == null || status.bodyReceivedAtElapsedRealtime != null) {
+            stop(TeslaKeyStage.FAILED, "CONNECTION_DRIVE_RESPONSE_REQUIRED")
+            return
+        }
+        retireConnectionConversation()
+        if (initialDriveDeadline != Long.MAX_VALUE && !initialParkAccepted && !commandClaimed &&
+            status.driveShiftStateInvalid && status.driveState.gear == TeslaGear.UNKNOWN) {
+            if (initialDriveRetries >= MAX_INITIAL_DRIVE_RETRIES) {
+                stop(TeslaKeyStage.CANCELED, "CONNECTION_EXPLICIT_P_REQUIRED")
+                return
+            }
+            // INVALID는 P·음성 준비가 아니다. 완료된 읽기 기한은 폐기하되 원 준비창/global은 보존한다.
+            setStageDeadline(deadline)
+            initialDriveRetryPending = true
+            listener.state = listener.state.copy(status = status, outcome = TeslaKeyOutcome.PENDING)
+            scheduleConnection(TeslaParkMonitor.POLL_MS)
+            return
+        }
+        val reason = checkNotNull(park).accept(status.driveState)
+        if (reason != null) {
+            // Retain the actual non-P gear, but seal before notifying the microphone owner.
+            listener.state = listener.state.copy(status = status)
+            stop(TeslaKeyStage.CANCELED, reason, drive = status.driveState)
+            return
+        }
+        initialParkAccepted = true
+        initialDriveDeadline = Long.MAX_VALUE
+        if (!commandClaimed) deadline = Long.MAX_VALUE
+        setStageDeadline(deadline)
+        listener.state = listener.state.copy(status = status, outcome = TeslaKeyOutcome.VERIFIED_STATUS)
+        listener.onParkState(status.driveState, null)
+        if (!allowed()) return
+        remove(connectionTask)
+        scheduleConnection(if (commandClaimed) 0L else TeslaParkMonitor.POLL_MS)
+    }
+
+    private fun beginServiceFrunk() {
+        if (!allowed() || queryOutstanding || frunkSequence != null) return
+        check(commandClaimed && frame == null && writePump.idle)
+        clearIncoming()
+        decoder.clear()
+        val factory = checkNotNull(frunkFactory)
+        bodyFactory = null
+        wakeFactory = null
+        driveFactory = null
+        frunkFactory = null
+        frunkSequence = factory(checkNotNull(frunk))
+        listener.state = listener.state.copy(query = TeslaBleQuery.DRIVE_STATE, phase = null)
+        step(checkNotNull(frunkSequence).start())
+    }
 
     /** 준비/연결을 포함한 동일 elapsed deadline watchdog. Handler uptime 지연과 시계를 합치지 않는다. */
     fun watch() {
@@ -207,35 +456,42 @@ internal class TeslaBleKeySession(
 
     fun checkReadiness(): Boolean = allowed()
 
-    /** 서비스의 첫 유효 거리 callback에서만 호출한다. 기존 초기 예산 검사를 통과한 뒤 기한을 해제한다. */
-    fun continueServiceRanging(): Boolean {
-        if (!allowed()) return false
-        checkNotNull(conversation).continueServiceRanging()
-        deadline = Long.MAX_VALUE
-        stageDeadline = Long.MAX_VALUE
-        return true
-    }
-
     /** Facade의 native callback 입장에서도 동일 protocol/write 기한을 검사한다. */
     fun checkDeadlines(): Boolean {
         if (sealed) return false
-        if (deviceInfoCallbackFailed) {
-            stop(TeslaKeyStage.FAILED, "GATT_CALLBACK_FAILED")
-            return false
+        val current = now()
+        val readyDeadline = initialDriveDeadline
+        if (readyDeadline != Long.MAX_VALUE) {
+            if (current < initialDriveLastElapsed) {
+                stop(TeslaKeyStage.CANCELED, "CONNECTION_TIME_REVERSED")
+                return false
+            }
+            initialDriveLastElapsed = current
+            // 먼저 만료한 원 global/protocol/write의 원인·관측을 준비창으로 덮어쓰지 않는다.
+            val originalDeadline = minOf(deadline, stageDeadline, writeDeadline)
+            if (current >= originalDeadline && originalDeadline <= readyDeadline) {
+                expireDeadline(checkNotNull(teslaGattDeadlineCause(
+                    current, deadline, stageDeadline, writeDeadline, stageDeadlineCause)))
+                return false
+            }
+            if (current >= readyDeadline) {
+                stop(TeslaKeyStage.CANCELED, "CONNECTION_EXPLICIT_P_REQUIRED")
+                return false
+            }
         }
-        uwb?.checkReadiness()
-        if (sealed) return false
-        checkLocationLifetime()
-        if (sealed) return false
+        if (frunkSequence == null) park?.observed?.let {
+            park.readinessReason()?.let { reason -> stop(TeslaKeyStage.CANCELED, reason); return false }
+        }
         frunk?.readinessReason()?.let { stop(TeslaKeyStage.CANCELED, it); return false }
         if (now() < deadline && now() >= stageDeadline && frunkSequence?.awaitingActionReply == true &&
             frame == null && !writePump.writePending && !writePump.queued) {
-            stageDeadline = deadline
+            setStageDeadline(deadline)
             step(checkNotNull(frunkSequence).observeAfterMissingReply())
             return !sealed
         }
-        if (teslaGattDeadlineExpired(now(), deadline, stageDeadline, writeDeadline)) {
-            stop(TeslaKeyStage.TIMED_OUT, "DEADLINE_EXPIRED")
+        val cause = teslaGattDeadlineCause(now(), deadline, stageDeadline, writeDeadline, stageDeadlineCause)
+        if (cause != null) {
+            expireDeadline(cause)
             return false
         }
         return true
@@ -244,15 +500,21 @@ internal class TeslaBleKeySession(
     private fun allowed(): Boolean {
         if (sealed) return false
         if (!listener.allowed()) {
-            seal() // An owner/permission loss must release metadata listeners even without a TX.
+            stop(TeslaKeyStage.CANCELED, "CONNECTION_OWNER_UNAVAILABLE")
             return false
         }
         return checkDeadlines()
     }
 
+    /** 원인은 화면 단계가 아니라 이 기한을 실제 설정한 경계에 속한다. */
+    fun setStageDeadline(value: Long, cause: TeslaGattDeadlineCause = TeslaGattDeadlineCause.PROTOCOL_STAGE) {
+        stageDeadline = value
+        stageDeadlineCause = cause
+    }
+
     fun stage(next: TeslaKeyStage, limit: Long) {
         if (listener.state.stage == next) return
-        stageDeadline = minOf(deadline, now() + limit)
+        setStageDeadline(minOf(deadline, now() + limit))
         listener.state = listener.state.copy(stage = next)
         listener.onStage()
     }
@@ -264,187 +526,12 @@ internal class TeslaBleKeySession(
         if (!allowed()) return
         try {
             val first = when {
+                serviceConnection -> { startConnectionPreparation(); return }
                 frunkSequence != null -> checkNotNull(frunkSequence).start()
                 else -> checkNotNull(conversation).start(register)
             }
             step(first)
         } catch (_: Exception) { stop(TeslaKeyStage.FAILED, "PROTOCOL_START_FAILED") }
-    }
-
-    fun sendFira(body: ByteArray, frameComplete: () -> Unit) {
-        if (!allowed()) { body.fill(0); return }
-        if (uwbOutgoing.size >= MAX_QUEUED_FRAMES) {
-            body.fill(0)
-            stop(TeslaKeyStage.FAILED, "TX_QUEUE_OVERFLOW")
-            return
-        }
-        uwbOutgoing.addLast(body to frameComplete)
-        sendNextUwb()
-    }
-
-    private fun sendNextUwb() {
-        if (!allowed() || completingUwbFrame || frame != null || writePump.writePending || writePump.queued ||
-            writePump.descriptorPending) return
-        val body: ByteArray
-        if (uwbOutgoing.isNotEmpty()) {
-            val outgoing = uwbOutgoing.removeFirst()
-            body = outgoing.first
-            uwbFrameComplete = outgoing.second
-        } else if (pendingBatteryChange != null) {
-            body = checkNotNull(pendingBatteryChange)
-            pendingBatteryChange = null
-            uwbFrameComplete = NO_FRAME_ACTION
-        } else {
-            if (incoming.isNotEmpty()) return // Consume already queued primary request/stop before sidecar TX.
-            val payload = locationOutgoing ?: return
-            locationOutgoing = null
-            if (locationConversation == null) { payload.fill(0); return }
-            sendFrame(payload, sidecar = true)
-            return
-        }
-        step(checkNotNull(conversation).sendFira(body))
-    }
-
-    private fun startLocationSidecar() {
-        if (!primaryAuthenticated || locationAttempted || locationConversationFactory == null ||
-            !listener.coordinatesWanted()) return
-        locationAttempted = true
-        val factory = checkNotNull(locationConversationFactory)
-        locationConversationFactory = null
-        if (!allowed()) return
-        val created = try { factory() } catch (_: Exception) {
-            if (!sealed && listener.allowed() && listener.coordinatesWanted()) {
-                listener.onCoordinates(null, "LOCATION_PROTOCOL_INVALID")
-            }
-            return
-        }
-        locationConversation = created
-        locationDeadline = now() + LOCATION_MS
-        try {
-            locationStep(created.start(false))
-            sendNextUwb()
-        } catch (_: Exception) {
-            if (locationConversation != null) finishLocation(null, "LOCATION_PROTOCOL_INVALID")
-        }
-    }
-
-    private fun checkLocationLifetime() {
-        startLocationSidecar()
-        if (locationConversation == null) return
-        if (!listener.coordinatesWanted()) finishLocation(null, "LOCATION_OWNER_UNAVAILABLE")
-        else if (now() >= locationDeadline) finishLocation(null, "LOCATION_TIMEOUT")
-    }
-
-    private fun locationStep(next: TeslaBleStep) {
-        when (next) {
-            is TeslaBleStep.Send -> {
-                if (locationConversation == null || locationOutgoing != null ||
-                    next.actuator || next.payload.isEmpty() || next.payload.size > MAX_TX_PAYLOAD) {
-                    next.payload.fill(0)
-                    finishLocation(null, "LOCATION_PROTOCOL_INVALID")
-                } else locationOutgoing = next.payload
-            }
-            is TeslaBleStep.Waiting -> Unit // No primary phase, authentication event or deadline mutation.
-            is TeslaBleStep.LocationResult -> finishLocation(next.observation, next.reason)
-            is TeslaBleStep.Failed -> finishLocation(null,
-                if (next.authEvidence != null) "LOCATION_AUTHENTICATION_REJECTED" else "LOCATION_PROTOCOL_INVALID")
-            else -> {
-                discardUnconsumedTeslaBleStep(next)
-                finishLocation(null, "LOCATION_PROTOCOL_INVALID")
-            }
-        }
-    }
-
-    private fun finishLocation(observation: VehicleCoordinateObservation?, reason: String?) {
-        val active = locationConversation ?: return
-        locationConversation = null
-        locationDeadline = Long.MAX_VALUE
-        locationOutgoing?.fill(0)
-        locationOutgoing = null
-        active.close()
-        cancelUnissuedLocationFrame()
-        // An already issued frame MUST finish at its BE16 boundary, even on sidecar timeout.
-        // Its context is gone, so no response can cause a query/retry or escape this owner.
-        if (!sealed && listener.allowed() && listener.coordinatesWanted()) listener.onCoordinates(observation, reason)
-    }
-
-    private fun cancelUnissuedLocationFrame() {
-        if (!locationFrame || locationFrameAccepted || offset != 0 || pendingRequest != null || sdkRequest != null ||
-            transport()?.requestPending != false || writePump.descriptorPending) return
-        if (!writePump.idle && !writePump.cancelUnissuedWrite()) return
-        locationCancellationGeneration++
-        frame?.fill(0)
-        frame = null
-        chunk?.fill(0)
-        chunk = null
-        locationFrame = false
-        writeDeadline = Long.MAX_VALUE
-        writeDispatchOwner = null
-        queuedWrite = null
-        pendingWriteObservation = null
-        val posted = try { post(locationResumeTask) } catch (_: Exception) { false }
-        if (!posted) stop(TeslaKeyStage.FAILED, "GATT_CALLBACK_FAILED")
-    }
-
-    private fun isLocationEnvelope(payload: ByteArray): Boolean {
-        val envelope = try { UniversalMessage.RoutableMessage.parseFrom(payload) } catch (_: Exception) { return false }
-        return envelope.hasFromDestination() &&
-            envelope.fromDestination.subDestinationCase == UniversalMessage.Destination.SubDestinationCase.DOMAIN &&
-            envelope.fromDestination.domain == UniversalMessage.Domain.DOMAIN_INFOTAINMENT
-    }
-
-    private fun receiveDeviceInfoRequest(request: TeslaUwbAppDeviceInfoRequest) {
-        if (!uwbRequested) { stop(TeslaKeyStage.FAILED, "UWB_PURPOSE_INVALID"); return }
-        when (request) {
-            TeslaUwbAppDeviceInfoRequest.NONE -> Unit
-            TeslaUwbAppDeviceInfoRequest.GET_MODEL_NUMBER ->
-                sendDeviceInfo(includeBatteryState = false, changedOnly = false)
-            TeslaUwbAppDeviceInfoRequest.ONCHANGE_BATTERY_STATE -> {
-                if (!deviceInfoSubscribed) {
-                    deviceInfoSubscribed = true
-                    checkNotNull(deviceInfoSource).subscribe(::onDeviceInfoChanged)
-                }
-                // A repeated request gets a fresh response but never a second subscription.
-                sendDeviceInfo(includeBatteryState = true, changedOnly = false)
-            }
-        }
-    }
-
-    /** Platform callbacks only schedule one owner-queue task, never inspect ownership off-thread. */
-    private fun onDeviceInfoChanged() {
-        synchronized(deviceInfoCallbackLock) {
-            if (deviceInfoSourceClosed || deviceInfoCallbackQueued) return
-            deviceInfoCallbackQueued = true
-            val posted = try { post(deviceInfoChangedTask) } catch (_: Exception) { false }
-            if (!posted) deviceInfoCallbackFailed = true
-        }
-    }
-
-    private fun sendDeviceInfo(includeBatteryState: Boolean, changedOnly: Boolean) {
-        if (!allowed()) return
-        if (!changedOnly && uwbOutgoing.size >= MAX_QUEUED_FRAMES) {
-            stop(TeslaKeyStage.FAILED, "TX_QUEUE_OVERFLOW")
-            return
-        }
-        val snapshot = checkNotNull(deviceInfoSource).snapshot(includeBatteryState)
-        try {
-            if (!allowed()) return
-            val battery = snapshot.batteryState
-            require(!includeBatteryState || battery != null) { "DEVICE_INFO_BATTERY_STATE_REQUIRED" }
-            require(includeBatteryState || battery == null) { "DEVICE_INFO_MODEL_BATTERY_STATE_UNEXPECTED" }
-            if (changedOnly && battery == lastBatteryState) return
-            val body = TeslaUwbAppDeviceInfoProtocol.response(snapshot)
-            if (includeBatteryState) {
-                lastBatteryState = battery
-                pendingBatteryChange?.fill(0)
-                pendingBatteryChange = null
-            }
-            if (changedOnly) {
-                // Keep only the latest unsent change; noisy broadcasts cannot grow the TX queue.
-                pendingBatteryChange = body
-                sendNextUwb()
-            } else sendFira(body, NO_FRAME_ACTION)
-        } finally { snapshot.close() }
     }
 
     /** null은 adapter의 bounded notification 복사 거절. 마지막 fragment의 callback 진입 시각을 보존한다. */
@@ -455,20 +542,20 @@ internal class TeslaBleKeySession(
             gattObservation = gattObservation?.withDecoderResult(null, null, null)
             if (!allowed()) return
             if (bytes == null || bytes.size > MAX_QUEUED_BYTES) {
-                listener.onGatt(TeslaUwbGattEvent.RX)
+                listener.onGatt(TeslaGattEvent.RX)
                 stop(TeslaKeyStage.FAILED, "RX_FRAME_INVALID")
                 return
             }
             val frames = try { decoder.append(bytes) }
             catch (failure: Exception) {
                 gattObservation = gattObservation?.withDecoderResult(null, decoder.hasIncompleteFrame(), true)
-                listener.onGatt(TeslaUwbGattEvent.RX)
+                listener.onGatt(TeslaGattEvent.RX)
                 throw failure
             }
             gattObservation = gattObservation?.withDecoderResult(frames.size, decoder.hasIncompleteFrame(), false)
             var nextFrame = 0
             try {
-                listener.onGatt(TeslaUwbGattEvent.RX)
+                listener.onGatt(TeslaGattEvent.RX)
                 if (!allowed()) return
                 while (nextFrame < frames.size) {
                     val payload = frames[nextFrame]
@@ -494,7 +581,16 @@ internal class TeslaBleKeySession(
 
     /** 기존 owner가 발급한 객체 자체가 callback identity다. 새 토큰 체계를 만들지 않는다. */
     fun writeIssued(request: TeslaNativeGattOwner.Request): Boolean {
-        if (!allowed() || request.kind != TeslaNativeGattRequestKind.WRITE || !writePump.markWriteIssued()) return false
+        if (!allowed() || request.kind != TeslaNativeGattRequestKind.WRITE) return false
+        if (wakeFrame) authorizeConnectionWake()?.let {
+            stop(TeslaKeyStage.CANCELED, it)
+            return false
+        }
+        if (frunkFrame) checkNotNull(frunk).authorizeActuator()?.let {
+            stop(TeslaKeyStage.CANCELED, it)
+            return false
+        }
+        if (!writePump.markWriteIssued()) return false
         val prepared = queuedWrite ?: return false
         pendingRequest = request
         sdkRequest = request
@@ -508,8 +604,6 @@ internal class TeslaBleKeySession(
     fun writeResult(request: TeslaNativeGattOwner.Request, result: Int?, failure: Exception?,
         exceptionCode: String? = null, returnedElapsedMs: Long = now()) {
         if (sdkRequest !== request) return
-        val locationWrite = locationFrame
-        val cancellationBeforeReturn = locationCancellationGeneration
         sdkRequest = null
         if (frunkFrame) {
             checkNotNull(frunk).recordSdkResult(result, failure != null)
@@ -520,7 +614,6 @@ internal class TeslaBleKeySession(
             writeRequestStatus = result, writeException = exceptionCode)
         lastWrite = observed
         pendingWriteObservation = observed.takeIf { result == 0 && failure == null }
-        if (locationFrame && result == 0 && failure == null) locationFrameAccepted = true
         writePump.recordWriteResult(result, failure)
         if (result != BUSY_STATUS) {
             if (listener.state.phase == TeslaBlePhase.WAITING_FOR_CARD) registrationAttempted = true
@@ -529,16 +622,14 @@ internal class TeslaBleKeySession(
                 listener.onEvent("TESLA_KEY_TX_ATTEMPTED")
             }
         } else pendingRequest = null
-        listener.onGatt(TeslaUwbGattEvent.WRITE)
+        listener.onGatt(TeslaGattEvent.WRITE)
         if (frunkFrame && (failure != null || result != 0 && result != BUSY_STATUS)) {
             stop(TeslaKeyStage.FAILED, if (failure != null) "GATT_WRITE_EXCEPTION" else "GATT_WRITE_REJECTED")
             return
         }
         if (!allowed()) return
         if (result == BUSY_STATUS) {
-            if (failure == null && locationWrite && cancellationBeforeReturn != locationCancellationGeneration) return
             if (writePump.retryBusy(minOf(deadline, stageDeadline, writeDeadline))) return
-            if (failure == null && locationWrite && cancellationBeforeReturn != locationCancellationGeneration) return
         }
         if (failure != null || result != 0) {
             stop(TeslaKeyStage.FAILED, if (failure != null) "GATT_WRITE_EXCEPTION" else "GATT_WRITE_REJECTED")
@@ -561,7 +652,7 @@ internal class TeslaBleKeySession(
             stop(TeslaKeyStage.FAILED, "GATT_WRITE_FAILED")
             return
         }
-        listener.onGatt(TeslaUwbGattEvent.WRITE)
+        listener.onGatt(TeslaGattEvent.WRITE)
         if (!allowed()) return
         writeDeadline = Long.MAX_VALUE
         val completedChunk = chunk ?: run { stop(TeslaKeyStage.FAILED, "TX_FRAME_INVALID"); return }
@@ -575,40 +666,15 @@ internal class TeslaBleKeySession(
             frame = null
             offset = 0
             frunkFrame = false
-            locationFrame = false
-            locationFrameAccepted = false
-            val completed = uwbFrameComplete
-            uwbFrameComplete = null
-            if (completed != null) {
-                // 이미 수신된 stop은 기존 conversation/FiRa 경로로 먼저 소비한다. 별도 plaintext parser 없음.
-                // 이 경계의 onSend는 queue에만 넣어 response completion과 stopped TX의 순서를 뒤집지 않는다.
-                completingUwbFrame = true
-                try {
-                    drain()
-                    if (allowed()) completed()
-                } finally { completingUwbFrame = false }
-                if (!allowed()) return
-                sendNextUwb()
-            }
+            wakeFrame = false
         }
         if (frame != null) queueWrite() else {
             drain()
-            sendNextUwb()
         }
     }
 
     private fun protocolPhase(phase: TeslaBlePhase) {
         if (sealed) return
-        if (uwbRequested) {
-            if (phase == TeslaBlePhase.HANDSHAKING) {
-                listener.onUwbAuthenticating()
-                if (sealed) return
-            }
-            else if (phase == TeslaBlePhase.READING_STATUS) {
-                listener.state = listener.state.copy(phase = phase, outcome = TeslaKeyOutcome.PENDING)
-                return
-            }
-        }
         val next = when (phase) {
             TeslaBlePhase.WAITING_FOR_CARD -> TeslaKeyStage.WAITING_FOR_CARD
             TeslaBlePhase.HANDSHAKING -> TeslaKeyStage.HANDSHAKING
@@ -619,35 +685,21 @@ internal class TeslaBleKeySession(
     }
 
     private fun step(next: TeslaBleStep) {
-        try {
-            if (!allowed()) { discardUnconsumedTeslaBleStep(next); return }
-            val reported = conversation?.registrationReported == true
-            if (reported && !listener.state.registrationReported) listener.onEvent("TESLA_KEY_REGISTRATION_REPORTED")
-            if (!allowed()) { discardUnconsumedTeslaBleStep(next); return }
-            listener.state = listener.state.copy(registrationReported = reported)
-        } catch (failure: Exception) {
-            discardUnconsumedTeslaBleStep(next)
-            throw failure
+        // 선행 수신분은 등록 보고·readiness callback도 새로 만들지 않는다.
+        if (next != TeslaBleStep.Ignored) {
+            try {
+                if (!allowed()) { discardUnconsumedTeslaBleStep(next); return }
+                val reported = conversation?.registrationReported == true
+                if (reported && !listener.state.registrationReported) listener.onEvent("TESLA_KEY_REGISTRATION_REPORTED")
+                if (!allowed()) { discardUnconsumedTeslaBleStep(next); return }
+                listener.state = listener.state.copy(registrationReported = reported)
+            } catch (failure: Exception) {
+                discardUnconsumedTeslaBleStep(next)
+                throw failure
+            }
         }
         when (next) {
-            TeslaBleStep.UwbReady -> {
-                if (!uwbRequested) { stop(TeslaKeyStage.FAILED, "UWB_PURPOSE_INVALID"); return }
-                stageDeadline = minOf(deadline, now() + 30_000L)
-                checkNotNull(uwb).authenticated()
-                primaryAuthenticated = true
-                startLocationSidecar()
-            }
-            is TeslaBleStep.UwbInput -> {
-                if (!uwbRequested) { next.message.close(); stop(TeslaKeyStage.FAILED, "UWB_PURPOSE_INVALID"); return }
-                val coordinator = uwb ?: run {
-                    next.message.close()
-                    stop(TeslaKeyStage.FAILED, "UWB_PURPOSE_INVALID")
-                    return
-                }
-                coordinator.receive(next.message)
-                if (listener.uwbStage == TeslaUwbStage.STARTING) stageDeadline = deadline
-            }
-            is TeslaBleStep.UwbDeviceInfoRequest -> receiveDeviceInfoRequest(next.request)
+            TeslaBleStep.Ignored -> Unit
             is TeslaBleStep.Send -> {
                 try {
                     listener.state = listener.state.copy(reason = null)
@@ -657,8 +709,35 @@ internal class TeslaBleKeySession(
                     next.payload.fill(0)
                     throw failure
                 }
+                if (next.actuator && next.wake ||
+                    next.wake && (!serviceConnection || preparation != TeslaConnectionPreparationPhase.WAKE ||
+                        !queryOutstanding || frunkSequence != null || wakeCommandCreated ||
+                        next.phase != TeslaBlePhase.READING_STATUS)) {
+                    next.payload.fill(0)
+                    stop(TeslaKeyStage.FAILED, "CONNECTION_WAKE_FRAME_UNEXPECTED")
+                    return
+                }
+                if (serviceConnection && frunkSequence == null && preparation == TeslaConnectionPreparationPhase.WAKE &&
+                    !next.wake && next.phase != TeslaBlePhase.HANDSHAKING) {
+                    next.payload.fill(0)
+                    stop(TeslaKeyStage.FAILED, "CONNECTION_WAKE_FRAME_REQUIRED")
+                    return
+                }
+                if (next.wake) {
+                    val reason = try { authorizeConnectionWake() } catch (failure: Exception) {
+                        next.payload.fill(0)
+                        throw failure
+                    }
+                    if (reason != null) {
+                        next.payload.fill(0)
+                        stop(TeslaKeyStage.CANCELED, reason)
+                        return
+                    }
+                    wakeCommandCreated = true
+                }
                 frunkFrame = next.actuator
-                if (completingUwbFrame || frame != null || writePump.writePending || writePump.queued || writePump.descriptorPending ||
+                wakeFrame = next.wake
+                if (frame != null || writePump.writePending || writePump.queued || writePump.descriptorPending ||
                     next.payload.isEmpty() || next.payload.size > MAX_TX_PAYLOAD) {
                     next.payload.fill(0)
                     stop(TeslaKeyStage.FAILED, "TX_FRAME_INVALID")
@@ -676,11 +755,11 @@ internal class TeslaBleKeySession(
                 }
             }
             is TeslaBleStep.Complete -> {
-                if (frunk != null) {
+                if (frunkSequence != null) {
                     listener.onFrunk()
                     if (!allowed()) return
                     listener.state = listener.state.copy(status = next.status)
-                    val verifiedOpen = frunk.result == TeslaFrunkResult.OPEN_OBSERVED
+                    val verifiedOpen = checkNotNull(frunk).result == TeslaFrunkResult.OPEN_OBSERVED
                     if (verifiedOpen) listener.state = listener.state.copy(outcome = TeslaKeyOutcome.VERIFIED_STATUS)
                     stop(if (verifiedOpen) TeslaKeyStage.COMPLETE else TeslaKeyStage.FAILED, when {
                         verifiedOpen -> null
@@ -689,25 +768,36 @@ internal class TeslaBleKeySession(
                     })
                     return
                 }
+                if (serviceConnection) {
+                    completeConnectionQuery(next.status)
+                    return
+                }
                 listener.state = listener.state.copy(outcome = TeslaKeyOutcome.VERIFIED_STATUS, status = next.status)
                 listener.onEvent(query.verifiedEventCode)
                 stop(TeslaKeyStage.COMPLETE, null)
             }
             is TeslaBleStep.FrunkResult -> stop(TeslaKeyStage.FAILED, "FRUNK_SEQUENCE_REQUIRED")
-            is TeslaBleStep.LocationResult -> stop(TeslaKeyStage.FAILED, "LOCATION_SIDECAR_REQUIRED")
+            is TeslaBleStep.WakeResult -> completeConnectionWake(next.reply)
             is TeslaBleStep.Failed -> {
                 next.authEvidence?.let { listener.onEvent(it.eventCode) }
-                stop(TeslaKeyStage.FAILED, if (uwbRequested) {
-                    if (next.authEvidence != null) "AUTHENTICATION_FAILED"
-                    else next.reason.takeIf { it.startsWith("UWB_") } ?: "UWB_PROTOCOL_RESPONSE_INVALID"
-                } else if (frunk != null) {
+                val reason = if (frunk != null) {
                     next.reason.takeIf { it.startsWith("FRUNK_") } ?: "FRUNK_PROTOCOL_RESPONSE_INVALID"
-                } else next.reason)
+                } else if (serviceConnection) {
+                    when (next.reason) {
+                        "WAKE_EXPIRED" -> "CONNECTION_WAKE_DEADLINE_EXPIRED"
+                        "WAKE_CLOCK_CHANGED" -> "CONNECTION_TIME_REVERSED"
+                        "CONNECTION_BODY_RECEIPT_REQUIRED", "CONNECTION_BODY_RECEIPT_STALE",
+                        "CONNECTION_ASLEEP_REQUIRED", "CONNECTION_WAKE_DEADLINE_EXPIRED",
+                        "CONNECTION_TIME_REVERSED", "CONNECTION_WAKE_FRAME_UNEXPECTED" -> next.reason
+                        else -> "CONNECTION_PROTOCOL_RESPONSE_INVALID"
+                    }
+                } else next.reason
+                stop(TeslaKeyStage.FAILED, reason)
             }
         }
     }
 
-    private fun sendFrame(payload: ByteArray, sidecar: Boolean = false) {
+    private fun sendFrame(payload: ByteArray) {
         if (payload.isEmpty() || payload.size > MAX_TX_PAYLOAD) {
             payload.fill(0)
             stop(TeslaKeyStage.FAILED, "TX_FRAME_INVALID")
@@ -719,8 +809,6 @@ internal class TeslaBleKeySession(
         payload.copyInto(framed, 2)
         payload.fill(0)
         frame = framed
-        locationFrame = sidecar
-        locationFrameAccepted = false
         queueWrite()
     }
 
@@ -759,6 +847,10 @@ internal class TeslaBleKeySession(
             stop(TeslaKeyStage.CANCELED, it)
             return
         }
+        if (wakeFrame) authorizeConnectionWake()?.let {
+            stop(TeslaKeyStage.CANCELED, it)
+            return
+        }
         try { owner.submit(bytes) }
         catch (_: Exception) { if (allowed()) stop(TeslaKeyStage.FAILED, "GATT_WRITE_EXCEPTION") }
     }
@@ -769,55 +861,26 @@ internal class TeslaBleKeySession(
             val received = incoming.removeFirst()
             queuedBytes -= received.payload.size
             try {
-                if (uwbRequested && locationAttempted && isLocationEnvelope(received.payload)) {
-                    val active = locationConversation
-                    if (active != null) {
-                        var produced: TeslaBleStep? = null
-                        try {
-                            gattObservation = gattObservation?.beginningProtocol(received.receivedAtElapsedMs)
-                            try { produced = active.receive(received.payload, received.receivedAtElapsedMs) }
-                            finally {
-                                // Shared receive denominator, but never reuse a primary UWB verdict for domain3.
-                                gattObservation = gattObservation?.withProtocolResult(now(), null)
-                                listener.onGatt(TeslaUwbGattEvent.PROTOCOL)
-                            }
-                            val next = checkNotNull(produced)
-                            if (!allowed()) {
-                                discardUnconsumedTeslaBleStep(next)
-                                produced = null
-                                continue
-                            }
-                            produced = null
-                            locationStep(next)
-                        } catch (_: Exception) {
-                            produced?.let(::discardUnconsumedTeslaBleStep)
-                            finishLocation(null, "LOCATION_PROTOCOL_INVALID")
-                        }
-                    }
-                    continue
-                }
                 val frunkSequence = frunkSequence
                 val previousFrunkQuery = frunkSequence?.query
-                val next = when {
-                    frunkSequence != null -> frunkSequence.receive(received.payload, received.receivedAtElapsedMs)
-                    else -> {
-                        val conversation = checkNotNull(conversation)
-                        pendingRxResponse = null
-                        gattObservation = gattObservation?.beginningProtocol(received.receivedAtElapsedMs)
-                        try {
-                            val result = conversation.receive(received.payload, received.receivedAtElapsedMs)
-                            gattObservation = gattObservation?.withProtocolResult(now(), pendingRxResponse)
-                            result
-                        } catch (failure: Exception) {
-                            gattObservation = gattObservation?.withProtocolResult(now(), null)
-                            listener.onGatt(TeslaUwbGattEvent.PROTOCOL)
-                            throw failure
-                        } finally { pendingRxResponse = null }
-                    }
-                }
+                val conversation = conversation
+                if (frunkSequence == null && conversation == null) continue // Retired query ingress never enters a successor.
+                pendingRxResponse = null
+                gattObservation = gattObservation?.beginningProtocol(received.receivedAtElapsedMs)
+                val next = try {
+                    val result = if (frunkSequence != null) {
+                        frunkSequence.receive(received.payload, received.receivedAtElapsedMs)
+                    } else checkNotNull(conversation).receive(received.payload, received.receivedAtElapsedMs)
+                    gattObservation = gattObservation?.withProtocolResult(now(), pendingRxResponse)
+                    result
+                } catch (failure: Exception) {
+                    gattObservation = gattObservation?.withProtocolResult(now(), null)
+                    listener.onGatt(TeslaGattEvent.PROTOCOL)
+                    throw failure
+                } finally { pendingRxResponse = null }
                 try {
-                    listener.onGatt(TeslaUwbGattEvent.PROTOCOL)
-                    if (frunkSequence != null) listener.onFrunk()
+                    listener.onGatt(TeslaGattEvent.PROTOCOL)
+                    if (frunkSequence != null && next != TeslaBleStep.Ignored) listener.onFrunk()
                     if (!allowed()) { discardUnconsumedTeslaBleStep(next); return }
                 } catch (failure: Exception) { discardUnconsumedTeslaBleStep(next); throw failure }
                 if (frunkSequence != null &&
@@ -830,54 +893,63 @@ internal class TeslaBleKeySession(
             } catch (_: Exception) { stop(TeslaKeyStage.FAILED, "PROTOCOL_RESPONSE_INVALID") }
             finally { received.payload.fill(0) }
         }
-        sendNextUwb()
     }
 
     fun cancel(stage: TeslaKeyStage = TeslaKeyStage.CANCELED, reason: String? = "USER_STOP") = stop(stage, reason)
 
-    private fun stop(stage: TeslaKeyStage, reason: String?) {
+    fun expireDeadline(cause: TeslaGattDeadlineCause) {
+        if (sealed || terminationStarted) return
+        stop(TeslaKeyStage.TIMED_OUT, "DEADLINE_EXPIRED", cause)
+    }
+
+    private fun stop(stage: TeslaKeyStage, reason: String?, deadlineCause: TeslaGattDeadlineCause? = null,
+        drive: TeslaDriveState? = null) {
+        // null도 최초 종료의 미관측이다. 관측/cleanup 재진입으로 뒤늦은 기한을 붙이지 않는다.
+        if (!sealed && !terminationStarted) {
+            terminationStarted = true
+            if (deadlineCause != null) gattObservation = gattObservation?.copy(deadlineCause = deadlineCause)
+        }
         if (!seal()) return
+        if (serviceConnection) {
+            try { listener.onStopping(reason ?: "CONNECTION_ENDED") }
+            catch (_: Exception) { closeFailed = true }
+            try { listener.onParkState(drive, reason ?: "CONNECTION_ENDED") }
+            catch (_: Exception) { closeFailed = true }
+        }
         listener.onStop(stage, reason)
     }
 
     /** Facade가 자기 owner/lease를 봉인하기 전에 호출한다. 완료 callback은 여기서 폐기한다. */
     fun seal(): Boolean {
         if (sealed) return false
+        terminationStarted = true
         sealed = true
-        synchronized(deviceInfoCallbackLock) { deviceInfoSourceClosed = true }
-        try { remove(deviceInfoChangedTask) } catch (_: Exception) { deviceInfoCleanupFailed = true }
-        try { deviceInfoSource?.close() } catch (_: Exception) { deviceInfoCleanupFailed = true }
-        deviceInfoSubscribed = false
-        lastBatteryState = null
-        pendingBatteryChange?.fill(0)
-        pendingBatteryChange = null
-        pendingRxResponse = null
-        locationConversationFactory = null
-        locationConversation?.close()
-        locationConversation = null
-        locationOutgoing?.fill(0)
-        locationOutgoing = null
-        locationDeadline = Long.MAX_VALUE
-        remove(locationResumeTask)
-        locationFrame = false
-        locationFrameAccepted = false
-        conversation?.close()
+        try { conversation?.close() } catch (_: Exception) { closeFailed = true }
+        conversation = null
+        bodyFactory = null
+        wakeFactory = null
+        driveFactory = null
+        initialDriveRetryPending = false
+        initialDriveDeadline = Long.MAX_VALUE
+        frunkFactory = null
+        park?.clear()
+        try { remove(connectionTask) } catch (_: Exception) { closeFailed = true }
+        try { remove(sessionRetransmitTask) } catch (_: Exception) { closeFailed = true }
         frame?.fill(0)
         frame = null
+        wakeFrame = false
         chunk?.fill(0)
         chunk = null
         clearIncoming()
         decoder.clear()
         frunk?.cancel()
-        writePump.seal()
+        try { writePump.seal() } catch (_: Exception) { closeFailed = true }
         writeDispatchOwner = null
         pendingRequest = null
         pendingWriteObservation = null
         lastWrite = sealedWriteObservation(lastWrite, queuedWrite)
         queuedWrite = null
-        while (uwbOutgoing.isNotEmpty()) uwbOutgoing.removeFirst().first.fill(0)
-        uwbFrameComplete = null
-        watchdog?.let(remove)
+        try { watchdog?.let(remove) } catch (_: Exception) { closeFailed = true }
         watchdog = null
         return true
     }
@@ -888,7 +960,7 @@ internal class TeslaBleKeySession(
         if (closeStarted) return
         closeStarted = true
         seal()
-        closeFailed = deviceInfoCleanupFailed || frunkSequence?.cleanupFailed == true
+        closeFailed = closeFailed || frunkSequence?.cleanupFailed == true
         try { conversation?.close() } catch (_: Exception) { closeFailed = true }
         try { frunkSequence?.close() } catch (_: Exception) { closeFailed = true }
         conversation = null
@@ -900,16 +972,8 @@ internal class TeslaBleKeySession(
         try { decoder.clear() } catch (_: Exception) { closeFailed = true }
         try { if (transport()?.closeConfirmed() == false) closeFailed = true }
         catch (_: Exception) { closeFailed = true }
-        fun finish(failed: Boolean) {
-            if (closeResult != null) return
-            closeFailed = closeFailed || failed
-            closeResult = closeFailed
-            completed(closeFailed)
-        }
-        val coordinator = uwb
-        if (coordinator != null) {
-            try { coordinator.close(::finish) } catch (_: Exception) { finish(true) }
-        } else finish(false)
+        closeResult = closeFailed
+        completed(closeFailed)
     }
 
     private fun clearIncoming() {
@@ -924,18 +988,28 @@ internal class TeslaBleKeySession(
         private const val WRITE_MS = 5_000L
         private const val CARD_MS = 120_000L
         private const val PROTOCOL_MS = 10_000L
+        const val SESSION_RETRANSMIT_WINDOW_MS = 25_000L
+        const val SESSION_RETRANSMIT_INTERVAL_MS = 2_500L
+        const val MAX_SESSION_RETRANSMITS = 8
+        private const val INITIAL_DRIVE_READY_MS = 25_000L
+        private const val MAX_INITIAL_DRIVE_RETRIES = 3
         private const val WATCHDOG_MS = 250L
         private const val BUSY_STATUS = 201
-        private const val LOCATION_MS = 15_000L
-        private val NO_FRAME_ACTION: () -> Unit = {}
     }
 }
 
-internal fun teslaGattDeadlineExpired(now: Long, deadline: Long, stageDeadline: Long,
-    writeDeadline: Long): Boolean = now >= minOf(deadline, stageDeadline, writeDeadline)
+internal fun teslaGattDeadlineCause(now: Long, deadline: Long, stageDeadline: Long,
+    writeDeadline: Long, stageCause: TeslaGattDeadlineCause): TeslaGattDeadlineCause? {
+    val firstDeadline = minOf(deadline, stageDeadline, writeDeadline)
+    if (now < firstDeadline) return null
+    return when (firstDeadline) {
+        deadline -> TeslaGattDeadlineCause.OPERATION
+        writeDeadline -> TeslaGattDeadlineCause.WRITE
+        else -> stageCause
+    }
+}
 
 /** 관측 재진입 취소·예외로 소비되지 않은 결과의 소유 배열은 다음 송신/협상으로 넘기지 않는다. */
 internal fun discardUnconsumedTeslaBleStep(step: TeslaBleStep) {
     if (step is TeslaBleStep.Send) step.payload.fill(0)
-    if (step is TeslaBleStep.UwbInput) step.message.close()
 }

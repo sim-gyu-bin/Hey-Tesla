@@ -9,7 +9,22 @@ import com.heytesla.app.vehicle.frunk.FrunkVoiceRecognition
 import com.heytesla.app.vehicle.frunk.FrunkVoiceRecognitionCandidate
 import com.heytesla.app.vehicle.frunk.FrunkVoiceRecognitionResult
 import com.heytesla.app.vehicle.key.TeslaKeyStage
-import com.heytesla.app.vehicle.uwb.TeslaUwbGattEvent
+import com.heytesla.app.vehicle.connection.TeslaGattEvent
+import com.heytesla.app.vehicle.connection.TeslaConnectionStage
+import com.heytesla.app.speech.product.ProductVoiceStage
+import com.heytesla.app.speech.product.ProductVoiceDiagnostic
+import com.heytesla.app.logging.legacy.VehicleNavigationObservation
+import com.heytesla.app.logging.legacy.VehicleNavigationObservationKind
+import com.heytesla.app.logging.legacy.VehicleNavigationObservationReason
+import com.heytesla.app.logging.legacy.VehicleNavigationObservationStatus
+import com.heytesla.app.logging.legacy.VehicleNavigationAuthEvidence
+import com.heytesla.app.logging.legacy.VehicleNavigationRxDisposition
+import com.heytesla.app.vehicle.connection.TeslaGattObservation
+import com.heytesla.app.vehicle.connection.TeslaGattDeadlineCause
+import com.heytesla.app.vehicle.protocol.TeslaBleResponseObservation
+import com.heytesla.app.vehicle.protocol.TeslaBleRxStep
+import com.heytesla.app.vehicle.protocol.TeslaBleRxAead
+import com.heytesla.app.vehicle.protocol.TeslaBleRxInputKind
 
 import org.junit.Assert.*
 import org.junit.Test
@@ -26,6 +41,800 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 임시 디렉터리는 회수 근거로 남긴다. 제거 대상은 sink가 소유하는 새 archive뿐이다.
  */
 class FieldEventLogTest {
+    @Test fun productVoiceDiagnosticCannotClaimNormalOutcomeBeforeRequiredCleanup() {
+        fun encode(diagnostic: ProductVoiceDiagnostic) = FieldJson.encode(
+            record("PRODUCT_VOICE_DIAGNOSTIC").copy(productVoiceDiagnostic = diagnostic))
+        val clean = ProductVoiceDiagnostic("ACCEPTED", utteranceBytes = 32_000,
+            voicedBytes = 16_000, silenceBytesAtEnd = 8_000, suppressedOnsets = 2,
+            captureMs = 1_000, loadMs = 20, decodeMs = 30, cleanupMs = 4,
+            modelReused = true, microphoneReleased = true, streamCleanupConfirmed = true,
+            recognizerCleanupConfirmed = true)
+        for (outcome in listOf("EMPTY", "GRAMMAR_NO_MATCH", "ACCEPTED")) {
+            val diagnostic = clean.copy(outcome = outcome)
+            assertTrue(encode(diagnostic).contains("\"outcome\":\"$outcome\""))
+            for (released in listOf(false, null)) {
+                for (blocked in listOf(diagnostic.copy(microphoneReleased = released),
+                    diagnostic.copy(streamCleanupConfirmed = released))) {
+                    val row = encode(blocked)
+                    assertTrue(row.contains("\"outcome\":null"))
+                    assertFalse(row.contains("\"outcome\":\"$outcome\""))
+                    assertTrue(row.contains("\"utteranceBytes\":32000"))
+                }
+            }
+        }
+        for (outcome in listOf("ACCEPTED", "CLOSED")) {
+            for (released in listOf(false, null)) {
+                val row = encode(clean.copy(outcome = outcome, recognizerCleanupConfirmed = released))
+                assertTrue(row.contains("\"outcome\":null"))
+                assertTrue(row.contains("\"recognizerCleanupConfirmed\":$released"))
+            }
+        }
+        // 비명령은 recognizer를 소유한 채 새 발화를 기다릴 수 있다.
+        assertTrue(encode(clean.copy(outcome = "GRAMMAR_NO_MATCH",
+            recognizerCleanupConfirmed = false)).contains("\"outcome\":\"GRAMMAR_NO_MATCH\""))
+        for (outcome in listOf("PREPARED", "CLOSED")) {
+            val row = encode(clean.copy(outcome = outcome,
+                recognizerCleanupConfirmed = outcome == "CLOSED"))
+            assertTrue(row.contains("\"outcome\":\"$outcome\""))
+            for (key in listOf("utteranceBytes", "voicedBytes", "silenceBytesAtEnd",
+                "suppressedOnsets", "captureMs", "decodeMs", "modelReused")) {
+                assertTrue(key, row.contains("\"$key\":null"))
+            }
+            assertTrue(row.contains("\"loadMs\":20"))
+            assertTrue(row.contains("\"cleanupMs\":4"))
+        }
+        for (outcome in listOf("FAILURE", "SEALED")) {
+            val row = encode(clean.copy(outcome = outcome, microphoneReleased = false,
+                streamCleanupConfirmed = false, recognizerCleanupConfirmed = false))
+            assertTrue(row.contains("\"outcome\":\"$outcome\""))
+            assertTrue(row.contains("\"microphoneReleased\":false"))
+            assertTrue(row.contains("\"streamCleanupConfirmed\":false"))
+            assertTrue(row.contains("\"recognizerCleanupConfirmed\":false"))
+        }
+    }
+
+    @Test fun productVoiceDiagnosticDropsPrivateOutcomeAndImpossibleAudioMetrics() {
+        val secret = "PRIVATE-TRANSCRIPT-PCM-VIN-MAC-UUID-KEY"
+        val invalid = ProductVoiceDiagnostic(secret, utteranceBytes = 320_002,
+            voicedBytes = 2, silenceBytesAtEnd = 0, suppressedOnsets = -1,
+            captureMs = 86_400_001, loadMs = -1, decodeMs = 600_001, cleanupMs = Long.MAX_VALUE)
+        val row = FieldJson.encode(record("PRODUCT_VOICE_DIAGNOSTIC").copy(productVoiceDiagnostic = invalid))
+        assertFalse(row.contains(secret))
+        for (key in listOf("outcome", "utteranceBytes", "voicedBytes", "silenceBytesAtEnd",
+            "suppressedOnsets", "captureMs", "loadMs", "decodeMs", "cleanupMs")) {
+            assertTrue(key, row.contains("\"$key\":null"))
+        }
+        for (bytes in listOf(-2, 1, 320_001, Int.MAX_VALUE)) {
+            val encoded = FieldJson.encode(record("PRODUCT_VOICE_DIAGNOSTIC").copy(
+                productVoiceDiagnostic = invalid.copy(utteranceBytes = bytes)))
+            for (key in listOf("utteranceBytes", "voicedBytes", "silenceBytesAtEnd")) {
+                assertTrue(key, encoded.contains("\"$key\":null"))
+            }
+        }
+        val bounded = invalid.copy(outcome = "SEALED", utteranceBytes = 320_000,
+            voicedBytes = 320_000, silenceBytesAtEnd = 0, suppressedOnsets = Int.MAX_VALUE,
+            captureMs = 86_400_000, loadMs = 0, decodeMs = 600_000, cleanupMs = 600_000)
+        val upper = FieldJson.encode(record("PRODUCT_VOICE_DIAGNOSTIC").copy(productVoiceDiagnostic = bounded))
+        assertTrue(upper.contains("\"utteranceBytes\":320000"))
+        assertTrue(upper.contains("\"voicedBytes\":320000"))
+        assertTrue(upper.contains("\"silenceBytesAtEnd\":0"))
+        assertTrue(upper.contains("\"captureMs\":86400000"))
+        assertTrue(upper.contains("\"decodeMs\":600000"))
+        for (bytes in listOf(-2, 1, 320_002)) {
+            val encoded = FieldJson.encode(record("PRODUCT_VOICE_DIAGNOSTIC").copy(
+                productVoiceDiagnostic = bounded.copy(voicedBytes = bytes, silenceBytesAtEnd = bytes)))
+            assertTrue(encoded.contains("\"voicedBytes\":null"))
+            assertTrue(encoded.contains("\"silenceBytesAtEnd\":null"))
+        }
+    }
+
+    @Test fun productVoiceDiagnosticCannotLeakAcrossEventsOrBackfillOlderSchemas() {
+        val diagnostic = ProductVoiceDiagnostic("ACCEPTED", utteranceBytes = 32_000,
+            microphoneReleased = true, streamCleanupConfirmed = true, recognizerCleanupConfirmed = true)
+        val file = newFile()
+        val sink = startSink(file)
+        val dedicated = record("PRODUCT_VOICE_DIAGNOSTIC").copy(productVoiceDiagnostic = diagnostic)
+        assertTrue(sink.enqueue(dedicated))
+        assertTrue(sink.enqueue(record("PRODUCT_VOICE_STATE_CHANGED").copy(productVoiceDiagnostic = diagnostic)))
+        assertTrue(sink.enqueue(record("PRODUCT_VOICE_DIAGNOSTIC")))
+        for (version in 1..38) {
+            val historical = dedicated.copy(version = version)
+            assertFalse(sink.enqueue(historical))
+            assertFalse(FieldJson.encode(historical).contains("productVoiceDiagnostic"))
+            assertTrue(sink.enqueue(record("PRODUCT_VOICE_STATE_CHANGED").copy(
+                version = version, productVoiceDiagnostic = diagnostic)))
+        }
+        assertTrue(sink.sync())
+        val rows = file.readLines()
+        assertTrue(rows.first().contains("\"outcome\":\"ACCEPTED\""))
+        for (row in rows.drop(1)) {
+            assertFalse(row.contains("\"outcome\":\"ACCEPTED\""))
+            assertFalse(row.contains("\"utteranceBytes\":32000"))
+        }
+        assertTrue(rows[1].contains("\"productVoiceDiagnostic\":null"))
+        assertTrue(rows[2].contains("\"productVoiceDiagnostic\":null"))
+        assertEquals(38L, sink.status().rejected)
+    }
+
+    @Test fun connectionObservationDoesNotTurnSixNotificationsOrSdkAcceptanceIntoAuthentication() {
+        val file = newFile()
+        val sink = startSink(file)
+        val handshake = connectionObservationFixture().copy(
+            rxResponse = TeslaBleResponseObservation("REQUEST_UUID_MISMATCH", 3,
+                requestUuidPresent = true, requestUuidMatches = false,
+                step = TeslaBleRxStep.WAITING, aead = TeslaBleRxAead.NOT_ATTEMPTED),
+            write = TeslaApproachReadSummary(writeSequence = 1, writeRequestStatus = 0,
+                writeRequestedElapsedMs = 150, writeReturnedElapsedMs = 151),
+        )
+        assertTrue(sink.enqueue(record("TESLA_CONNECTION_GATT_OBSERVATION").copy(connectionObservation = handshake)))
+        val readTimeout = handshake.copy(stage = TeslaKeyStage.READING_STATUS, event = TeslaGattEvent.STAGE,
+            deadlineCause = TeslaGattDeadlineCause.PROTOCOL_STAGE, rxResponse = null,
+            rxProtocolObservedElapsedMs = null)
+        assertTrue(sink.enqueue(record("TESLA_CONNECTION_GATT_OBSERVATION").copy(connectionObservation = readTimeout)))
+        assertTrue(sink.sync())
+        val rows = file.readLines()
+        assertTrue(rows[0].contains("\"stage\":\"HANDSHAKING\""))
+        assertTrue(rows[0].contains("\"rxNotificationCount\":6,\"rxFrameCount\":2,\"rxProtocolCount\":1"))
+        assertTrue(rows[0].contains("\"requestUuidMatches\":false"))
+        assertTrue(rows[0].contains("\"aead\":\"NOT_ATTEMPTED\",\"authEvidence\":null"))
+        assertTrue(rows[0].contains("\"writeRequestStatus\":0"))
+        assertTrue(rows[0].contains("\"writeCallbackStatus\":null"))
+        assertFalse(rows[0].contains("STATUS_VERIFIED"))
+        assertTrue(rows[1].contains("\"stage\":\"READING_STATUS\""))
+        assertTrue(rows[1].contains("\"deadlineCause\":\"PROTOCOL_STAGE\""))
+        assertTrue(rows[1].contains("\"rxResponse\":null"))
+        assertFalse(rows[1].contains("REQUEST_UUID_MISMATCH"))
+        for (cause in TeslaGattDeadlineCause.entries) {
+            val row = FieldJson.encode(record("TESLA_CONNECTION_GATT_OBSERVATION").copy(
+                connectionObservation = readTimeout.copy(deadlineCause = cause)))
+            assertTrue(row.contains("\"deadlineCause\":\"${cause.name}\""))
+        }
+    }
+
+    @Test fun connectionFrunkTerminalDispositionsArePreservedOnlySinceSchema35WithoutOpeningInference() {
+        val replies = listOf(
+            "FRUNK_ACKNOWLEDGED" to TeslaBleRxAead.VERIFIED,
+            "FRUNK_UNCONFIRMED" to TeslaBleRxAead.NOT_ATTEMPTED,
+            "FRUNK_UNCONFIRMED" to TeslaBleRxAead.VERIFIED,
+        )
+        val file = newFile()
+        val sink = startSink(file)
+        for ((index, reply) in replies.withIndex()) {
+            val (disposition, aead) = reply
+            val observation = connectionObservationFixture().copy(
+                stage = TeslaKeyStage.READING_STATUS, event = TeslaGattEvent.PROTOCOL,
+                rxProtocolCount = index.toLong() + 1,
+                rxResponse = TeslaBleResponseObservation(disposition, 2,
+                    step = TeslaBleRxStep.FRUNK_RESULT, aead = aead),
+            )
+            val current = record("TESLA_CONNECTION_GATT_OBSERVATION").copy(
+                version = 35, connectionObservation = observation)
+            assertTrue(sink.enqueue(current))
+            assertTrue(sink.enqueue(current.copy(version = 34)))
+            for (version in 1..33) {
+                val historical = FieldJson.encode(current.copy(version = version))
+                assertTrue(historical.contains("\"connectionObservation\":null"))
+                assertFalse(historical.contains(disposition))
+            }
+        }
+        assertTrue(sink.sync())
+        val rows = file.readLines()
+        assertEquals(2 * replies.size, rows.size)
+        for ((index, reply) in replies.withIndex()) {
+            val (disposition, aead) = reply
+            val current = rows[2 * index]
+            val historical = rows[2 * index + 1]
+            assertTrue(current.contains("\"disposition\":\"$disposition\""))
+            assertTrue(historical.contains("\"disposition\":null"))
+            assertFalse(historical.contains(disposition))
+            for (row in listOf(current, historical)) {
+                assertTrue(row.contains("\"step\":\"FRUNK_RESULT\""))
+                assertTrue(row.contains("\"aead\":\"${aead.name}\""))
+                assertTrue(row.contains("\"rxProtocolCount\":${index + 1}"))
+                assertFalse(row.contains("\"frunkOpenObserved\":true"))
+                assertFalse(row.contains("\"frunkCommandSent\":true"))
+                assertFalse(row.contains("\"authEvidence\":\"ACKNOWLEDGED\""))
+            }
+        }
+    }
+
+    @Test fun connectionObservationPrivacyBoundaryRejectsUnknownStringsAndUncorrelatedSuccess() {
+        val secret = "PRIVATE-RAW-VIN-MAC-UUID-KEY-TRANSCRIPT"
+        val observation = connectionObservationFixture().copy(
+            connectAction = secret,
+            rxResponse = TeslaBleResponseObservation(secret, 3, fromKind = secret, toKind = secret,
+                payloadKind = secret, domainMismatchReason = secret,
+                requestUuidPresent = false, requestUuidMatches = true,
+                toPresent = false, toRouteMatches = true,
+                signedStatusPresent = false, signedMessageFault = 0, operationStatus = 0,
+                driveShiftState = secret, driveTimestampStatus = secret),
+            write = TeslaApproachReadSummary(writeException = secret, reason = secret,
+                gear = secret, driveSourceWallMs = 9876543212345L, responseFromKind = secret),
+        )
+        val file = newFile()
+        val sink = startSink(file)
+        assertTrue(sink.enqueue(record("TESLA_CONNECTION_GATT_OBSERVATION").copy(connectionObservation = observation)))
+        assertTrue(sink.sync())
+        val row = file.readText()
+        assertFalse(row.contains(secret))
+        assertFalse(row.contains("9876543212345"))
+        for (key in listOf("connectAction", "disposition", "fromKind", "toKind", "payloadKind",
+            "domainMismatchReason", "requestUuidMatches", "toRouteMatches", "signedMessageFault",
+            "operationStatus", "writeException", "driveShiftState", "driveTimestampStatus")) {
+            assertTrue(key, row.contains("\"$key\":null"))
+        }
+        for (key in listOf("firaKind", "bodySummary", "requestCorrelation", "driveSourceWallMs",
+            "gear", "reason", "uwbGattStage", "uwbRxDisposition")) {
+            assertFalse(key, row.contains("\"$key\":"))
+        }
+    }
+
+    @Test fun connectionDomain2SleepStatusIsDiagnosticEnumOnlySinceSchema36() {
+        val observation = connectionObservationFixture().copy(
+            rxResponse = TeslaBleResponseObservation("DOMAIN_MISMATCH", 3, fromPresent = true,
+                fromKind = "DOMAIN", fromDomain = 2, domainMismatchReason = "DOMAIN_DIFFERENT",
+                domainMismatchVcsecSleepStatus = 2, step = TeslaBleRxStep.WAITING))
+        val current = record("TESLA_CONNECTION_GATT_OBSERVATION").copy(version = 36, connectionObservation = observation)
+        assertTrue(FieldJson.encode(current).contains("\"domainMismatchVcsecSleepStatus\":2"))
+        assertFalse(FieldJson.encode(current.copy(version = 35)).contains("domainMismatchVcsecSleepStatus"))
+        for (value in listOf(-1, 3, 99)) {
+            val invalid = current.copy(connectionObservation = observation.copy(
+                rxResponse = observation.rxResponse!!.copy(domainMismatchVcsecSleepStatus = value)))
+            assertTrue(FieldJson.encode(invalid).contains("\"domainMismatchVcsecSleepStatus\":null"))
+        }
+        assertTrue(FieldEvents.isAllowed("TESLA_CONNECTION_SESSION_RETRANSMIT"))
+    }
+
+    @Test fun connectionDriveDiagnosticsRequireEveryAuthenticatedCorrelationBoundarySinceSchema37() {
+        val verified = TeslaBleResponseObservation("STATUS_VERIFIED", 3,
+            fromPresent = true, fromKind = "DOMAIN", fromDomain = 3,
+            toPresent = true, toKind = "ROUTING_ADDRESS",
+            requestUuidPresent = true, requestUuidMatches = true, toRouteMatches = true,
+            inputKind = TeslaBleRxInputKind.ENCRYPTED_RESPONSE, aead = TeslaBleRxAead.VERIFIED,
+            step = TeslaBleRxStep.COMPLETE, driveShiftState = "P", driveTimestampStatus = "VALID")
+        fun row(response: TeslaBleResponseObservation, version: Int = 37) =
+            FieldJson.encode(record("TESLA_CONNECTION_GATT_OBSERVATION").copy(version = version,
+                connectionObservation = connectionObservationFixture().copy(rxResponse = response)))
+        for (shift in listOf("ABSENT", "EMPTY", "INVALID", "P", "R", "N", "D", "SNA", "UNRECOGNIZED")) {
+            for (timestamp in listOf("ABSENT", "INVALID", "NON_POSITIVE", "VALID")) {
+                val encoded = row(verified.copy(driveShiftState = shift, driveTimestampStatus = timestamp))
+                assertTrue(encoded.contains("\"driveShiftState\":\"$shift\""))
+                assertTrue(encoded.contains("\"driveTimestampStatus\":\"$timestamp\""))
+            }
+        }
+        for (version in 1..36) {
+            val historical = row(verified, version)
+            assertFalse(historical.contains("driveShiftState"))
+            assertFalse(historical.contains("driveTimestampStatus"))
+        }
+        val forged = listOf(
+            verified.copy(expectedDomain = 2),
+            verified.copy(fromPresent = false), verified.copy(fromPresent = null),
+            verified.copy(fromKind = "ROUTING_ADDRESS"), verified.copy(fromKind = null),
+            verified.copy(fromDomain = 2), verified.copy(fromDomain = null),
+            verified.copy(toPresent = false), verified.copy(toPresent = null),
+            verified.copy(toKind = "DOMAIN"), verified.copy(toKind = null),
+            verified.copy(requestUuidPresent = false), verified.copy(requestUuidPresent = null),
+            verified.copy(requestUuidMatches = false), verified.copy(requestUuidMatches = null),
+            verified.copy(toRouteMatches = false), verified.copy(toRouteMatches = null),
+            verified.copy(disposition = "STATUS_INCOMPLETE"),
+            verified.copy(disposition = "RESPONSE_REJECTED"),
+            verified.copy(step = null), verified.copy(inputKind = null), verified.copy(aead = null),
+        ) + TeslaBleRxStep.entries.filter { it != TeslaBleRxStep.COMPLETE }.map { verified.copy(step = it) } +
+            TeslaBleRxInputKind.entries.filter { it != TeslaBleRxInputKind.ENCRYPTED_RESPONSE }.map { verified.copy(inputKind = it) } +
+            TeslaBleRxAead.entries.filter { it != TeslaBleRxAead.VERIFIED }.map { verified.copy(aead = it) }
+        for (response in forged) {
+            val encoded = row(response)
+            assertTrue(response.toString(), encoded.contains("\"driveShiftState\":null"))
+            assertTrue(response.toString(), encoded.contains("\"driveTimestampStatus\":null"))
+        }
+        val secret = "PRIVATE-VIN-ADDRESS-KEY-ROUTE-UUID-PACKET-ABSOLUTE-TIME"
+        for (unsupported in listOf(null, "", "UNKNOWN", " P", "valid", secret)) {
+            val encoded = row(verified.copy(driveShiftState = unsupported, driveTimestampStatus = unsupported))
+            assertTrue(encoded.contains("\"driveShiftState\":null"))
+            assertTrue(encoded.contains("\"driveTimestampStatus\":null"))
+            assertFalse(encoded.contains(secret))
+        }
+        // 두 allowlist는 서로 독립적이지만 인증 경계는 공유한다.
+        assertTrue(row(verified.copy(driveShiftState = secret)).contains("\"driveTimestampStatus\":\"VALID\""))
+        assertTrue(row(verified.copy(driveTimestampStatus = secret)).contains("\"driveShiftState\":\"P\""))
+    }
+
+    @Test fun connectionObservationCannotCarryAcrossEventVersionOrMutableCurrentSnapshot() {
+        var current = connectionObservationFixture()
+        val captured = record("TESLA_CONNECTION_GATT_OBSERVATION").copy(connectionObservation = current)
+        current = current.copy(stage = TeslaKeyStage.READING_STATUS, rxNotificationCount = 99)
+        val file = newFile()
+        val sink = startSink(file)
+        assertTrue(sink.enqueue(captured))
+        assertTrue(sink.enqueue(record("TESLA_CONNECTION_STATE_CHANGED").copy(connectionObservation = current)))
+        assertTrue(sink.enqueue(record("TESLA_CONNECTION_GATT_OBSERVATION")))
+        for (version in 1..33) {
+            assertTrue(sink.enqueue(captured.copy(version = version)))
+        }
+        assertTrue(sink.sync())
+        val rows = file.readLines()
+        assertTrue(rows[0].contains("\"stage\":\"HANDSHAKING\""))
+        assertTrue(rows[0].contains("\"rxNotificationCount\":6"))
+        for (row in rows.drop(1)) {
+            assertTrue(row.contains("\"connectionObservation\":null"))
+            assertFalse(row.contains("\"rxNotificationCount\":"))
+        }
+    }
+
+    @Test fun connectionObservationRejectsImpossibleTimesCountsAndPreservesUnobservedVersusZero() {
+        val invalid = connectionObservationFixture().copy(
+            stageStartedElapsedMs = 99, connectIssuedElapsedMs = 200, connectReturnedElapsedMs = 199,
+            firstRxElapsedMs = 300, lastRxElapsedMs = 299,
+            descriptorCallbackElapsedMs = 4_322,
+            rxProtocolReceivedElapsedMs = 400, rxProtocolObservedElapsedMs = 399,
+            rxNotificationCount = -1, rxFrameCount = null, rxProtocolCount = 0,
+            rxNotificationFrameCount = 17, rxDecoderIncomplete = false,
+            write = TeslaApproachReadSummary(writeSequence = 0, writeBusyRetryCount = 3,
+                writeRequestedElapsedMs = 200, writeReturnedElapsedMs = 199,
+                writeCallbackElapsedMs = -1, writeDispatchElapsedMs = 199,
+                writePendingBefore = false, writeDispatchQueued = false),
+        )
+        val row = FieldJson.encode(record("TESLA_CONNECTION_GATT_OBSERVATION").copy(connectionObservation = invalid))
+        for (key in listOf("stageStartedElapsedMs", "connectReturnedElapsedMs", "lastRxElapsedMs",
+            "descriptorCallbackElapsedMs", "rxProtocolObservedElapsedMs", "rxNotificationCount",
+            "rxFrameCount", "rxNotificationFrameCount", "writeSequence", "writeBusyRetryCount",
+            "writeReturnedElapsedMs", "writeCallbackElapsedMs", "writeDispatchElapsedMs")) {
+            assertTrue(key, row.contains("\"$key\":null"))
+        }
+        assertTrue(row.contains("\"rxProtocolCount\":0"))
+        assertTrue(row.contains("\"rxDecoderIncomplete\":false"))
+        assertTrue(row.contains("\"writePendingBefore\":false"))
+        assertTrue(row.contains("\"writeDispatchQueued\":false"))
+        val missing = FieldJson.encode(record("TESLA_CONNECTION_GATT_OBSERVATION").copy(
+            connectionObservation = invalid.copy(write = null, rxProtocolCount = null)))
+        assertTrue(missing.contains("\"write\":null"))
+        assertTrue(missing.contains("\"rxProtocolCount\":null"))
+    }
+
+    @Test fun connectionObservationInvalidClockCannotProduceDurationsFromAnotherOperation() {
+        val base = connectionObservationFixture().copy(
+            connectIssuedElapsedMs = 200, connectReturnedElapsedMs = 201,
+            write = TeslaApproachReadSummary(writeSequence = 1, writeRequestedElapsedMs = 250,
+                writeReturnedElapsedMs = 251, writeCallbackElapsedMs = 252, writeDispatchElapsedMs = 250),
+        )
+        for (observation in listOf(
+            base.copy(operationStartedElapsedMs = -1),
+            base.copy(operationStartedElapsedMs = 4_322),
+            base.copy(observedElapsedMs = 99),
+            base.copy(observedElapsedMs = 4_322),
+        )) {
+            val row = FieldJson.encode(record("TESLA_CONNECTION_GATT_OBSERVATION").copy(
+                connectionObservation = observation))
+            for (key in listOf("observedElapsedMs", "stageStartedElapsedMs", "connectIssuedElapsedMs",
+                "connectReturnedElapsedMs", "rxProtocolReceivedElapsedMs", "rxProtocolObservedElapsedMs",
+                "writeRequestedElapsedMs", "writeReturnedElapsedMs", "writeCallbackElapsedMs", "writeDispatchElapsedMs")) {
+                assertTrue(key, row.contains("\"$key\":null"))
+            }
+            // 관측된 분모는 잘못된 시각 때문에 무수신·성공으로 바꾸지 않는다.
+            assertTrue(row.contains("\"rxNotificationCount\":6"))
+            assertTrue(row.contains("\"writeSequence\":1"))
+        }
+    }
+
+    @Test fun connectionObservationKeepsQueuedSdkRejectedAndCallbackFailureDistinct() {
+        val file = newFile()
+        val sink = startSink(file)
+        val queued = TeslaApproachReadSummary(writeSequence = 1, writeRequestedElapsedMs = 200,
+            writeDispatchQueued = true, writePendingBefore = false)
+        val rejected = queued.copy(writeDispatchQueued = false, writeDispatchElapsedMs = 201,
+            writeReturnedElapsedMs = 202, writeRequestStatus = 201, writeBusyRetryCount = 0)
+        val callbackFailed = rejected.copy(writeSequence = 2, writeRequestStatus = 0,
+            writeCallbackStatus = 133, writeCallbackElapsedMs = 203)
+        for (write in listOf(queued, rejected, callbackFailed)) {
+            assertTrue(sink.enqueue(record("TESLA_CONNECTION_GATT_OBSERVATION").copy(
+                connectionObservation = connectionObservationFixture().copy(event = TeslaGattEvent.WRITE,
+                    rxResponse = null, write = write))))
+        }
+        assertTrue(sink.sync())
+        val rows = file.readLines()
+        assertTrue(rows[0].contains("\"writeDispatchQueued\":true,\"writeDispatchElapsedMs\":null"))
+        assertTrue(rows[0].contains("\"writeRequestStatus\":null"))
+        assertTrue(rows[1].contains("\"writeRequestStatus\":201"))
+        assertTrue(rows[1].contains("\"writeCallbackStatus\":null"))
+        assertTrue(rows[2].contains("\"writeRequestStatus\":0"))
+        assertTrue(rows[2].contains("\"writeCallbackStatus\":133"))
+        for (row in rows) {
+            assertTrue(row.contains("\"rxResponse\":null"))
+            assertFalse(row.contains("STATUS_VERIFIED"))
+            assertFalse(row.contains("\"authEvidence\":\""))
+        }
+    }
+
+    /** 메인 host smoke가 같은 고정 fixture를 실제 runtime 이벤트에도 공급할 수 있다. */
+    internal fun connectionObservationFixture() = TeslaGattObservation(
+        stage = TeslaKeyStage.HANDSHAKING, event = TeslaGattEvent.PROTOCOL,
+        operationStartedElapsedMs = 100, stageStartedElapsedMs = 200, observedElapsedMs = 1_000,
+        connectAccepted = true, connectedObserved = true, subscriptionConfirmed = true,
+        rxNotificationCount = 6, rxFrameCount = 2, rxProtocolCount = 1,
+        rxProtocolReceivedElapsedMs = 900, rxProtocolObservedElapsedMs = 901,
+    )
+
+    @Test fun productSnapshotUsesStrictEnumsBooleansAndFixedReasons() {
+        val enums = mapOf(
+            FieldStateKeys.CONNECTION_STAGE to TeslaConnectionStage.entries.map { it.name },
+            FieldStateKeys.PRODUCT_VOICE_STAGE to ProductVoiceStage.entries.map { it.name },
+            FieldStateKeys.CONNECTION_GEAR to listOf("P", "R", "N", "D", "UNKNOWN"),
+            FieldStateKeys.CONNECTION_REASON to listOf("CONNECTION_P_RECEIPT_STALE", "GATT_CONNECTION_LOST"),
+            FieldStateKeys.PRODUCT_VOICE_REASON to listOf("PRODUCT_VOICE_CLEANUP_FAILED_RESTART_REQUIRED",
+                "PRODUCT_VOICE_CONSENT_REQUIRED", "FRUNK_VOICE_EXPIRED"),
+        )
+        for ((key, values) in enums) for (value in values) {
+            val row = FieldJson.encode(record("PRODUCT_VOICE_STATE_CHANGED", mapOf(key to value)))
+            assertTrue(row.contains("\"$key\":\"$value\""))
+        }
+        for (key in listOf(FieldStateKeys.CONNECTION_PARK_FRESH, FieldStateKeys.PRODUCT_VOICE_CONSENT)) {
+            for (value in listOf(true, false)) {
+                val row = FieldJson.encode(record("TESLA_CONNECTION_STATE_CHANGED", mapOf(key to value)))
+                assertTrue(row.contains("\"$key\":$value"))
+            }
+        }
+        val secret = "PRIVATE-TRANSCRIPT-PCM-VIN-ID-VEHICLE-TIME"
+        for (key in FieldStateKeys.PRODUCT_KEYS) {
+            for (value in listOf(null, secret, "", " P", "listening", 1, 1L, 1.0,
+                listOf(secret), mapOf("raw" to secret))) {
+                val row = FieldJson.encode(record("PRODUCT_VOICE_STATE_CHANGED", mapOf(key to value,
+                    "transcript" to secret, "pcm" to secret, "vin" to secret,
+                    "vehicleTimestamp" to 1_700_000_000_000L)))
+                assertTrue("$key=$value", row.contains("\"$key\":null"))
+                assertFalse(row.contains(secret))
+                assertFalse(row.contains("\"vehicleTimestamp\""))
+            }
+        }
+        for (key in enums.keys) {
+            val row = FieldJson.encode(record("PRODUCT_VOICE_STATE_CHANGED", mapOf(key to true)))
+            assertTrue(row.contains("\"$key\":null"))
+        }
+        for (key in listOf(FieldStateKeys.CONNECTION_PARK_FRESH, FieldStateKeys.PRODUCT_VOICE_CONSENT)) {
+            val row = FieldJson.encode(record("PRODUCT_VOICE_STATE_CHANGED", mapOf(key to "true")))
+            assertTrue(row.contains("\"$key\":null"))
+        }
+    }
+
+    @Test fun productSnapshotIsUnavailableInEveryHistoricalSchema() {
+        val state = mapOf(
+            FieldStateKeys.CONNECTION_STAGE to "MONITORING",
+            FieldStateKeys.CONNECTION_GEAR to "P",
+            FieldStateKeys.CONNECTION_PARK_FRESH to true,
+            FieldStateKeys.CONNECTION_REASON to "CONNECTION_ENDED",
+            FieldStateKeys.PRODUCT_VOICE_STAGE to "STOPPING",
+            FieldStateKeys.PRODUCT_VOICE_REASON to "PRODUCT_VOICE_CLEANUP_FAILED_RESTART_REQUIRED",
+            FieldStateKeys.PRODUCT_VOICE_CONSENT to false,
+        )
+        for (version in 1..32) {
+            val row = FieldJson.encode(record("PRODUCT_VOICE_STATE_CHANGED", state).copy(version = version))
+            for (key in FieldStateKeys.PRODUCT_KEYS) assertTrue(row.contains("\"$key\":null"))
+        }
+    }
+
+    @Test fun productAcceptanceAndCleanupDoNotCreateFrunkSuccess() {
+        for (event in listOf("PRODUCT_VOICE_CONSENT_GRANTED", "PRODUCT_VOICE_CONSENT_REVOKED",
+            "PRODUCT_VOICE_START_REQUESTED", "PRODUCT_VOICE_STATE_CHANGED", "PRODUCT_VOICE_CLEANUP_FAILED",
+            "PRODUCT_VOICE_COMMAND_ACCEPTED", "PRODUCT_VOICE_STOPPED", "TESLA_CONNECTION_STARTED",
+            "TESLA_CONNECTION_BLOCKED", "TESLA_CONNECTION_CLEANUP_FAILED",
+            "TESLA_CONNECTION_STATE_CHANGED", "TESLA_CONNECTION_GATT_OBSERVATION")) {
+            assertTrue(event, FieldEvents.isAllowed(event))
+        }
+        assertFalse(FieldEvents.isAllowed("PRODUCT_VOICE_PRIVATE_TRANSCRIPT"))
+        val accepted = FieldJson.encode(record("PRODUCT_VOICE_COMMAND_ACCEPTED", mapOf(
+            FieldStateKeys.PRODUCT_VOICE_STAGE to "COMMAND_READY",
+            FieldStateKeys.FRUNK_COMMAND_REQUESTED to true,
+            FieldStateKeys.FRUNK_COMMAND_SENT to false,
+            FieldStateKeys.FRUNK_COMMAND_ACKNOWLEDGED to false,
+            FieldStateKeys.FRUNK_OPEN_OBSERVED to false,
+            FieldStateKeys.FRUNK_LOCAL_CLOSED to false,
+        )))
+        assertTrue(accepted.contains("\"frunkCommandRequested\":true"))
+        for (key in listOf(FieldStateKeys.FRUNK_COMMAND_SENT, FieldStateKeys.FRUNK_COMMAND_ACKNOWLEDGED,
+            FieldStateKeys.FRUNK_OPEN_OBSERVED, FieldStateKeys.FRUNK_LOCAL_CLOSED)) {
+            assertTrue(accepted.contains("\"$key\":false"))
+        }
+        val failed = FieldJson.encode(record("PRODUCT_VOICE_CLEANUP_FAILED", mapOf(
+            FieldStateKeys.PRODUCT_VOICE_STAGE to "FAILED",
+            FieldStateKeys.PRODUCT_VOICE_REASON to "PRODUCT_VOICE_CLEANUP_FAILED_RESTART_REQUIRED",
+        )))
+        assertTrue(failed.contains("\"productVoiceReason\":\"PRODUCT_VOICE_CLEANUP_FAILED_RESTART_REQUIRED\""))
+        assertFalse(failed.contains("\"frunkCommandSent\":"))
+        assertFalse(failed.contains("\"frunkLocalClosed\":"))
+    }
+
+    @Test fun nativeObservationPersistsEndpointLocalPeerAndNullableCleanupSnapshot() {
+        val state = nativeState()
+        val row = FieldJson.encode(record("TESLA_UWB_PEER_STOPPED", state))
+        assertTrue(row.contains("\"uwbNativeSessionTag\":\"${"a".repeat(64)}\""))
+        assertTrue(row.contains("\"uwbNativeConfigId\":1"))
+        assertTrue(row.contains("\"uwbNativeChannel\":9"))
+        assertTrue(row.contains("\"uwbNativePreambleIndex\":10"))
+        assertTrue(row.contains("\"uwbNativeUpdateRate\":1"))
+        assertTrue(row.contains("\"uwbNativePeerCount\":5"))
+        assertTrue(row.contains("\"uwbNativeEvent\":\"PEER_STOPPED\""))
+        assertTrue(row.contains("\"uwbNativePeerIndex\":4"))
+        assertTrue(row.contains("\"uwbNativeElapsedSinceStartMs\":123"))
+        assertTrue(row.contains("\"uwbNativeCloseRequested\":false"))
+        for (event in listOf("STARTING", "OPENED", "PEER_STARTED", "PEER_STOPPED", "CLOSED")) {
+            val encoded = FieldJson.encode(record("TESLA_UWB_BACKEND_STARTING",
+                state + (FieldStateKeys.UWB_NATIVE_EVENT to event) +
+                    (FieldStateKeys.UWB_NATIVE_PEER_INDEX to null)))
+            assertTrue(encoded.contains("\"uwbNativeEvent\":\"$event\""))
+            assertTrue(encoded.contains("\"uwbNativePeerIndex\":null"))
+        }
+        val absent = FieldJson.encode(record("TESLA_UWB_COMPLETE",
+            FieldStateKeys.UWB_NATIVE_KEYS.associateWith { null }))
+        for (key in FieldStateKeys.UWB_NATIVE_KEYS) assertTrue(absent.contains("\"$key\":null"))
+    }
+
+    @Test fun nativeObservationRejectsRawValuesBadRangesAndHistoricalSchemas() {
+        for (version in 1..30) {
+            val row = FieldJson.encode(record("TESLA_UWB_PEER_STOPPED", nativeState()).copy(version = version))
+            for (key in FieldStateKeys.UWB_NATIVE_KEYS) assertTrue(row.contains("\"$key\":null"))
+        }
+        val secret = "PRIVATE-SESSION-ID-VIN-MAC-STS"
+        val badValues = mapOf(
+            FieldStateKeys.UWB_NATIVE_SESSION_TAG to listOf<Any?>(secret, "A".repeat(64), "a".repeat(63), 42, true),
+            FieldStateKeys.UWB_NATIVE_CONFIG_ID to listOf<Any?>(0, 6, 1.0, "1", true),
+            FieldStateKeys.UWB_NATIVE_CHANNEL to listOf<Any?>(0, 8, 10, "9", false),
+            FieldStateKeys.UWB_NATIVE_PREAMBLE_INDEX to listOf<Any?>(8, 13, 9.0, "10", true),
+            FieldStateKeys.UWB_NATIVE_UPDATE_RATE to listOf<Any?>(0, 4, "1", true),
+            FieldStateKeys.UWB_NATIVE_PEER_COUNT to listOf<Any?>(0, -1, Int.MAX_VALUE.toLong() + 1, "5", true),
+            FieldStateKeys.UWB_NATIVE_EVENT to listOf<Any?>(secret, "closed", "CLOSED ", 4, true),
+            FieldStateKeys.UWB_NATIVE_PEER_INDEX to listOf<Any?>(-1, 5, "4", true),
+            FieldStateKeys.UWB_NATIVE_ELAPSED_SINCE_START_MS to listOf<Any?>(-1, 4322, "123", true),
+            FieldStateKeys.UWB_NATIVE_CLOSE_REQUESTED to listOf<Any?>(0, 1, "false", secret),
+        )
+        for ((key, values) in badValues) for (value in values + listOf(null, emptyList<String>(), mapOf("raw" to secret))) {
+            val row = FieldJson.encode(record("TESLA_UWB_PEER_STOPPED", nativeState() + (key to value)))
+            assertTrue("$key=$value", row.contains("\"$key\":null"))
+            assertFalse(row.contains(secret))
+        }
+        val unknownCount = FieldJson.encode(record("TESLA_UWB_PEER_STOPPED",
+            nativeState() + (FieldStateKeys.UWB_NATIVE_PEER_COUNT to null)))
+        assertTrue(unknownCount.contains("\"uwbNativePeerIndex\":null"))
+    }
+
+    private fun nativeState(): Map<String, Any?> = mapOf(
+        FieldStateKeys.UWB_NATIVE_SESSION_TAG to "a".repeat(64),
+        FieldStateKeys.UWB_NATIVE_CONFIG_ID to 1,
+        FieldStateKeys.UWB_NATIVE_CHANNEL to 9,
+        FieldStateKeys.UWB_NATIVE_PREAMBLE_INDEX to 10,
+        FieldStateKeys.UWB_NATIVE_UPDATE_RATE to 1,
+        FieldStateKeys.UWB_NATIVE_PEER_COUNT to 5,
+        FieldStateKeys.UWB_NATIVE_EVENT to "PEER_STOPPED",
+        FieldStateKeys.UWB_NATIVE_PEER_INDEX to 4,
+        FieldStateKeys.UWB_NATIVE_ELAPSED_SINCE_START_MS to 123L,
+        FieldStateKeys.UWB_NATIVE_CLOSE_REQUESTED to false,
+    )
+
+    @Test fun deadlineCausePersistsOnlyFixedEnumsAndDoesNotReplaceTerminationReason() {
+        val file = newFile()
+        val sink = startSink(file)
+        val causes = listOf("OPERATION", "INITIAL_NEGOTIATION", "PROTOCOL_STAGE", "WRITE")
+        for (cause in causes) {
+            assertTrue(sink.enqueue(record("TESLA_UWB_COMPLETE", mapOf(
+                FieldStateKeys.UWB_DEADLINE_CAUSE to cause,
+                FieldStateKeys.UWB_REASON to "DEADLINE_EXPIRED",
+                FieldStateKeys.UWB_BACKEND_OPENED to false,
+                FieldStateKeys.UWB_VALID_DISTANCE_COUNT to 0,
+            ))))
+        }
+        assertTrue(sink.enqueue(record("TESLA_UWB_COMPLETE", mapOf(
+            FieldStateKeys.UWB_DEADLINE_CAUSE to "WRITE",
+            FieldStateKeys.UWB_REASON to "GATT_WRITE_FAILED",
+        ))))
+        assertTrue(sink.enqueue(record("TESLA_UWB_STARTED",
+            mapOf(FieldStateKeys.UWB_DEADLINE_CAUSE to null))))
+        assertTrue(sink.sync())
+        val rows = file.readLines()
+        for ((index, cause) in causes.withIndex()) {
+            assertTrue(rows[index].contains("\"uwbDeadlineCause\":\"$cause\""))
+            assertTrue(rows[index].contains("\"uwbReason\":\"DEADLINE_EXPIRED\""))
+            assertTrue(rows[index].contains("\"uwbBackendOpened\":false"))
+            assertTrue(rows[index].contains("\"uwbValidDistanceCount\":0"))
+        }
+        assertTrue(rows[causes.size].contains("\"uwbReason\":\"GATT_WRITE_FAILED\""))
+        assertTrue(rows[causes.size].contains("\"uwbDeadlineCause\":\"WRITE\""))
+        assertTrue(rows.last().contains("\"uwbDeadlineCause\":null"))
+    }
+
+    @Test fun deadlineCauseRejectsHistoricalAndRawValuesWithoutInferringFromTimeout() {
+        val secret = "PRIVATE-RAW-KEY-STS-VIN-MAC"
+        val state = mapOf(FieldStateKeys.UWB_DEADLINE_CAUSE to "INITIAL_NEGOTIATION",
+            FieldStateKeys.UWB_REASON to "DEADLINE_EXPIRED")
+        for (version in 1..29) {
+            val row = FieldJson.encode(record("TESLA_UWB_COMPLETE", state).copy(version = version))
+            assertTrue(row.contains("\"uwbDeadlineCause\":null"))
+            assertTrue(row.contains("\"uwbReason\":\"DEADLINE_EXPIRED\""))
+        }
+        for (value in listOf<Any?>(null, "UNKNOWN", "operation", "WRITE ", "DEADLINE_EXPIRED",
+            secret, true, 0, emptyList<String>(), mapOf("cause" to secret))) {
+            val row = FieldJson.encode(record("TESLA_UWB_COMPLETE", mapOf(
+                FieldStateKeys.UWB_DEADLINE_CAUSE to value,
+                FieldStateKeys.UWB_REASON to "DEADLINE_EXPIRED",
+                "rawDeadline" to secret,
+            )))
+            assertTrue(row.contains("\"uwbDeadlineCause\":null"))
+            assertFalse(row.contains(secret))
+            assertFalse(row.contains("\"rawDeadline\":"))
+        }
+        val unobserved = FieldJson.encode(record("TESLA_UWB_COMPLETE", mapOf(
+            FieldStateKeys.UWB_REASON to "DEADLINE_EXPIRED")))
+        assertFalse(unobserved.contains("\"uwbDeadlineCause\":"))
+        for (cause in listOf("OPERATION", "INITIAL_NEGOTIATION", "PROTOCOL_STAGE", "WRITE")) {
+            val row = FieldJson.encode(record("TESLA_UWB_COMPLETE",
+                mapOf(FieldStateKeys.UWB_REASON to cause)))
+            assertTrue(row.contains("\"uwbReason\":null"))
+            assertFalse(row.contains("\"uwbDeadlineCause\":"))
+        }
+    }
+
+    @Test fun ignoredRxPersistsOnlyItsFixedClassificationWithoutInventingSuccess() {
+        val file = newFile()
+        val sink = startSink(file)
+        val state = mapOf(
+            FieldStateKeys.UWB_GATT_EVENT to "PROTOCOL",
+            FieldStateKeys.UWB_RX_FRAME_COUNT to 1L,
+            FieldStateKeys.UWB_RX_PROTOCOL_COUNT to 1L,
+            FieldStateKeys.UWB_RX_STEP to "IGNORED",
+            FieldStateKeys.UWB_RX_DISPOSITION to "RESPONSE_BEFORE_START",
+            FieldStateKeys.UWB_RX_PROTOCOL_RECEIVED_ELAPSED_MS to 999L,
+            FieldStateKeys.UWB_RX_PROTOCOL_OBSERVED_ELAPSED_MS to 1_001L,
+            FieldStateKeys.UWB_RX_AUTH_EVIDENCE to null,
+            FieldStateKeys.UWB_RX_FIRA_KIND to null,
+            FieldStateKeys.UWB_BACKEND_OPENED to false,
+            FieldStateKeys.UWB_VALID_DISTANCE_COUNT to 0,
+            FieldStateKeys.UWB_LAST_DISTANCE_METERS to 0.0,
+            FieldStateKeys.UWB_LAST_RECEIVED_ELAPSED_MS to 900L,
+        )
+        assertTrue(sink.enqueue(record("TESLA_UWB_GATT_OBSERVATION", state)))
+        assertTrue(sink.enqueue(record("TESLA_UWB_COMPLETE", state)))
+        assertTrue(sink.enqueue(record("TESLA_UWB_STARTED")))
+        assertTrue(sink.sync())
+        val rows = file.readLines()
+        for (row in rows.take(2)) {
+            assertTrue(row.contains("\"uwbRxStep\":\"IGNORED\""))
+            assertTrue(row.contains("\"uwbRxDisposition\":\"RESPONSE_BEFORE_START\""))
+            assertTrue(row.contains("\"uwbRxFrameCount\":1"))
+            assertTrue(row.contains("\"uwbRxProtocolCount\":1"))
+            assertTrue(row.contains("\"uwbRxProtocolReceivedElapsedMs\":999"))
+            assertTrue(row.contains("\"uwbRxAuthEvidence\":null"))
+            assertTrue(row.contains("\"uwbRxFiraKind\":null"))
+            assertTrue(row.contains("\"uwbBackendOpened\":false"))
+            assertTrue(row.contains("\"uwbValidDistanceCount\":0"))
+            assertTrue(row.contains("\"uwbLastDistanceMeters\":0.0"))
+            assertTrue(row.contains("\"uwbLastReceivedElapsedMs\":900"))
+        }
+        assertFalse(rows.last().contains("\"uwbRxStep\":"))
+        assertFalse(rows.last().contains("\"uwbRxDisposition\":"))
+    }
+
+    @Test fun ignoredRxCannotBackfillHistoricalSchemasOrAcceptNearMissEnums() {
+        val state = mapOf(FieldStateKeys.UWB_RX_STEP to "IGNORED",
+            FieldStateKeys.UWB_RX_DISPOSITION to "RESPONSE_BEFORE_START")
+        for (version in 1..28) {
+            val row = FieldJson.encode(record("TESLA_UWB_GATT_OBSERVATION", state).copy(version = version))
+            assertTrue(row.contains("\"uwbRxStep\":null"))
+            assertTrue(row.contains("\"uwbRxDisposition\":null"))
+        }
+        for (value in listOf<Any?>("ignored", "IGNORED ", "RESPONSE_BEFORE_START ",
+            "response_before_start", "PRIVATE-RAW-KEY", true, 0, emptyList<String>())) {
+            val row = FieldJson.encode(record("TESLA_UWB_GATT_OBSERVATION",
+                mapOf(FieldStateKeys.UWB_RX_STEP to value, FieldStateKeys.UWB_RX_DISPOSITION to value)))
+            assertTrue(row.contains("\"uwbRxStep\":null"))
+            assertTrue(row.contains("\"uwbRxDisposition\":null"))
+        }
+    }
+
+    @Test fun ignoredSidecarAndApproachKeepDispositionSeparateFromAuthenticatedResults() {
+        val disposition = VehicleNavigationRxDisposition.fromCode("RESPONSE_BEFORE_START")
+        val navigation = VehicleNavigationObservation(
+            kind = VehicleNavigationObservationKind.SIDECAR_RX,
+            disposition = disposition, vehicleFixPresent = false,
+        )
+        val row = FieldJson.encode(record(VehicleNavigationObservation.EVENT).copy(navigationObservation = navigation))
+        assertTrue(row.contains("\"disposition\":\"RESPONSE_BEFORE_START\""))
+        assertTrue(row.contains("\"authEvidence\":null"))
+        assertTrue(row.contains("\"vehicleFixPresent\":false"))
+        val old = FieldJson.encode(record(VehicleNavigationObservation.EVENT).copy(
+            version = 28, navigationObservation = navigation))
+        assertTrue(old.contains("\"disposition\":null"))
+        assertEquals(VehicleNavigationRxDisposition.UNKNOWN,
+            VehicleNavigationRxDisposition.fromCode("RESPONSE_BEFORE_START "))
+        val summary = TeslaApproachReadSummary(
+            stage = "HANDSHAKING", outcome = "PENDING", responseDisposition = "RESPONSE_BEFORE_START")
+        val approach = FieldJson.encode(record("TESLA_APPROACH_RX_RESPONSE").copy(teslaApproachRead = summary))
+        assertTrue(approach.contains("\"responseDisposition\":\"RESPONSE_BEFORE_START\""))
+        assertTrue(approach.contains("\"bodyVerified\":false,\"driveVerified\":false"))
+        assertTrue(approach.contains("\"bodyReceivedElapsedMs\":null,\"driveReceivedElapsedMs\":null"))
+        for (version in 1..28) {
+            val previous = FieldJson.encode(record("TESLA_APPROACH_RX_RESPONSE").copy(
+                version = version, teslaApproachRead = summary))
+            assertTrue(previous.contains("\"responseDisposition\":null"))
+            assertTrue(previous.contains("\"bodyVerified\":false,\"driveVerified\":false"))
+        }
+        val rejected = FieldJson.encode(record("TESLA_APPROACH_RX_RESPONSE").copy(
+            teslaApproachRead = summary.copy(responseDisposition = "RESPONSE_BEFORE_START ")))
+        assertTrue(rejected.contains("\"responseDisposition\":null"))
+    }
+
+    @Test fun vehicleTimeInvalidEvidenceIsNotBackdatedIntoHistoricalSchemas() {
+        val payload = VehicleNavigationObservation(
+            kind = VehicleNavigationObservationKind.SOURCE_STOPPED,
+            reason = VehicleNavigationObservationReason.VEHICLE_FIX_TIME_INVALID,
+            status = VehicleNavigationObservationStatus.VEHICLE_LOCATION_TIME_INVALID,
+            collecting = false,
+        )
+        for (reason in listOf(VehicleNavigationObservationReason.VEHICLE_FIX_TIME_INVALID,
+                VehicleNavigationObservationReason.LOCATION_STATE_TIME_INVALID)) {
+            val current = record(VehicleNavigationObservation.EVENT).copy(
+                version = 32, navigationObservation = payload.copy(reason = reason))
+            val encoded = FieldJson.encode(current)
+            assertTrue(encoded.contains("\"reason\":\"${reason.name}\""))
+            assertTrue(encoded.contains("\"status\":\"VEHICLE_LOCATION_TIME_INVALID\""))
+            for (version in 28..31) {
+                val old = FieldJson.encode(current.copy(version = version))
+                assertTrue(old.contains("\"reason\":null"))
+                assertTrue(old.contains("\"status\":null"))
+                assertTrue(old.contains("\"collecting\":false"))
+                assertFalse(old.contains("VEHICLE_FIX_EXPIRED"))
+                assertFalse(old.contains("VEHICLE_LOCATION_STALE"))
+            }
+        }
+        val expired = FieldJson.encode(record(VehicleNavigationObservation.EVENT).copy(
+            version = 31, navigationObservation = payload.copy(
+                reason = VehicleNavigationObservationReason.VEHICLE_FIX_EXPIRED,
+                status = VehicleNavigationObservationStatus.VEHICLE_LOCATION_STALE)))
+        assertTrue(expired.contains("\"reason\":\"VEHICLE_FIX_EXPIRED\""))
+        assertTrue(expired.contains("\"status\":\"VEHICLE_LOCATION_STALE\""))
+    }
+
+    @Test fun navigationEvidenceCannotLeakAcrossVersionEventOrFollowingRecord() {
+        val payload = VehicleNavigationObservation(
+            kind = VehicleNavigationObservationKind.RESULT,
+            reason = VehicleNavigationObservationReason.LOCATION_FIX_TIME_MISSING,
+            candidate = 2, attempt = 1, vehicleFixPresent = false,
+        )
+        for (version in 1..27) {
+            val encoded = FieldJson.encode(record(VehicleNavigationObservation.EVENT).copy(
+                version = version, navigationObservation = payload))
+            assertFalse(encoded.contains("\"kind\":\"RESULT\""))
+        }
+        val file = newFile()
+        val sink = startSink(file)
+        assertTrue(sink.enqueue(record(VehicleNavigationObservation.EVENT).copy(navigationObservation = payload)))
+        assertTrue(sink.enqueue(record("TESLA_UWB_DISTANCE_RECEIVED").copy(navigationObservation = payload)))
+        assertTrue(sink.enqueue(record(VehicleNavigationObservation.EVENT)))
+        assertTrue(sink.sync())
+        val rows = file.readLines()
+        assertTrue(rows[0].contains("\"reason\":\"LOCATION_FIX_TIME_MISSING\""))
+        assertTrue(rows[0].contains("\"vehicleFixPresent\":false"))
+        assertFalse(rows[1].contains("\"kind\":\"RESULT\""))
+        assertFalse(rows[2].contains("\"kind\":\"RESULT\""))
+    }
+
+    @Test fun navigationStorageDiscardsFreeTextReasonsAndInvalidAttemptNumbers() {
+        val secret = "SYNTHETIC-PRIVATE-LOCATION-AND-TOKEN"
+        val payload = VehicleNavigationObservation(
+            kind = VehicleNavigationObservationKind.TERMINAL,
+            reason = VehicleNavigationObservationReason.fromCode(secret),
+            authEvidence = VehicleNavigationAuthEvidence.fromCode(secret),
+            candidate = -1, attempt = Long.MIN_VALUE, cleanupSucceeded = false,
+        )
+        val file = newFile()
+        val sink = startSink(file)
+        assertTrue(sink.enqueue(record(VehicleNavigationObservation.EVENT).copy(navigationObservation = payload)))
+        assertTrue(sink.sync())
+        val encoded = file.readText()
+        assertFalse(encoded.contains(secret))
+        assertTrue(encoded.contains("\"reason\":\"UNKNOWN\""))
+        assertTrue(encoded.contains("\"authEvidence\":\"UNKNOWN\""))
+        assertTrue(encoded.contains("\"candidate\":null,\"attempt\":null"))
+        assertTrue(encoded.contains("\"cleanupSucceeded\":false"))
+    }
+
     @Test fun frunkRecognitionStorageBoundaryMasksDirectPayloadAndDropsUnknownReason() {
         val file = newFile()
         val sink = startSink(file)
@@ -324,16 +1133,20 @@ class FieldEventLogTest {
 
     @Test fun rotationFailurePreservesConfirmedRowsAndAccountsForFollowingRecords() {
         val file = newFile()
-        val sink = startSink(file, limitBytes = 1_600L)
-        assertTrue(sink.enqueue(record("PROCESS_START_OFF")))
+        val records = listOf(record("PROCESS_START_OFF"), record("REAL_BLE_APPEARED"),
+            record("REAL_BLE_DISAPPEARED"))
+        // 각 행은 단독으로 들어가되 두 번째 행은 회전해야 하므로 실제 UTF-8 한 행 크기로 정한다.
+        val segmentBytes = records.maxOf { (FieldJson.encode(it) + "\n").toByteArray(Charsets.UTF_8).size }.toLong()
+        val sink = startSink(file, limitBytes = segmentBytes * 4)
+        assertTrue(sink.enqueue(records[0]))
         assertTrue(sink.sync())
         val confirmed = file.readBytes()
         val blocker = archive(file, 3)
         assertTrue(blocker.mkdir())
         val protected = File(blocker, "keep")
         protected.writeText("untouched")
-        sink.enqueue(record("REAL_BLE_APPEARED"))
-        sink.enqueue(record("REAL_BLE_DISAPPEARED"))
+        sink.enqueue(records[1])
+        sink.enqueue(records[2])
         assertTrue(sink.sync())
 
         assertArrayEquals(confirmed, file.readBytes())
@@ -1009,7 +1822,7 @@ class FieldEventLogTest {
         val expected = mutableListOf<Pair<String, String>>()
         for ((key, values) in listOf(
             FieldStateKeys.UWB_GATT_STAGE to TeslaKeyStage.entries.map { it.name },
-            FieldStateKeys.UWB_GATT_EVENT to TeslaUwbGattEvent.entries.map { it.name },
+            FieldStateKeys.UWB_GATT_EVENT to TeslaGattEvent.entries.map { it.name },
             FieldStateKeys.UWB_GATT_CONNECT_ACTION to listOf("CREATE", "RECONNECT"),
         )) {
             for (value in values) {

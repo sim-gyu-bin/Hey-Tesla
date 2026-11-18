@@ -43,7 +43,7 @@ class TeslaBleKeyUiDeviceTest {
                 runtime.startTeslaKey(register = false)
                 assertEquals(TeslaKeyStage.PREPARING_KEY, runtime.teslaKeyState.value.stage)
                 assertTrue(runtime.teslaKeyReserved())
-                assertFalse(runtime.acquireUwbSupport())
+                assertNull(runtime.acquireSpeechDiagnostic { })
             } finally {
                 // IO 반환이 Main으로 돌아오기 전에 봉인하여 GATT 연결·TX를 막는다.
                 runtime.cancelTeslaKey()
@@ -59,8 +59,9 @@ class TeslaBleKeyUiDeviceTest {
             assertFalse(result.registrationRequested)
             assertFalse(runtime.state.value.teslaKeyDiagnosticActive)
             assertNull(runtime.teslaKeyBlockedReason())
-            assertTrue(runtime.acquireUwbSupport())
-            runtime.releaseUwbSupport(cleanupFailed = false)
+            val speech = runtime.acquireSpeechDiagnostic { }
+            assertNotNull(speech)
+            runtime.releaseSpeechDiagnostic(requireNotNull(speech).id)
         }
     }
 
@@ -241,10 +242,9 @@ class TeslaBleKeyUiDeviceTest {
         } finally {
             instrumentation.runOnMainSync { token?.let(runtime::releaseTeslaKey) }
         }
-        clickText("UWB 지원")
-        var foreignLease = false
-        instrumentation.runOnMainSync { foreignLease = runtime.acquireUwbSupport() }
-        assertTrue(foreignLease)
+        var foreignLeaseId: Long? = null
+        instrumentation.runOnMainSync { foreignLeaseId = runtime.acquireSpeechDiagnostic { }?.id }
+        assertNotNull(foreignLeaseId)
         try {
             openKeyScreen()
             assertFalse(clickableParent(awaitNode { it.text?.toString() == "우리 앱 키로 인증·상태 1회 조회" }).isEnabled)
@@ -252,7 +252,7 @@ class TeslaBleKeyUiDeviceTest {
             val error = awaitNode { it.isContentInvalid }
             assertFalse(error.error.isNullOrEmpty())
         } finally {
-            instrumentation.runOnMainSync { runtime.releaseUwbSupport(cleanupFailed = false) }
+            instrumentation.runOnMainSync { runtime.releaseSpeechDiagnostic(requireNotNull(foreignLeaseId)) }
         }
     }
 

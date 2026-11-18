@@ -1,6 +1,5 @@
 package com.heytesla.app.ui
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,7 +7,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
@@ -18,10 +16,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -33,11 +30,12 @@ import com.heytesla.app.vehicle.ble.BleProbeState
 import com.heytesla.app.vehicle.ble.BleProbeStatus
 import com.heytesla.app.DiagnosticState
 import com.heytesla.app.speech.SpeechTrialState
-import com.heytesla.app.vehicle.uwb.TeslaUwbProbeState
-import com.heytesla.app.vehicle.uwb.TeslaUwbStage
+import com.heytesla.app.speech.product.ProductVoiceTranscriptRecord
 import com.heytesla.app.vehicle.key.VehicleVinStatus
-import com.heytesla.app.vehicle.navigation.VehicleNavigationPresentation
-import com.heytesla.app.vehicle.navigation.VehicleNavigationStatus
+import com.heytesla.app.vehicle.connection.TeslaConnectionStage
+import com.heytesla.app.vehicle.protocol.TeslaGear
+import java.text.DateFormat
+import java.util.Date
 
 @Composable
 internal fun HomeScreen(
@@ -49,49 +47,13 @@ internal fun HomeScreen(
     onStopSession: () -> Unit,
     onSetServiceEnabled: (Boolean) -> Unit,
     serviceBlockedReason: String?,
-    uwbRanging: TeslaUwbProbeState = TeslaUwbProbeState(),
-    nowElapsedMs: Long = 0L,
-    navigation: VehicleNavigationPresentation = VehicleNavigationPresentation(VehicleNavigationStatus.OFF),
-    onResumeNavigation: () -> Unit,
+    onSetProductVoiceConsent: (Boolean) -> Unit,
 ) {
-    val cleanupFailed = ble.status == BleProbeStatus.CLEANUP_FAILED ||
-        (uwbRanging.serviceOwned && uwbRanging.stage == TeslaUwbStage.CLEANUP_FAILED) ||
-        state.bleFieldTrialStopReason == "LOCAL_CLOSE_FAILED_RESTART_REQUIRED" ||
-        navigation.status == VehicleNavigationStatus.CLEANUP_FAILED
-    val serviceFailure = state.bleFieldTrialStopReason?.takeUnless {
-        it == "USER_STOP" || it == "DISABLED" || it == "BLE_FIELD_NOTIFICATION_STOP"
-    }
-    val scanFailed = state.bleFieldScanFailure != null &&
-        (state.bleDetectionEnabled || state.bleFieldTrialActive)
-    val serviceUwbText = if (state.bleFieldTrialActive && state.observationServiceRunning) {
-        vehicleUwbNotificationText(uwbRanging, nowElapsedMs)
-    } else null
-    val hasServiceError = cleanupFailed || scanFailed ||
-        (!state.bleFieldTrialActive && serviceFailure != null) ||
-        (serviceUwbText != null && (uwbRanging.stage == TeslaUwbStage.FAILED ||
-            uwbRanging.stage == TeslaUwbStage.BLOCKED || uwbRanging.stage == TeslaUwbStage.TIMED_OUT))
-    val status = when {
-        cleanupFailed -> "서비스 오류 · 연결 정리가 확인되지 않았어요. 앱을 다시 시작해 주세요."
-        state.bleFieldTrialStopping -> "서비스 중지 중 · 감지·UWB 종료를 기다리고 있어요."
-        scanFailed -> "서비스 오류 · 차량 감지 스캔에 실패했어요."
-        state.bleFieldTrialActive && state.bleFieldScanRecoveryAt != null ->
-            "서비스 복원 대기 · OS 스캔 제한에서 복구를 기다리고 있어요."
-        state.bleFieldTrialStarting || (state.bleDetectionEnabled && state.observationStartPending) ->
-            "서비스 시작 중 · 아직 감시가 시작되지 않았어요."
-        !state.bleFieldTrialActive && (serviceFailure == "OBSERVATION_FGS_BACKGROUND_START_DENIED" ||
-            serviceFailure == "BLE_DETECTION_USER_STOP_REQUIRES_START") ->
-            "OS 시작 제한 · 감시 실행 안 됨 · 끈 뒤 앱 화면에서 다시 켜 주세요."
-        !state.bleFieldTrialActive && serviceFailure != null ->
-            "서비스 실행 안 됨 · ${vehicleServiceReasonLabel(serviceFailure)}"
-        serviceUwbText != null -> if (hasServiceError) serviceUwbText else "서비스 ON · 차량 안내 중"
-        state.bleFieldTrialActive && state.observationServiceRunning && state.bleFieldScanRunning ->
-            if (state.present) "차량 신호 확인 · UWB 자동 측정을 준비하고 있어요."
-            else "서비스 ON · 차량 신호를 기다리고 있어요."
-        state.bleFieldTrialActive && state.observationServiceRunning ->
-            "서비스 ON · 감지 스캔은 아직 실행 확인 전이에요."
-        state.bleDetectionEnabled -> "서비스 복원 대기 · 감시가 실행되지 않고 있어요."
-        else -> "서비스 OFF · 차량 감지·UWB 자동 측정을 사용하지 않아요."
-    }
+    val cleanupFailed = ble.status == BleProbeStatus.CLEANUP_FAILED || productCleanupUncertain(state)
+    val serviceFailure = state.bleFieldTrialStopReason
+    val presentation = vehicleServicePresentation(state)
+    val hasServiceError = cleanupFailed || presentation.error
+    val status = if (cleanupFailed) "자원 정리 불명 · 앱 프로세스 재시작 필요" else presentation.text
     val startBlocked = serviceBlockedReason.takeIf { !state.bleDetectionEnabled }
     val audioCleanupFailed = trial.reason?.contains("RESTART_REQUIRED") == true
     val processing = state.sessionId != null || state.speechDiagnosticActive || trial.active
@@ -144,40 +106,31 @@ internal fun HomeScreen(
                     if (hasServiceError) error(status)
                 },
             )
-            if (state.bleFieldTrialActive && state.observationServiceRunning && !state.bleFieldTrialStopping &&
-                !cleanupFailed && !scanFailed
+            RecentProductVoiceResults(state)
+            if (state.bleDetectionEnabled && state.bleFieldTrialActive && state.observationServiceRunning &&
+                !state.bleFieldTrialStopping && !cleanupFailed
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    val arrow = vehicleNavigationArrow(navigation)
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (arrow != null) {
-                            val color = MaterialTheme.colorScheme.onBackground
-                            Canvas(Modifier.size(48.dp).rotate(arrow.toFloat()).semantics {
-                                contentDescription = "좌표 안내 나침반 · 폰 상단 기준"
-                            }) {
-                                val x = size.width / 2f
-                                val tip = size.height * 0.15f
-                                val wing = size.height * 0.4f
-                                drawLine(color, Offset(x, size.height * 0.85f), Offset(x, tip), strokeWidth = 4f)
-                                drawLine(color, Offset(x, tip), Offset(size.width * 0.25f, wing), strokeWidth = 4f)
-                                drawLine(color, Offset(x, tip), Offset(size.width * 0.75f, wing), strokeWidth = 4f)
-                            }
-                        }
-                        Text(vehicleNavigationText(navigation), style = MaterialTheme.typography.titleMedium)
-                    }
-                    Text(serviceUwbText ?: "UWB 실측 미수신",
-                        style = MaterialTheme.typography.bodyLarge)
-                    if (navigation.status == VehicleNavigationStatus.START_REQUIRED ||
-                        navigation.status == VehicleNavigationStatus.FOREGROUND_FAILED
-                    ) {
-                        OutlinedButton(onClick = onResumeNavigation, modifier = Modifier.heightIn(min = 48.dp)) {
-                            Text("위치 안내 재개")
-                        }
-                    }
-                }
+                DetailRow("차량 연결", when (state.vehicleConnection.stage) {
+                    TeslaConnectionStage.IDLE -> "연결 전"
+                    TeslaConnectionStage.PREPARING -> "등록 앱 키 준비 중"
+                    TeslaConnectionStage.CONNECTING -> "연결 중 · 인증 전"
+                    TeslaConnectionStage.CHECKING_VEHICLE -> "앱 키 인증·수면 상태 확인 중"
+                    TeslaConnectionStage.WAKING_VEHICLE -> "조건부 깨우기 준비·응답 확인 중"
+                    TeslaConnectionStage.AUTHENTICATING -> "앱 키 인증 중"
+                    TeslaConnectionStage.MONITORING -> "앱 키 인증 후 주행 상태 확인 중"
+                    TeslaConnectionStage.EXECUTING -> "프렁크 요청 처리 중"
+                    TeslaConnectionStage.STOPPED -> "종료"
+                    TeslaConnectionStage.BLOCKED -> "차단"
+                    TeslaConnectionStage.FAILED -> "실패"
+                })
+                DetailRow("주차 상태", if (
+                    state.vehicleConnection.stage == TeslaConnectionStage.MONITORING &&
+                    state.vehicleConnection.gear == TeslaGear.P && state.vehicleConnection.parkFresh
+                ) "신선한 P 확인 · 통신 조회 시점 기준" else "신선한 P 확인 안 됨 · 과거 상태로 허용하지 않음")
             }
+            ProductVoiceConsentSection(state, onSetProductVoiceConsent)
             Text(
-                "차량 신호 감지 후 기존 앱 키로 좌표를 읽고 휴대전화 위치·나침반으로 안내하며, UWB 실측은 별도로 표시해요. 차량 좌표 수신은 실차 확인 전이에요. 자동 마이크·차량 제어는 연결되지 않았어요.",
+                "인증된 차량 연결과 신선한 P가 확인되는 동안만 음성을 대기해요. D·R·N·기어 불명·정보 만료·연결 해제 시 음성을 중지해요. 주행 상태 조회에는 통신 지연이 있어 즉시 감지를 보장하지 않아요.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -215,6 +168,99 @@ internal fun HomeScreen(
     }
 }
 
+/** 복원된 결과는 표시만 한다. 이 영역에는 음성·차량 실행 콜백을 전달하지 않는다. */
+@Composable
+private fun RecentProductVoiceResults(state: DiagnosticState) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("최근 음성 결과", style = MaterialTheme.typography.titleLarge)
+        Text(
+            "개발 확인용으로 인식 텍스트·종료 결과를 앱 내부에 자동 보관해요. 녹음·업로드는 하지 않아요.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (state.productVoiceResultsLoading) {
+            Text("저장된 음성 결과를 불러오는 중이에요.",
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+        } else if (state.productVoiceResults.isEmpty() && state.productVoiceResultsReadFailure == null) {
+            Text("아직 음성 결과가 없어요.",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        state.productVoiceResultsReadFailure?.let { failure ->
+            Text(
+                when (failure) {
+                    "LIMIT_REACHED" -> "음성 결과 읽기 실패 · 보관 용량 한도로 이전 결과를 불러오지 못했어요."
+                    "INVALID_RECORD" -> "음성 결과 읽기 실패 · 일부 보관 파일을 확인할 수 없어요."
+                    else -> "음성 결과 읽기 실패 · 이전 결과를 불러오지 못했어요."
+                },
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
+        state.productTranscriptWriteFailure?.let { failure ->
+            Text(
+                "음성 결과 저장 실패 · 이번 실행에서 일부 결과를 보관하지 못했어요. " +
+                    when (failure) {
+                        "LIMIT_REACHED" -> "보관 용량 한도에 도달했어요. 기존 파일은 자동 삭제하지 않아요."
+                        "QUEUE_FULL" -> "저장 대기열 한도로 누락된 결과가 있어요."
+                        "INVALID_RECORD" -> "보관 항목을 확인하지 못했어요."
+                        else -> "파일 보관 중 오류가 있었어요."
+                    } + " 일부 결과는 앱 종료 후 남지 않을 수 있어요.",
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
+        state.productVoiceResults.take(5).forEach { record ->
+            ProductVoiceResult(record)
+        }
+        Text(
+            "이번 실행 파일 저장 ${state.productTranscriptSavedCount}건 · 인식 판정은 명령 전송·차량 동작 완료가 아니에요.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun ProductVoiceResult(record: ProductVoiceTranscriptRecord) {
+    val timestamp = remember(record.wallTimeMs) {
+        DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM).format(Date(record.wallTimeMs))
+    }
+    val failed = record.diagnostic.outcome == "FAILURE" || record.diagnostic.outcome == "SEALED"
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text("시각: $timestamp", style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            when (record.diagnostic.outcome) {
+                "EMPTY" -> "빈 인식 결과 · 명령 불일치"
+                "GRAMMAR_NO_MATCH" -> "명령 불일치"
+                "ACCEPTED" -> "명령 문장 인정 · 차량 실행 결과 아님"
+                "SEALED" -> "음성 회차 중단 · 명령 실행 허가 아님"
+                "FAILURE" -> "음성 처리 실패 · 명령 실행 허가 아님"
+                else -> "인식 판정 확인 안 됨"
+            },
+            style = MaterialTheme.typography.titleMedium,
+            color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            when {
+                record.text == null && record.reason == "PRODUCT_VOICE_UTTERANCE_TRUNCATED" ->
+                    "인식 전 발화 잘림 · 원문 없음"
+                record.text == null -> "인식 원문 없음 · 종료 결과만 보관"
+                record.text.isEmpty() -> "인식 원문: (빈 결과)"
+                else -> record.text
+            },
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Text("사유: ${record.reason ?: "기존 기록 · 사유 없음"}",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
 private fun vehicleServiceReasonLabel(reason: String): String = when (reason) {
     "VIN_LOADING" -> "차량 VIN을 복원하고 있어요."
     "VIN_NOT_REGISTERED", "VIN_NOT_READY" -> "설정에서 차량 VIN을 등록해 주세요."
@@ -225,7 +271,6 @@ private fun vehicleServiceReasonLabel(reason: String): String = when (reason) {
     "BLUETOOTH_OFF" -> "설정에서 Bluetooth를 켜 주세요."
     "OBSERVATION_BLUETOOTH_PERMISSION_REQUIRED" -> "설정에서 Bluetooth 연결 권한을 허용해 주세요."
     "BLUETOOTH_SCAN_PERMISSION_REQUIRED" -> "설정에서 Bluetooth 스캔 권한을 허용해 주세요."
-    "RANGING_PERMISSION_REQUIRED" -> "설정에서 UWB 거리 측정 권한을 직접 허용해 주세요."
     "BLE_LOCATION_PERMISSION_REQUIRED" -> "설정에서 정확한 위치 권한을 허용해 주세요."
     "BLE_LOCATION_DISABLED" -> "설정에서 시스템 위치 서비스를 켜 주세요."
     "OBSERVATION_NOTIFICATION_PERMISSION_REQUIRED", "OBSERVATION_NOTIFICATIONS_BLOCKED" ->

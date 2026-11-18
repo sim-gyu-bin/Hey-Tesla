@@ -77,7 +77,7 @@ class SpeechRecordingReplayDeviceTest {
         } finally { pcm.fill(0) }
         for (info in store.list().sortedBy { it.id }) {
             val recording = store.load(info.id)
-            try { report(info.id.take(8), recording.pcm, recording.pcm.size) } finally { recording.pcm.fill(0) }
+            try { report("saved", recording.pcm, recording.pcm.size) } finally { recording.pcm.fill(0) }
         }
     }
 
@@ -88,11 +88,13 @@ class SpeechRecordingReplayDeviceTest {
         val gate = FrunkVoicePolicy(deadline = Long.MAX_VALUE, startedAtElapsedMs = 0L)
         val accepted = result.failure == null &&
             gate.command(1L, SpeechTrialMode.DIRECT_MIC, final = true, candidates = texts, confidence = scores)
-        Log.i(TAG, "$name segments=${result.segments.size} candidates=$texts " +
-            "scores=${scores?.joinToString(",", "[", "]")} failure=${result.failure} " +
+        Log.i(TAG, "$name segments=${result.segments.size} candidateCount=${texts.size} " +
+            "matched=${texts.any { SpeechCommandParser.normalize(it) == SpeechCommandPhrases.normalizedSentence }} " +
+            "failure=${result.failure} " +
             "accepted=$accepted reason=${gate.reason} cleanup=${result.cleanupFailures}")
         assertEquals("$name 정리 실패", emptyList<String>(), result.cleanupFailures)
-        val shadow = SherpaShadowRecognizer.decode(context.assets, pcm, size).judged(SpeechCommandPhrases.normalizedSentence)
+        val shadow = KoreanSpeechRecognizer.decode(context.assets, pcm, size)
+            .shadowTranscript().judged(SpeechCommandPhrases.normalizedSentence)
         Log.i(TAG, "$name shadow matched=${shadow.matched} decision=${shadow.decision} empty=${shadow.text.isNullOrEmpty()} " +
             "failure=${shadow.failure} loadMs=${shadow.loadMs} decodeMs=${shadow.decodeMs}")
         assertNull("$name 그림자 인식 실패", shadow.failure)

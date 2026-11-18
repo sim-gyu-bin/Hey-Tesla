@@ -107,62 +107,6 @@ class OfficialTeslaPeerKatTest {
         }
     }
 
-    @Test fun privateRequestWireHasExactUint32AndMultiplePeerAddresses() {
-        // REA u0/q0 wire ledger: outer54, repeated1, uint32 ID1, bytes addresses3, STS mode7.
-        assertArrayEquals(hex("b203100a0e08ffffffff0f1a041234abcd3801"), FiraWire.request(listOf(
-            FiraWire.SessionRequest(0xffff_ffffL, hex("1234abcd")))))
-        for ((id, literal) in listOf(
-            0L to "b2030a0a081a041234abcd3801",
-            11L to "b2030c0a0a080b1a041234abcd3801",
-            12L to "b2030c0a0a080c1a041234abcd3801",
-            0x8000_0000L to "b203100a0e0880808080081a041234abcd3801",
-            0xffff_ffffL to "b203100a0e08ffffffff0f1a041234abcd3801")) {
-            assertArrayEquals(hex(literal), FiraWire.request(listOf(FiraWire.SessionRequest(id, hex("1234abcd")))))
-            val parsed = FiraWire.decodeVehiclePayload(hex(literal)) as FiraWire.VehiclePayload.Request
-            parsed.use {
-                assertEquals(id, it.sessions.single().requestSessionId)
-                assertArrayEquals(hex("1234abcd"), it.sessions.single().addresses)
-            }
-        }
-        assertArrayEquals(hex("b2030c0a0a08001a041234abcd3801"),
-            FiraWire.request(listOf(FiraWire.SessionRequest(0, hex("1234abcd"), explicitZeroId = true))))
-    }
-
-    @Test fun privateResponseDecodesLiteralHighBitIdsAndOptionalSuccessFields() {
-        // r0/v0/t0 literal: request 0xffffffff, backend 0x80000000, static STS8, epochSeconds=1.
-        val literal = hex("da03240a2008ffffffff0f12180a021122100918052080808080082a0801020304050607081001")
-        val response = FiraWire.decodeClientPayload(literal) as FiraWire.ClientPayload.Response
-        response.use {
-            assertEquals(1L, it.epochSeconds)
-            assertFalse(it.keyIdPresent)
-            val session = it.sessions.single()
-            assertEquals(0xffff_ffffL, session.requestSessionId)
-            assertEquals(null, session.errorCode)
-            val data = session.data!!
-            assertEquals(0x8000_0000L, data.firaSessionId)
-            assertEquals(9L, data.preamble)
-            assertEquals(5L, data.channel)
-            assertArrayEquals(hex("1122"), data.localAddress)
-            assertArrayEquals(hex("0102030405060708"), data.sts)
-            assertTrue(data.responderAddresses.isEmpty())
-        }
-    }
-
-    @Test fun privateCapabilitiesStopAndStoppedAreDifferentMessages() {
-        assertArrayEquals(hex("d20300"), FiraWire.capabilities())
-        assertArrayEquals(hex("8203040800080b"), FiraWire.stop(listOf(0, 11)))
-        assertArrayEquals(hex("8203040a02000b"), FiraWire.stop(listOf(0, 11), packed = true))
-        val stop = FiraWire.decodeVehiclePayload(hex("8203040800080b")) as FiraWire.VehiclePayload.Stop
-        assertEquals(listOf(0, 11), stop.endpoints)
-        val stopped = FiraWire.decodeClientPayload(hex("da02040800080b")) as FiraWire.ClientPayload.Stopped
-        assertEquals(listOf(0, 11), stopped.endpoints)
-        val packed = FiraWire.decodeClientPayload(hex("da02040a02000b")) as FiraWire.ClientPayload.Stopped
-        assertEquals(listOf(0, 11), packed.endpoints)
-        expectInvalid { FiraWire.decodeClientPayload(hex("da0202080c")) }
-        // Published actuator command and whitelist query are never part of this UWB peer's allow-list.
-        expectInvalid { FiraWire.decodeClientPayload(hex("120452020801")) }
-        expectInvalid { FiraWire.decodeClientPayload(hex("0a020805")) }
-    }
 
     private fun publicKey(): ByteArray = hex("1b2fce19967b79db696f909cff89ea9a")
     private fun publicVin(): ByteArray = "5YJ30123456789ABC".toByteArray(Charsets.US_ASCII)

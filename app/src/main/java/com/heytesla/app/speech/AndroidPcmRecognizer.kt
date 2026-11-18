@@ -46,6 +46,8 @@ internal class AndroidPcmResult(
     val acceptedBytes: Int,
     val cleanupFailures: List<String>,
     val releaseUncertain: Boolean,
+    /** 제품 명령은 onResults만으로 전체 외부 PCM의 종료를 추정하지 않는다. 기존 진단 판정은 그대로다. */
+    val segmentedSessionEnded: Boolean = false,
 ) {
     val candidates: List<SttHypothesis> by lazy { AndroidPcmRecognizer.combine(segments) }
 }
@@ -66,6 +68,7 @@ internal class AndroidPcmRecognizer(context: Context) {
             val written = AtomicInteger(0)
             val writeCloseAttempted = AtomicBoolean(false)
             var active = true
+            var segmentedSessionEnded = false
             var recognizer: SpeechRecognizer? = null
             var pipe: Array<ParcelFileDescriptor>? = null
             var writer: Job? = null
@@ -97,7 +100,10 @@ internal class AndroidPcmRecognizer(context: Context) {
                         if (active) hypotheses(segmentResults).takeIf { it.isNotEmpty() }?.let(segments::add)
                     }
                     override fun onEndOfSegmentedSession() {
-                        if (active) done.complete(null)
+                        if (active) {
+                            segmentedSessionEnded = true
+                            done.complete(null)
+                        }
                     }
                 })
                 engine.startListening(intent(created[0]))
@@ -165,7 +171,8 @@ internal class AndroidPcmRecognizer(context: Context) {
                     }
                 }
             }
-            AndroidPcmResult(segments.toList(), failure, written.get(), cleanupFailures.toList(), releaseUncertain.get())
+            AndroidPcmResult(segments.toList(), failure, written.get(), cleanupFailures.toList(),
+                releaseUncertain.get(), segmentedSessionEnded)
         }
 
     private fun intent(source: ParcelFileDescriptor) = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)

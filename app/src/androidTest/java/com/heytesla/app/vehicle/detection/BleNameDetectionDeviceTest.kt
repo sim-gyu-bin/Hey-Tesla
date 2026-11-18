@@ -400,7 +400,6 @@ class BleNameDetectionDeviceTest {
         assertTrue(h.decisions.all { it.cancelAttempt == null })
         assertNull(runtime.policy.current)
         assertNull(runtime.microphone)
-        assertFalse(runtime.uwbSupportActive)
         assertFalse(runtime.teslaKeyReserved())
     }
 

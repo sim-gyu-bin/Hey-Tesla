@@ -12,9 +12,18 @@ import com.heytesla.app.vehicle.detection.BleEventEvidence
 import com.heytesla.app.vehicle.frunk.FrunkVoiceRecognition
 import com.heytesla.app.vehicle.frunk.FrunkVoiceRecognitionResult
 import com.heytesla.app.vehicle.key.TeslaKeyStage
+import com.heytesla.app.logging.legacy.VehicleNavigationObservation
+import com.heytesla.app.logging.legacy.VehicleNavigationObservationJson
+import com.heytesla.app.logging.legacy.VehicleNavigationObservationReason
+import com.heytesla.app.logging.legacy.VehicleNavigationObservationStatus
+import com.heytesla.app.logging.legacy.VehicleNavigationRxDisposition
 import com.heytesla.app.vehicle.protocol.TeslaBleAuthEvidence
-import com.heytesla.app.vehicle.uwb.TeslaUwbGattEvent
-import com.heytesla.app.vehicle.uwb.TeslaUwbStage
+import com.heytesla.app.vehicle.connection.TeslaGattDeadlineCause
+import com.heytesla.app.vehicle.connection.TeslaGattEvent
+import com.heytesla.app.vehicle.connection.TeslaGattObservation
+import com.heytesla.app.vehicle.connection.TeslaConnectionStage
+import com.heytesla.app.speech.product.ProductVoiceStage
+import com.heytesla.app.speech.product.ProductVoiceDiagnostic
 
 import java.io.File
 import java.io.IOException
@@ -33,6 +42,21 @@ const val FIELD_LOG_RELATIVE_PATH = "field-diagnostics/events-v2.jsonl"
 /**
  * JSONL 레코드 스키마 버전.
  *
+ * 39 = 원문·PCM 없는 제품 음성 발화/로드/정리 진단. 진단 결과는 fresh P·마이크·명령 허가가 아니다.
+ * 38 = wake 후 초기 INVALID의 실제 새 DRIVE 발급 이벤트. 준비 중 mic·제어를 허용하지 않는다.
+ * 37 = 상관 일치·domain3 AEAD 검증 DRIVE 완료의 shift 분류와 timestamp 상태. 차량 절대 시각은 기록하지 않는다.
+ *      ABSENT/EMPTY/INVALID/SNA/UNRECOGNIZED는 P가 아니며 timestamp VALID도 freshness·제어 허가를 뜻하지 않는다.
+ * 36 = 제품 연결 rxResponse의 domain2 UUID 없는 broadcast sleep 상태 enum 정수와 wake 후 session 재송신 이벤트.
+ *      비인증 진단 관측일 뿐 P·기상·제어 판단에 쓰지 않는다.
+ * 35 = 인증 BODY 선행·ASLEEP 단발 깨우기 단계/결과. 인증 ACK·비인증 nominal ACK를 구분하며 기상·P·열림으로 승격하지 않는다.
+ * 34 = 제품 연결 이벤트의 immutable GATT·RX·쓰기 관측. 접수·수신·인증·기한을 합치지 않는다.
+ * 33 = 인증 연결·fresh P·제품 음성 단계/동의의 typed snapshot. 인식 승인은 전송·물리 성공이 아니다.
+ * 제품 음성 원문·PCM·차량 식별자·차량 절대 시각은 기록하지 않는다. 1–32의 역사 관측은 보존한다.
+ * 32 = 차량 좌표 시각 무효·잘못된 Timestamp와 실제 기한 만료의 typed 분류. 과거 stale 원인은 추론하지 않는다.
+ * 31 = endpoint별 native 세션 태그·설정·peer 사건·로컬 정리 선행 관측. 거리 성공·종료 원인은 추론하지 않는다.
+ * 30 = 실제 만료 기한의 typed uwbDeadlineCause. 과거 DEADLINE_EXPIRED에서 원인을 추론하지 않는다.
+ * 29 = 시작 전 RX의 IGNORED/RESPONSE_BEFORE_START 분류. 인증·거리·freshness 갱신 증거가 아니다.
+ * 28 = 좌표 값 없는 typed navigationObservation: 실제 입장·FGS/source·입력·sidecar 전송/반환·종료 경계.
  * 27 = 미분류 UWB 본문의 값 없는 bounded 구조 요약과 header-only 요청 상관 관측.
  * 26 = 서비스 UWB notification/frame/protocol 분모·decoder·실제 반환 step/인증/FiRa/AEAD의 nullable 관측.
  * 25 = 서비스 UWB GATT 단계·SDK 접수·원 callback status·상대 시각의 nullable snapshot.
@@ -61,7 +85,7 @@ const val FIELD_LOG_RELATIVE_PATH = "field-diagnostics/events-v2.jsonl"
  * 앱은 항상 현재 버전으로만 덧붙이고 기존 행을 고치지 않으므로 이전 버전과 공존한다.
  * 파서는 행마다 `version`을 보고, 없어진 필드를 가정하지 않는다.
  */
-const val FIELD_LOG_RECORD_VERSION = 27
+const val FIELD_LOG_RECORD_VERSION = 39
 
 /** 새 로그 전체 상한. active와 archive 3개에 각각 512 KiB를 배정한다. 과거 events.jsonl은 포함하지 않는다. */
 const val FIELD_LOG_LIMIT_BYTES = 2L * 1024L * 1024L
@@ -135,6 +159,9 @@ data class FieldRecord(
     val teslaApproachRead: TeslaApproachReadSummary? = null,
     val candidateDiagnostics: BleCandidateDiagnostics? = null,
     val frunkVoiceRecognition: FrunkVoiceRecognitionResult? = null,
+    val navigationObservation: VehicleNavigationObservation? = null,
+    val connectionObservation: TeslaGattObservation? = null,
+    val productVoiceDiagnostic: ProductVoiceDiagnostic? = null,
 )
 
 /** JSON `state` 객체에 쓸 수 있는 키. 여기 없는 키는 인코딩 단계에서 버린다. */
@@ -177,6 +204,15 @@ object FieldStateKeys {
     const val FRUNK_OPEN_OBSERVED = "frunkOpenObserved"
     const val FRUNK_LOCAL_CLOSED = "frunkLocalClosed"
     const val FRUNK_CLEANUP_FAILED = "frunkCleanupFailed"
+    const val CONNECTION_STAGE = "connectionStage"
+    const val CONNECTION_GEAR = "connectionGear"
+    const val CONNECTION_PARK_FRESH = "connectionParkFresh"
+    const val CONNECTION_REASON = "connectionReason"
+    const val PRODUCT_VOICE_STAGE = "productVoiceStage"
+    const val PRODUCT_VOICE_REASON = "productVoiceReason"
+    const val PRODUCT_VOICE_CONSENT = "productVoiceConsent"
+    val PRODUCT_KEYS = listOf(CONNECTION_STAGE, CONNECTION_GEAR, CONNECTION_PARK_FRESH,
+        CONNECTION_REASON, PRODUCT_VOICE_STAGE, PRODUCT_VOICE_REASON, PRODUCT_VOICE_CONSENT)
     const val UWB_STAGE = "uwbStage"
     const val UWB_BACKEND_OPENED = "uwbBackendOpened"
     const val UWB_AZIMUTH_SUPPORTED = "uwbAzimuthSupported"
@@ -197,6 +233,21 @@ object FieldStateKeys {
     const val UWB_CLOSED_REASON = "uwbClosedReason"
     const val UWB_OPEN_FAILED_REASON = "uwbOpenFailedReason"
     const val UWB_REASON = "uwbReason"
+    const val UWB_DEADLINE_CAUSE = "uwbDeadlineCause"
+    const val UWB_NATIVE_SESSION_TAG = "uwbNativeSessionTag"
+    const val UWB_NATIVE_CONFIG_ID = "uwbNativeConfigId"
+    const val UWB_NATIVE_CHANNEL = "uwbNativeChannel"
+    const val UWB_NATIVE_PREAMBLE_INDEX = "uwbNativePreambleIndex"
+    const val UWB_NATIVE_UPDATE_RATE = "uwbNativeUpdateRate"
+    const val UWB_NATIVE_PEER_COUNT = "uwbNativePeerCount"
+    const val UWB_NATIVE_EVENT = "uwbNativeEvent"
+    const val UWB_NATIVE_PEER_INDEX = "uwbNativePeerIndex"
+    const val UWB_NATIVE_ELAPSED_SINCE_START_MS = "uwbNativeElapsedSinceStartMs"
+    const val UWB_NATIVE_CLOSE_REQUESTED = "uwbNativeCloseRequested"
+    val UWB_NATIVE_KEYS = listOf(UWB_NATIVE_SESSION_TAG, UWB_NATIVE_CONFIG_ID,
+        UWB_NATIVE_CHANNEL, UWB_NATIVE_PREAMBLE_INDEX, UWB_NATIVE_UPDATE_RATE,
+        UWB_NATIVE_PEER_COUNT, UWB_NATIVE_EVENT, UWB_NATIVE_PEER_INDEX,
+        UWB_NATIVE_ELAPSED_SINCE_START_MS, UWB_NATIVE_CLOSE_REQUESTED)
     const val UWB_GATT_STAGE = "uwbGattStage"
     const val UWB_GATT_EVENT = "uwbGattEvent"
     const val UWB_GATT_OPERATION_STARTED_ELAPSED_MS = "uwbGattOperationStartedElapsedMs"
@@ -265,7 +316,7 @@ object FieldStateKeys {
     val UWB_RX_TIMES = setOf(UWB_RX_PROTOCOL_RECEIVED_ELAPSED_MS, UWB_RX_PROTOCOL_OBSERVED_ELAPSED_MS)
     val UWB_RX_COUNTS = setOf(UWB_RX_FRAME_COUNT, UWB_RX_PROTOCOL_COUNT)
     val UWB_RX_ENUMS = mapOf(
-        UWB_RX_STEP to setOf("WAITING", "SEND", "COMPLETE", "FRUNK_RESULT", "FAILED", "UWB_READY", "UWB_INPUT"),
+        UWB_RX_STEP to setOf("WAITING", "SEND", "COMPLETE", "FRUNK_RESULT", "FAILED", "UWB_READY", "UWB_INPUT", "IGNORED"),
         UWB_RX_INPUT_KIND to setOf("ROUTABLE_MESSAGE", "RAW_FIRA", "WRAPPED_PLAINTEXT", "ENCRYPTED_RESPONSE"),
         UWB_RX_AEAD to setOf("NOT_ATTEMPTED", "VERIFIED", "FAILED"),
         UWB_RX_FIRA_KIND to setOf("REQUEST", "STOP", "UNRECOGNIZED", "INVALID"),
@@ -273,7 +324,8 @@ object FieldStateKeys {
         UWB_RX_DISPOSITION to setOf("DOMAIN_MISMATCH", "ROUTE_MISMATCH", "REQUEST_UUID_MISMATCH",
             "ACK_WAITING", "SESSION_INFO_INVALID", "SESSION_INFO_AUTH_REJECTED", "SESSION_READY",
             "STATUS_VERIFIED", "STATUS_INCOMPLETE", "RESPONSE_REJECTED", "RESPONSE_INVALID",
-            "RESPONSE_WAITING", "FIRA_REQUEST", "FIRA_STOP", "FIRA_UNRECOGNIZED", "FIRA_INVALID"),
+            "RESPONSE_WAITING", "FIRA_REQUEST", "FIRA_STOP", "FIRA_UNRECOGNIZED", "FIRA_INVALID",
+            "RESPONSE_BEFORE_START"),
         UWB_RX_FROM_KIND to setOf("DOMAIN", "ROUTING_ADDRESS", "UNSET", "UNKNOWN"),
         UWB_RX_TO_KIND to setOf("DOMAIN", "ROUTING_ADDRESS", "UNSET", "UNKNOWN"),
         UWB_RX_PAYLOAD_KIND to setOf("SESSION_INFO", "SESSION_INFO_REQUEST", "PROTOBUF_MESSAGE_AS_BYTES", "UNSET", "UNKNOWN"),
@@ -300,7 +352,7 @@ object FieldStateKeys {
         UWB_GATT_ADVERTISEMENT_AGE_AT_CONNECT_MS, UWB_GATT_CONNECTION_CALLBACK_ELAPSED_MS,
         UWB_GATT_DESCRIPTOR_CALLBACK_ELAPSED_MS, UWB_GATT_FIRST_RX_ELAPSED_MS,
         UWB_GATT_LAST_RX_ELAPSED_MS)
-    val UWB_GATT_KEYS = listOf(UWB_GATT_STAGE, UWB_GATT_EVENT,
+    val UWB_GATT_KEYS = listOf(UWB_GATT_STAGE, UWB_GATT_EVENT, UWB_DEADLINE_CAUSE,
         UWB_GATT_OPERATION_STARTED_ELAPSED_MS, UWB_GATT_STAGE_STARTED_ELAPSED_MS,
         UWB_GATT_OBSERVED_ELAPSED_MS, UWB_GATT_CONNECT_ISSUED_ELAPSED_MS,
         UWB_GATT_CONNECT_RETURNED_ELAPSED_MS, UWB_GATT_AUTO_CONNECT, UWB_GATT_CONNECT_ACTION,
@@ -372,7 +424,7 @@ object FieldStateKeys {
         UWB_CLOSED_REASON,
         UWB_OPEN_FAILED_REASON,
         UWB_REASON,
-    ) + UWB_GATT_KEYS + UWB_RX_KEYS + UWB_RX_SUMMARY_KEYS
+    ) + UWB_GATT_KEYS + UWB_RX_KEYS + UWB_RX_SUMMARY_KEYS + UWB_NATIVE_KEYS + PRODUCT_KEYS
 }
 
 /**
@@ -382,16 +434,42 @@ object FieldStateKeys {
  */
 object FieldEvents {
     private val fixedCodes = setOf(
+        ProductVoiceDiagnosticJson.EVENT,
+        "PRODUCT_VOICE_CONSENT_GRANTED",
+        "PRODUCT_VOICE_CONSENT_REVOKED",
+        "PRODUCT_VOICE_START_REQUESTED",
+        "PRODUCT_VOICE_STATE_CHANGED",
+        "PRODUCT_VOICE_CLEANUP_FAILED",
+        "PRODUCT_VOICE_COMMAND_ACCEPTED",
+        "PRODUCT_VOICE_STOPPED",
+        "TESLA_CONNECTION_STARTED",
+        "TESLA_CONNECTION_BLOCKED",
+        "TESLA_CONNECTION_CLEANUP_FAILED",
+        "TESLA_CONNECTION_STATE_CHANGED",
+        "TESLA_CONNECTION_GATT_OBSERVATION",
+        "TESLA_CONNECTION_BODY_VERIFIED",
+        "TESLA_CONNECTION_WAKE_STARTED",
+        "TESLA_CONNECTION_WAKE_ACKNOWLEDGED",
+        "TESLA_CONNECTION_WAKE_NOMINAL_ACK",
+        "TESLA_CONNECTION_WAKE_REJECTED",
+        "TESLA_CONNECTION_WAKE_UNCONFIRMED",
+        "TESLA_CONNECTION_WAKE_SKIPPED_AWAKE",
+        "TESLA_CONNECTION_WAKE_SKIPPED_UNKNOWN",
+        "TESLA_CONNECTION_SESSION_RETRANSMIT",
+        "TESLA_CONNECTION_DRIVE_RETRY",
+        VehicleNavigationObservation.EVENT,
         "TESLA_UWB_DISTANCE_RECEIVED",
         "TESLA_UWB_GATT_OBSERVATION",
         "TESLA_UWB_STARTED",
         "TESLA_UWB_BLOCKED",
         "TESLA_UWB_AUTHENTICATING",
         "TESLA_UWB_AUTHENTICATED",
+        "TESLA_UWB_INITIAL_DEVICE_INFO_SENT",
         "TESLA_UWB_CAPABILITIES_UNSPECIFIED",
         "TESLA_UWB_CAPABILITIES_RECEIVED",
         "TESLA_UWB_REQUEST_RECEIVED",
         "TESLA_UWB_RESPONSE_SENT",
+        "TESLA_UWB_BACKEND_STARTING",
         "TESLA_UWB_BACKEND_OPENED",
         "TESLA_UWB_PEER_STARTED",
         "TESLA_UWB_INVALID_RESULT",
@@ -718,6 +796,7 @@ object FieldEvents {
         "PCM_WRITE_FD_CLOSE_FAILED",
         "RECOGNIZER_CANCEL_FAILED",
         "RECOGNIZER_DESTROY_FAILED",
+        "SHADOW_CLEANUP_FAILED",
     )
 
     private val trialModes = setOf("DIRECT_MIC", "BUFFERED_PCM", "TTS_PCM", "SILENT_PCM")
@@ -773,6 +852,10 @@ object FieldEvents {
  * `state` 문자열은 고정 allowlist만 허용하며, 본문 구조는 값 없는 canonical numeric triple만 별도 검증한다.
  */
 internal object FieldJson {
+    // 실행 UWB 타입과 분리한 역사 codec 값이다. 제품 runtime에서는 발행하지 않는다.
+    private val historicalUwbStages = setOf("IDLE", "PREPARING", "AUTHENTICATING", "WAITING_FOR_VEHICLE",
+        "STARTING", "RANGING", "CLEANING_UP", "COMPLETE", "CANCELED", "FAILED", "TIMED_OUT", "BLOCKED", "CLEANUP_FAILED")
+    private val historicalNativeEvents = setOf("STARTING", "OPENED", "PEER_STARTED", "PEER_STOPPED", "CLOSED")
     private val bodyStatuses = setOf("COMPLETE", "TRUNCATED", "MALFORMED", "UNSUPPORTED")
     private val requestCorrelations = setOf("CURRENT", "PREVIOUS", "UNMATCHED")
     private val uwbReasons = setOf(
@@ -810,8 +893,42 @@ internal object FieldJson {
         )
         append(",\"bleTrial\":").append(record.bleTrial?.let { BleTrialSummaryJson.encode(it) } ?: "null")
         append(",\"bleEvidence\":").append(record.bleEvidence?.encode() ?: "null")
-        append(",\"teslaApproachRead\":").append(record.teslaApproachRead?.let { TeslaApproachReadSummaryJson.encode(it) } ?: "null")
+        append(",\"teslaApproachRead\":").append(record.teslaApproachRead?.let {
+            TeslaApproachReadSummaryJson.encode(it, it.responseDisposition?.takeUnless { disposition ->
+                record.version < 29 && disposition == "RESPONSE_BEFORE_START"
+            })
+        } ?: "null")
         append(",\"candidateDiagnostics\":").append(record.candidateDiagnostics?.let { BleCandidateDiagnosticsJson.encode(it) } ?: "null")
+        append(",\"navigationObservation\":").append(
+            record.navigationObservation?.takeIf {
+                record.version >= 28 && record.event == VehicleNavigationObservation.EVENT
+            }?.let {
+                VehicleNavigationObservationJson.encode(it, it.disposition?.takeUnless { disposition ->
+                    record.version < 29 && disposition == VehicleNavigationRxDisposition.RESPONSE_BEFORE_START
+                }, it.reason?.takeUnless { reason ->
+                    record.version < 32 && (reason == VehicleNavigationObservationReason.VEHICLE_FIX_TIME_INVALID ||
+                        reason == VehicleNavigationObservationReason.LOCATION_STATE_TIME_INVALID)
+                }, it.status?.takeUnless { status ->
+                    record.version < 32 && status == VehicleNavigationObservationStatus.VEHICLE_LOCATION_TIME_INVALID
+                })
+            } ?: "null",
+        )
+        append(",\"connectionObservation\":")
+        val connection = record.connectionObservation
+        if (record.version >= 34 && record.event == "TESLA_CONNECTION_GATT_OBSERVATION" && connection != null) {
+            ConnectionObservationJson.appendTo(this, connection, record.elapsedRealtimeMs, record.version)
+        } else {
+            append("null")
+        }
+        if (record.version >= 39) {
+            append(",\"productVoiceDiagnostic\":")
+            val diagnostic = record.productVoiceDiagnostic
+            if (record.event == ProductVoiceDiagnosticJson.EVENT && diagnostic != null) {
+                ProductVoiceDiagnosticJson.appendTo(this, diagnostic)
+            } else {
+                append("null")
+            }
+        }
         append(",\"state\":{")
         var first = true
         val bodySummaryValid = record.version >= 27 && validBodySummary(record.state)
@@ -821,11 +938,22 @@ internal object FieldJson {
             first = false
             append(quote(key)).append(':').append(
                 if ((key in FieldStateKeys.UWB_GATT_KEYS && record.version < 25) ||
+                    (key in FieldStateKeys.PRODUCT_KEYS && record.version < 33) ||
+                    (key == FieldStateKeys.CONNECTION_STAGE && record.version < 35 &&
+                        record.state[key] in ProductServiceLog.wakeStages) ||
+                    (key in FieldStateKeys.PRODUCT_KEYS && record.version < 35 &&
+                        record.state[key] in ProductServiceLog.wakeReasons) ||
                     (key in FieldStateKeys.UWB_RX_KEYS && record.version < 26) ||
                     (key in FieldStateKeys.UWB_RX_SUMMARY_KEYS && record.version < 27) ||
+                    (key == FieldStateKeys.UWB_DEADLINE_CAUSE && record.version < 30) ||
+                    (key in FieldStateKeys.UWB_NATIVE_KEYS && record.version < 31) ||
                     (key in FieldStateKeys.UWB_RX_BODY_KEYS && !bodySummaryValid) ||
+                    (record.version < 29 &&
+                        ((key == FieldStateKeys.UWB_RX_STEP && record.state[key] == "IGNORED") ||
+                            (key == FieldStateKeys.UWB_RX_DISPOSITION && record.state[key] == "RESPONSE_BEFORE_START"))) ||
                     (key == FieldStateKeys.UWB_GATT_EVENT && record.version < 26 && record.state[key] == "PROTOCOL")) "null"
-                else primitive(key, record.state[key], record.elapsedRealtimeMs),
+                else primitive(key, record.state[key], record.elapsedRealtimeMs,
+                    record.state[FieldStateKeys.UWB_NATIVE_PEER_COUNT]),
             )
         }
         append("}}")
@@ -917,8 +1045,41 @@ internal object FieldJson {
     }
 
     /** 광고명 필터·인증 읽기 옵션은 Boolean만 허용한다. 나머지는 허용 타입·문자열 allowlist를 따른다. */
-    private fun primitive(key: String, value: Any?, elapsedMs: Long): String {
+    private fun primitive(key: String, value: Any?, elapsedMs: Long, nativePeerCount: Any?): String {
         when {
+            key == FieldStateKeys.CONNECTION_STAGE ->
+                return if (value is String && TeslaConnectionStage.entries.any { it.name == value }) quote(value) else "null"
+            key == FieldStateKeys.PRODUCT_VOICE_STAGE ->
+                return if (value is String && ProductVoiceStage.entries.any { it.name == value }) quote(value) else "null"
+            key == FieldStateKeys.CONNECTION_GEAR ->
+                return if (value is String && value in ProductServiceLog.gears) quote(value) else "null"
+            key == FieldStateKeys.CONNECTION_PARK_FRESH || key == FieldStateKeys.PRODUCT_VOICE_CONSENT ->
+                return if (value is Boolean) value.toString() else "null"
+            key == FieldStateKeys.CONNECTION_REASON || key == FieldStateKeys.PRODUCT_VOICE_REASON ->
+                return if (value is String && ProductServiceLog.isAllowedReason(value)) quote(value) else "null"
+            key == FieldStateKeys.UWB_NATIVE_SESSION_TAG ->
+                return if (value is String && value.length == 64 &&
+                    value.all { it in '0'..'9' || it in 'a'..'f' }) quote(value) else "null"
+            key == FieldStateKeys.UWB_NATIVE_EVENT ->
+                return if (value is String && value in historicalNativeEvents) quote(value) else "null"
+            key == FieldStateKeys.UWB_NATIVE_CLOSE_REQUESTED ->
+                return if (value is Boolean) value.toString() else "null"
+            key in FieldStateKeys.UWB_NATIVE_KEYS -> {
+                val number = when (value) { is Int -> value.toLong(); is Long -> value; else -> null }
+                val count = when (nativePeerCount) { is Int -> nativePeerCount.toLong(); is Long -> nativePeerCount; else -> null }
+                val valid = number != null && when (key) {
+                    FieldStateKeys.UWB_NATIVE_CONFIG_ID -> number in 1L..5L
+                    FieldStateKeys.UWB_NATIVE_CHANNEL -> number == 5L || number == 9L
+                    FieldStateKeys.UWB_NATIVE_PREAMBLE_INDEX -> number in 9L..12L
+                    FieldStateKeys.UWB_NATIVE_UPDATE_RATE -> number in 1L..3L
+                    FieldStateKeys.UWB_NATIVE_PEER_COUNT -> number in 1L..Int.MAX_VALUE.toLong()
+                    FieldStateKeys.UWB_NATIVE_PEER_INDEX -> count != null && count in 1L..Int.MAX_VALUE.toLong() &&
+                        number >= 0L && number < count
+                    FieldStateKeys.UWB_NATIVE_ELAPSED_SINCE_START_MS -> number in 0L..elapsedMs
+                    else -> false
+                }
+                return if (valid) number.toString() else "null"
+            }
             key == FieldStateKeys.UWB_RX_BODY_BYTES ->
                 return value.toString() // 세 요약 키를 함께 검증한 뒤에만 도달한다.
             key == FieldStateKeys.UWB_RX_BODY_STATUS ->
@@ -929,10 +1090,12 @@ internal object FieldJson {
                 return if (value is String && value in requestCorrelations) quote(value) else "null"
             key in FieldStateKeys.UWB_RX_ENUMS ->
                 return if (value is String && value in FieldStateKeys.UWB_RX_ENUMS.getValue(key)) quote(value) else "null"
+            key == FieldStateKeys.UWB_DEADLINE_CAUSE ->
+                return if (value is String && TeslaGattDeadlineCause.entries.any { it.name == value }) quote(value) else "null"
             key == FieldStateKeys.UWB_GATT_STAGE ->
                 return if (value is String && TeslaKeyStage.entries.any { it.name == value }) quote(value) else "null"
             key == FieldStateKeys.UWB_GATT_EVENT ->
-                return if (value is String && TeslaUwbGattEvent.entries.any { it.name == value }) quote(value) else "null"
+                return if (value is String && TeslaGattEvent.entries.any { it.name == value }) quote(value) else "null"
             key == FieldStateKeys.UWB_GATT_CONNECT_ACTION ->
                 return if (value is String && (value == "CREATE" || value == "RECONNECT")) quote(value) else "null"
             key in FieldStateKeys.UWB_GATT_BOOLS || key in FieldStateKeys.UWB_RX_BOOLS ->
@@ -955,7 +1118,7 @@ internal object FieldJson {
             }
         }
         if (key == FieldStateKeys.UWB_STAGE) {
-            return if (value is String && TeslaUwbStage.entries.any { it.name == value }) quote(value) else "null"
+            return if (value is String && value in historicalUwbStages) quote(value) else "null"
         }
         if (key == FieldStateKeys.UWB_REASON) {
             return if (value is String && (value in uwbReasons || BleTrialSummaryJson.isAllowedReason(value))) quote(value) else "null"
@@ -1082,7 +1245,8 @@ class FieldEventSink internal constructor(
      * 구간이 생기지 않는다. offer가 실패하면 같은 publish에서 pending을 되돌리고 유실로 집계한다.
      */
     fun enqueue(record: FieldRecord): Boolean {
-        if (!FieldEvents.isAllowed(record.event)) {
+        if (!FieldEvents.isAllowed(record.event) ||
+            (record.version < 39 && record.event == ProductVoiceDiagnosticJson.EVENT)) {
             recordRejected()
             return false
         }

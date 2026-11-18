@@ -2,6 +2,8 @@ package com.heytesla.app
 
 import android.companion.CompanionDeviceService
 import android.companion.DevicePresenceEvent
+import android.content.ComponentName
+import android.os.Looper
 import android.os.Bundle
 import android.os.SystemClock
 import android.service.voice.VoiceInteractionService
@@ -17,27 +19,50 @@ class PresenceService : CompanionDeviceService() {
 }
 
 class AssistantService : VoiceInteractionService() {
+    private var ready = false
+    private var terminal = false
+
     override fun onReady() {
         super.onReady()
-        (application as DiagnosticApp).runtime.assistant = this
-        (application as DiagnosticApp).runtime.event("ASSISTANT_READY")
+        if (terminal) return
+        ready = true
+        val runtime = (application as DiagnosticApp).runtime
+        runtime.assistant = this
+        runtime.event("ASSISTANT_READY")
+        runtime.productAssistantReady(this)
+    }
+
+    internal fun productVoiceAvailable(): Boolean = ready && !terminal &&
+        (application as DiagnosticApp).runtime.assistant === this && try {
+            VoiceInteractionService.isActiveService(this, ComponentName(this, AssistantService::class.java))
+        } catch (_: Exception) { false }
+
+    fun startProductVoice(leaseId: Long): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        return productVoiceAvailable() && ProductMicrophoneService.start(this, leaseId)
+    }
+
+    private fun unavailable(reason: String) {
+        if (terminal) return
+        // terminal부터 봉인한다. 같은 인스턴스의 late onReady가 제품 마이크를 다시 시작하지 못한다.
+        terminal = true
+        ready = false
+        val runtime = (application as DiagnosticApp).runtime
+        val wasCurrent = runtime.assistant === this
+        runtime.productAssistantUnavailable(this)
+        if (wasCurrent) {
+            if (runtime.assistant === this) runtime.assistant = null
+            runtime.stop(reason)
+        }
     }
 
     override fun onShutdown() {
-        val runtime = (application as DiagnosticApp).runtime
-        if (runtime.assistant === this) {
-            runtime.assistant = null
-            runtime.stop("ASSISTANT_CHANGED")
-        }
+        unavailable("ASSISTANT_CHANGED")
         super.onShutdown()
     }
 
     override fun onDestroy() {
-        val runtime = (application as DiagnosticApp).runtime
-        if (runtime.assistant === this) {
-            runtime.assistant = null
-            runtime.stop("ASSISTANT_DESTROYED")
-        }
+        unavailable("ASSISTANT_DESTROYED")
         super.onDestroy()
     }
 }
@@ -45,7 +70,7 @@ class AssistantService : VoiceInteractionService() {
 class AssistantSessionService : VoiceInteractionSessionService() {
     override fun onNewSession(args: Bundle?): VoiceInteractionSession = object : VoiceInteractionSession(this) {
         override fun onCreateContentView() = TextView(context).apply {
-            text = "Hey Tesla 로컬 진단\n실차 명령 없음 · 호출어 미연결\n마이크 진단은 앱에서 직접 시작합니다."
+            text = "Hey Tesla\n차량 연결·앱 키 인증·신선한 P와 음성 동의가 있을 때 대기합니다.\n현재 상태와 설정은 앱에서 확인하세요."
             setPadding(32, 32, 32, 32)
         }
     }

@@ -2,13 +2,13 @@ package com.heytesla.app.vehicle.protocol
 
 import java.util.Collections
 
-internal enum class TeslaBleRxBodyStatus { COMPLETE, TRUNCATED, MALFORMED, UNSUPPORTED }
-internal enum class TeslaBleRxRequestCorrelation { CURRENT, PREVIOUS, UNMATCHED }
+enum class TeslaBleRxBodyStatus { COMPLETE, TRUNCATED, MALFORMED, UNSUPPORTED }
+enum class TeslaBleRxRequestCorrelation { CURRENT, PREVIOUS, UNMATCHED }
 
-internal data class TeslaBleRxBodyField(val fieldNumber: Int, val wireType: Int, val lengthBytes: Int)
+data class TeslaBleRxBodyField(val fieldNumber: Int, val wireType: Int, val lengthBytes: Int)
 
 /** 최상위 wire 구조만 소유한다. 본문·값·식별자·해시·예외를 참조하지 않는다. */
-internal data class TeslaBleRxBodySummary(
+data class TeslaBleRxBodySummary(
     val byteCount: Int,
     val status: TeslaBleRxBodyStatus,
     val fields: List<TeslaBleRxBodyField>,

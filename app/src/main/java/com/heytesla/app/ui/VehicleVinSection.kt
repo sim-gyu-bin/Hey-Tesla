@@ -113,7 +113,7 @@ internal fun vehicleVinConsumerLabel(state: VehicleVinState): String =
 
 internal fun vehicleVinBlockedLabel(reason: String): String = when (reason) {
     "VIN_CHANGE_BLOCKED_VEHICLE_CHOOSER" -> "차량 선택 요청 중 · 선택 결과가 확인될 때까지 VIN을 변경할 수 없습니다."
-    "VIN_CHANGE_BLOCKED_CLEANUP", "SPEECH_SUPPORT_CLEANUP_FAILED", "UWB_SUPPORT_CLEANUP_FAILED", "SPEECH_TRIAL_CLEANUP_FAILED" ->
+    "VIN_CHANGE_BLOCKED_CLEANUP", "SPEECH_SUPPORT_CLEANUP_FAILED", "SPEECH_TRIAL_CLEANUP_FAILED" ->
         "진단 정리 불명 · VIN 변경 차단 · 앱 프로세스 재시작 필요"
     "VIN_LOADING" -> "등록 VIN 복원 중 · 완료 후 변경할 수 있습니다."
     "VIN_SAVING" -> "VIN 저장 중 · 완료 후 변경할 수 있습니다."

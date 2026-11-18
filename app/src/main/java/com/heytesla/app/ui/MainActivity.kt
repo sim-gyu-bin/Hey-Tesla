@@ -10,11 +10,6 @@ import com.heytesla.app.vehicle.detection.TeslaBleAdvertisement
 import com.heytesla.app.vehicle.frunk.FrunkVoiceProbe
 import com.heytesla.app.vehicle.key.VehicleVinStatus
 import com.heytesla.app.vehicle.protocol.TeslaBleQuery
-import com.heytesla.app.vehicle.uwb.TeslaUwbProbeState
-import com.heytesla.app.vehicle.uwb.TeslaUwbStage
-import com.heytesla.app.vehicle.uwb.UwbProbeState
-import com.heytesla.app.vehicle.uwb.UwbProbeStatus
-import com.heytesla.app.vehicle.uwb.UwbSupportProbe
 
 import android.companion.AssociationInfo
 import android.companion.AssociationRequest
@@ -44,12 +39,16 @@ import com.heytesla.app.ui.HeyTeslaApp
 import com.heytesla.app.ui.bleFieldBusy
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        const val ACTION_SHOW_VOICE_RESULTS = "com.heytesla.app.action.SHOW_VOICE_RESULTS"
+    }
+
+    private val voiceResultsHomeRequest = MutableStateFlow(0L)
+    internal val voiceResultsHomeRequests = voiceResultsHomeRequest.asStateFlow()
     private val runtime get() = (application as DiagnosticApp).runtime
     private val speechSupportState = MutableStateFlow(SpeechProbeState())
     private val speechSupport = speechSupportState.asStateFlow()
     private lateinit var speechSupportProbe: SpeechSupportProbe
-    private val uwbSupportState = MutableStateFlow(UwbProbeState())
-    private lateinit var uwbSupportProbe: UwbSupportProbe
     private val speechTrialState = MutableStateFlow(SpeechTrialState())
     private val speechTrial = speechTrialState.asStateFlow()
     private lateinit var speechRecognitionProbe: SpeechRecognitionProbe
@@ -73,13 +72,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         permissionRequestInFlight = savedInstanceState?.getBoolean("permissionRequestInFlight") ?: false
         permissionReturnPending = savedInstanceState?.getBoolean("permissionReturnPending") ?: false
+        if (intent?.action == ACTION_SHOW_VOICE_RESULTS) voiceResultsHomeRequest.value += 1
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
         speechSupportProbe = SpeechSupportProbe(applicationContext, speechSupportState) { runtime.event(it) }
-        uwbSupportProbe = UwbSupportProbe(applicationContext, uwbSupportState, runtime)
         speechRecognitionProbe = SpeechRecognitionProbe(applicationContext, speechTrialState, runtime)
         frunkVoiceProbe = FrunkVoiceProbe(applicationContext, runtime)
         setContent {
@@ -87,18 +86,21 @@ class MainActivity : ComponentActivity() {
             val support by speechSupport.collectAsState()
             val trial by speechTrial.collectAsState()
             val ble by runtime.bleProbeState.collectAsState()
-            val uwb by uwbSupportState.collectAsState()
             val teslaKey by runtime.teslaKeyState.collectAsState()
-            val uwbRanging by runtime.teslaUwbState.collectAsState()
-            val navigation by runtime.vehicleNavigation.collectAsState()
             val chooserPending by vehicleChooserPending.collectAsState()
+            val homeRequest by voiceResultsHomeRequests.collectAsState()
             // 상태 기반 callback 게이트가 Compose의 동일 인자 건너뛰기에 가려지지 않게 한다.
-            val actions = androidx.compose.runtime.remember(state, support, trial, uwb, chooserPending) {
+            val actions = androidx.compose.runtime.remember(state, support, trial, chooserPending) {
                 createActions()
             }
-            HeyTeslaApp(state, support, trial, ble, uwb, teslaKey, actions,
-                uwbRanging = uwbRanging, navigation = navigation)
+            HeyTeslaApp(state, support, trial, ble, teslaKey, actions, homeRequest)
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == ACTION_SHOW_VOICE_RESULTS) voiceResultsHomeRequest.value += 1
     }
 
     private fun createActions(): AppActions = AppActions(
@@ -126,11 +128,10 @@ class MainActivity : ComponentActivity() {
             associateVehicle = ::associate,
             setVehicleServiceEnabled = ::setVehicleServiceEnabled,
             vehicleServiceBlockedReason = ::vehicleServiceBlockedReason,
-            resumeVehicleNavigation = runtime::resumeVehicleNavigation,
+            setProductVoiceConsent = runtime::setProductVoiceConsent,
             refresh = runtime::refresh,
             startMicrophone = { if (cancelSupportForStart()) runtime.manualStart(this) },
             stopSession = {
-                uwbSupportProbe.cancel()
                 speechSupportProbe.cancel()
                 speechRecognitionProbe.cancel()
                 frunkVoiceProbe.cancel()
@@ -138,8 +139,6 @@ class MainActivity : ComponentActivity() {
             },
             querySupport = ::querySupport,
             cancelSupport = { speechSupportProbe.cancel() },
-            queryUwbSupport = ::queryUwbSupport,
-            cancelUwbSupport = { uwbSupportProbe.cancel() },
             startTrial = { mode ->
                 val support = speechSupportState.value
                 if (cancelSupportForStart()) {
@@ -155,16 +154,12 @@ class MainActivity : ComponentActivity() {
             cancelTeslaKey = { runtime.cancelTeslaKey() },
             teslaKeyBlockedReason = runtime::teslaKeyBlockedReason,
             leaveDiagnostics = ::leaveDiagnostics,
-            startUwbRanging = ::startUwbRanging,
-            cancelUwbRanging = { runtime.cancelTeslaKey() },
-            uwbRangingBlockedReason = runtime::uwbRangingBlockedReason,
             frunkVoice = com.heytesla.app.ui.FrunkVoiceActions(
                 start = { consent ->
                     // 실차 시험은 다른 진단을 자동 중지하지 않는다. 명시적으로 정리한 뒤에만 입장한다.
                     val support = speechSupportState.value
                     if (support.status != SpeechProbeStatus.RUNNING &&
-                        support.reason != "DESTROY_FAILED" && !runtime.uwbSupportActive &&
-                        !runtime.uwbSupportCleanupFailed
+                        support.reason != "DESTROY_FAILED"
                     ) frunkVoiceProbe.start(consent,
                         support.status == SpeechProbeStatus.COMPLETE && support.metadata?.koKrInstalled == true)
                 },
@@ -204,7 +199,6 @@ class MainActivity : ComponentActivity() {
         frunkVoiceProbe.cancel()
         org.altbeacon.beacon.BeaconManager.getInstanceForApplication(applicationContext).setBackgroundMode(true)
         runtime.cancelTeslaKey("UI_PAUSED")
-        uwbSupportProbe.cancel()
         speechSupportProbe.cancel()
         // Visibility is revoked before cancellation to block reentrant starts.
         speechRecognitionProbe.cancel()
@@ -218,7 +212,6 @@ class MainActivity : ComponentActivity() {
         runtime.setFrunkVoiceVisible(false)
         frunkVoiceProbe.cancel()
         runtime.cancelTeslaKey("UI_DESTROYED")
-        uwbSupportProbe.cancel()
         speechSupportProbe.cancel()
         speechRecognitionProbe.cancel()
         super.onDestroy()
@@ -228,7 +221,6 @@ class MainActivity : ComponentActivity() {
         runtime.setFrunkVoiceVisible(false)
         frunkVoiceProbe.cancel()
         runtime.cancelTeslaKey("DIAGNOSTICS_HIDDEN")
-        uwbSupportProbe.cancel()
         speechSupportProbe.cancel()
         speechRecognitionProbe.cancel()
         // Navigation within this Activity does not invoke onPause.
@@ -248,7 +240,6 @@ class MainActivity : ComponentActivity() {
             runtime.event("SPEECH_SUPPORT_VIN_SAVING_BLOCKED")
             return
         }
-        if (!uwbSupportProbe.cancel()) return
         runtime.refresh()
         val state = runtime.state.value
         if (speechSupportState.value.reason == "DESTROY_FAILED") return
@@ -270,18 +261,8 @@ class MainActivity : ComponentActivity() {
         speechSupportProbe.query()
     }
 
-    private fun queryUwbSupport() {
-        speechSupportProbe.cancel()
-        if (speechSupportState.value.reason == "DESTROY_FAILED") {
-            runtime.event("UWB_SUPPORT_OTHER_DIAGNOSTIC_BLOCKED")
-            return
-        }
-        runtime.refresh()
-        uwbSupportProbe.query()
-    }
     /** 화면 버튼만 진입한다. exported Intent·재생성·onResume에서는 시작하지 않는다. */
     private fun startTeslaKey(register: Boolean, query: TeslaBleQuery) {
-        if (!uwbSupportProbe.cancel()) return
         speechSupportProbe.cancel()
         if (speechSupportState.value.reason == "DESTROY_FAILED") {
             runtime.event("TESLA_KEY_START_BLOCKED")
@@ -290,20 +271,6 @@ class MainActivity : ComponentActivity() {
         runtime.startTeslaKey(register, query)
     }
 
-    private fun startUwbRanging() {
-        if (!uwbSupportProbe.cancel()) return
-        speechSupportProbe.cancel()
-        if (speechSupportState.value.reason == "DESTROY_FAILED") {
-            if (!runtime.teslaKeyReserved()) runtime.teslaUwbState.value = TeslaUwbProbeState(
-                stage = TeslaUwbStage.BLOCKED,
-                rangingPermission = runtime.teslaUwbState.value.rangingPermission,
-                reason = "LOCAL_CLEANUP_FAILED_RESTART_REQUIRED",
-            )
-            runtime.event("TESLA_UWB_BLOCKED")
-            return
-        }
-        runtime.startUwbRanging()
-    }
 
 
     private fun setVehicleServiceEnabled(enabled: Boolean) {
@@ -312,7 +279,6 @@ class MainActivity : ComponentActivity() {
             runtime.setVehicleServiceEnabled(false)
             return
         }
-        if (!uwbSupportProbe.cancel()) return
         speechSupportProbe.cancel()
         if (speechSupportState.value.reason == "DESTROY_FAILED") {
             runtime.event("BLE_SUPPORT_CLEANUP_BLOCKED")
@@ -330,7 +296,6 @@ class MainActivity : ComponentActivity() {
 
     private fun cancelSupportForStart(): Boolean {
         if (runtime.diagnosticCleanupUncertain) return false
-        if (!uwbSupportProbe.cancel()) return false
         speechSupportProbe.cancel()
         if (runtime.teslaKeyReserved()) return false
         if (runtime.state.value.bleFieldBusy()) return false
@@ -342,8 +307,6 @@ class MainActivity : ComponentActivity() {
         vehicleChooserPending.value || runtime.vehicleChooserPending -> "VIN_CHANGE_BLOCKED_VEHICLE_CHOOSER"
         speechSupportState.value.reason == "DESTROY_FAILED" -> "SPEECH_SUPPORT_CLEANUP_FAILED"
         speechSupportState.value.status == SpeechProbeStatus.RUNNING -> "SPEECH_SUPPORT_RUNNING"
-        uwbSupportState.value.status == UwbProbeStatus.CLEANUP_FAILED -> "UWB_SUPPORT_CLEANUP_FAILED"
-        uwbSupportState.value.status == UwbProbeStatus.RUNNING -> "UWB_SUPPORT_RUNNING"
         speechTrialState.value.responseCleanupFailed -> "SPEECH_TRIAL_CLEANUP_FAILED"
         speechTrialState.value.active || speechTrialState.value.status == SpeechTrialStatus.CLEANING -> "SPEECH_TRIAL_RUNNING"
         else -> runtime.vehicleVinChangeBlockedReason()

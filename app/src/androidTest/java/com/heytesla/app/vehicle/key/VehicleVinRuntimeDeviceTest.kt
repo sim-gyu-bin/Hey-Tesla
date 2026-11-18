@@ -6,7 +6,7 @@ import com.heytesla.app.DiagnosticRuntime
 import com.heytesla.app.ObservationService
 import com.heytesla.app.vehicle.ble.BleProbeState
 import com.heytesla.app.vehicle.ble.BleProbeStatus
-import com.heytesla.app.vehicle.uwb.TeslaServiceUwbRequest
+import com.heytesla.app.vehicle.connection.TeslaServiceConnectionRequest
 import com.heytesla.app.bleDetectionRequiresExplicitStart
 import com.heytesla.app.vehicle.detection.BleEventEvidence
 import com.heytesla.app.vehicle.detection.BleEvidenceKind
@@ -38,7 +38,7 @@ import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** 실제 저장·runtime 입장·암호학/BLE target 소비 경계. 라디오/GATT/TX/마이크/UWB 실행은 없다. */
+/** 실제 저장·runtime 입장·암호학/BLE target 소비 경계. 라디오/GATT/TX/마이크 실행은 없다. */
 @RunWith(AndroidJUnit4::class)
 class VehicleVinRuntimeDeviceTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
@@ -226,13 +226,13 @@ class VehicleVinRuntimeDeviceTest {
             runtime.activityVisible = false
             val device = requireNotNull(app.getSystemService(android.bluetooth.BluetoothManager::class.java).adapter)
                 .getRemoteDevice("AA:BB:CC:DD:EE:03")
-            val request = TeslaServiceUwbRequest(ObservationService(), "unarmed-service-request", 1, 1, 1,
+            val request = TeslaServiceConnectionRequest(ObservationService(), "unarmed-service-request", 1, 1, 1,
                 device, runtime.now() * 1_000_000, runtime.now() + 180_000)
             assertSame(device, request.device)
-            assertEquals("FIELD_OWNER_NOT_ARMED", runtime.serviceUwbOwnerReason(request))
-            assertNull(runtime.acquireServiceUwb(request))
+            assertEquals("FIELD_OWNER_NOT_ARMED", runtime.serviceConnectionOwnerReason(request))
+            assertNull(runtime.acquireServiceConnection(request))
             var finished: BleProbeState? = null
-            runtime.startServiceUwb(request) { state, retained ->
+            runtime.startServiceConnection(request) { state, retained ->
                 assertFalse(retained)
                 finished = state
             }
@@ -318,7 +318,6 @@ class VehicleVinRuntimeDeviceTest {
             assertEquals(VehicleVinStatus.SAVING, runtime.state.value.vehicleVin.status)
             assertEquals("VIN_SAVING", runtime.vehicleVinChangeBlockedReason())
             assertBlockedVehicleStarts(runtime, "VIN_SAVING")
-            assertFalse(runtime.acquireUwbSupport())
             assertNull(runtime.acquireSpeechDiagnostic {})
             runtime.manualStart(app)
             runtime.setVehicleServiceEnabled(true)
@@ -336,15 +335,12 @@ class VehicleVinRuntimeDeviceTest {
         onMain { assertNoWork(reopened) }
     }
 
-    @Test fun activeUwbSpeechObservationAndChooserReservationsRejectVinChanges() {
+    @Test fun activeSpeechObservationAndChooserReservationsRejectVinChanges() {
         val fixture = fixture("reservations")
         fixture.store.save(FIRST)
         val before = fixture.file.readBytes()
         val runtime = restoredRuntime(fixture)
         onMain {
-            assertTrue(runtime.acquireUwbSupport())
-            assertRejectedChange(runtime, "VIN_CHANGE_BLOCKED_ACTIVE_WORK")
-            runtime.releaseUwbSupport(cleanupFailed = false)
             val session = requireNotNull(runtime.policy.startDiagnostic(runtime.now()))
             assertRejectedChange(runtime, "VIN_CHANGE_BLOCKED_ACTIVE_WORK")
             runtime.policy.finish(session.id)
@@ -371,17 +367,13 @@ class VehicleVinRuntimeDeviceTest {
     }
 
     @Test fun cleanupUncertaintyRemainsBlockedEvenAfterActivityAndStatusFlagsReset() {
-        for (kind in 0..4) {
+        for (kind in 1..4) {
             val fixture = fixture("cleanup-$kind")
             fixture.store.save(FIRST)
             val before = fixture.file.readBytes()
             val runtime = restoredRuntime(fixture)
             onMain {
                 when (kind) {
-                    0 -> {
-                        assertTrue(runtime.acquireUwbSupport())
-                        runtime.releaseUwbSupport(cleanupFailed = true)
-                    }
                     1 -> runtime.event("OBSERVE_STOP_FAILED_LOCAL_GATE_CLOSED")
                     2 -> runtime.event("SPEECH_SUPPORT_DESTROY_FAILED")
                     3 -> runtime.recordBleEvidence(BleEventEvidence(BleEvidenceKind.SCAN_FAILED,
@@ -403,8 +395,6 @@ class VehicleVinRuntimeDeviceTest {
             fixture.store.save(FIRST)
             val runtime = restoredRuntime(fixture)
             onMain {
-                assertTrue(runtime.acquireUwbSupport())
-                runtime.releaseUwbSupport(cleanupFailed = false)
                 when (kind) {
                     0 -> runtime.recordBleEvidence(BleEventEvidence(BleEvidenceKind.SCAN_FAILED,
                         scanFailureCode = BleSupplementalScanner.FAILURE_STOP))
@@ -415,8 +405,7 @@ class VehicleVinRuntimeDeviceTest {
                 }
                 runtime.activityVisible = false
                 runtime.activityVisible = true
-                assertFalse(runtime.acquireUwbSupport())
-                assertNull(runtime.acquireSpeechDiagnostic {})
+                    assertNull(runtime.acquireSpeechDiagnostic {})
                 assertNull(runtime.acquireTeslaKey())
                 assertNotNull(runtime.bleFieldTrialBlockedReason())
                 runtime.manualStart(app)
@@ -445,9 +434,9 @@ class VehicleVinRuntimeDeviceTest {
                 body = TeslaBleConversation(credential, bytes, TeslaBleQuery.BODY_STATUS) { 10_000L }
                 drive = TeslaBleConversation(credential, bytes, TeslaBleQuery.DRIVE_STATE) { 10_000L }
             } finally { bytes.fill(0) }
-            assertTrue(runtime.acquireUwbSupport())
+            val reservation = requireNotNull(runtime.policy.startDiagnostic(runtime.now()))
             assertRejectedChange(runtime, "VIN_CHANGE_BLOCKED_ACTIVE_WORK")
-            runtime.releaseUwbSupport(cleanupFailed = false)
+            runtime.policy.finish(reservation.id)
             runtime.saveVehicleVin(SECOND)
         }
         await(runtime) { it == VehicleVinStatus.READY }

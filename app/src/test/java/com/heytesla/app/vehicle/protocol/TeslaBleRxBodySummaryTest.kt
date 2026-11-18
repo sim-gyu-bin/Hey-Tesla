@@ -1,5 +1,7 @@
 package com.heytesla.app.vehicle.protocol
 
+import com.google.protobuf.CodedOutputStream
+import java.io.ByteArrayOutputStream
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -92,9 +94,11 @@ class TeslaBleRxBodySummaryTest {
             assertEquals(TeslaBleRxBodyStatus.TRUNCATED, observed.status)
             assertEquals(complete.fields, observed.fields)
         }
-        val maximumFields = firaTestMessage {
-            repeat(8) { writeByteArray(536870911, ByteArray(504)) }
-        }
+        val output = ByteArrayOutputStream()
+        val coded = CodedOutputStream.newInstance(output)
+        repeat(8) { coded.writeByteArray(536870911, ByteArray(504)) }
+        coded.flush()
+        val maximumFields = output.toByteArray()
         val maximum = requireNotNull(summarizeTeslaBleRxBody(maximumFields))
         assertEquals(8, maximum.fields.size)
         assertTrue(maximum.canonicalFields().length <= 135)

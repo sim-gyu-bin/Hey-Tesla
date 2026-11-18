@@ -21,8 +21,8 @@ internal class FrunkVoicePolicy(private val deadline: Long, private val startedA
         private set
 
     /**
-     * Android STT n-best 중 하나라도 전체 문법과 정확히 같으면 채택한다. 어느 후보든 취소어가 있으면 먼저 멈춘다.
-     * 점수가 실제로 제공되면 채택 후보가 [MIN_CONFIDENCE] 이상이어야 하고, 제공되지 않으면 게이트를 생략한다.
+     * 최종 STT 후보 중 하나라도 전체 문법과 정확히 같으면 채택한다. 어느 후보든 취소어가 있으면 먼저 멈춘다.
+     * 제품 로컬 모델은 후보 하나·점수 미제공이며, 실제 점수가 제공되면 [MIN_CONFIDENCE] 이상이어야 한다.
      */
     fun command(now: Long, source: SpeechTrialMode, final: Boolean,
         candidates: List<String>?, confidence: FloatArray?): Boolean {

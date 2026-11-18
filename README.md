@@ -1,14 +1,14 @@
 # Hey Tesla
 
-**차량 근처에서만 작동하는 Android 네이티브 음성 리모컨.** 잠긴 휴대폰을 주머니에서 꺼내지 않고, 차량에 접근해 “헤이 테슬라, 프렁크 열어줘”라고 말하는 사용 경험을 목표로 한다.
+**인증된 차량 연결과 신선한 주차(P) 상태에서 사용하는 Android 네이티브 음성 프렁크 앱.** v76(0.76.0)은 UWB·좌표 거리/방향을 제거하고 연결 기반 제품 경로로 전환한다. BLE 신호나 연결은 거리·차량 밖 위치·화자 신원을 보장하지 않는다.
 
-> 현재 소스·생성 APK 버전은 **`0.66.0`(`versionCode=66`)**이다. 기능별 패키지 이관 뒤 미사용 구형 실행 경로·빈 패키지·불필요 선언을 정리했다. 앱·계측 APK 빌드, JVM582개·독립 상대편97개·Python 도구176개와 실제 소비자 호스트 smoke를 통과했다. **정리 APK는 폰에 설치하지 않았다.** S23에는 기존 같은 버전의 [좌표 기반 나침반·UWB 병행](wiki/Tesla-Integration.md#v66-좌표-기반-나침반uwb-병행) 설치본이 남아 있으며 마지막 확인 상태는 서비스 OFF다. 실제 차량 위치 응답·UWB 거리 성공은 미검증이다. [검증 기록](wiki/Device-Validation.md)을 따른다.
+> 현재 계약은 [인증된 수면 상태의 단발 BLE 깨움](wiki/Tesla-Integration.md#v80-인증된-수면-상태의-단발-ble-깨움)과 [기존 검증 모델 연결](wiki/Tesla-Integration.md#v78-검증-모델-연결), 소스·설치본·저장 ON/OFF·검증 수치는 [기기 검증 단일 정본](wiki/Device-Validation.md#현재-소스설치검증-상태)을 따른다. 구현을 실차 성공으로 표시하지 않는다. 과거 UWB 실측·REA·로그는 역사 자료이며 현재 사용 조건이 아니다.
 >
-> v0.52에서 추가한 sherpa-onnx 한국어 zipformer는 음성 인식 진단의 **그림자 인식기**로 유지한다. 실제 명령 판정은 Android 온디바이스 `SpeechRecognizer` 결과를 사용하며, 그림자 결과는 차량 제어·실차 음성 시험에 쓰지 않는다.
+> 제품 자동 음성은 기존 튜닝 sherpa-onnx 한국어 zipformer를 사용한다. Android 온디바이스 `SpeechRecognizer`는 수동 진단·별도 수동 프렁크에 유지하며 제품 fallback이 아니다. 비교진단의 인식 결과로 차량을 제어하지 않는다.
 >
 > 호출어·명령 문구의 단일 원본은 `SpeechCommandPhrases`다. 표시용 기본값 두 개에서 정규화 문장·sherpa 보정 문구·로그 마스킹의 기본 허용 어휘·진단 안내를 파생한다. 기존 정확 일치·취소·점수·차량 안전 조건은 유지하며, 호출어 설정 UI와 사용자 호출어의 저장·변경 기능은 아직 없다.
 >
-> 아래는 v0.50 전환 기록이며 그 음성 경로는 현재도 명령 판정 경로로 유지된다.
+> 아래는 v0.50 전환 기록이며 그 Android 음성 경로는 현재 수동 진단·별도 수동 프렁크에 유지된다. 제품 자동 음성은 위 현재 계약을 따른다.
 >
 > v0.50 전환 당시 소스는 **`0.50.0-probe`(`versionCode=50`) Android 내장 온디바이스 `SpeechRecognizer`(`ko-KR`) 전환**이다. v47~v49의 로컬 Moonshine STT(sherpa-onnx)는 v0.50에서 모델·AAR·라이선스 자산과 함께 완전히 제거했다. 앱이 직접 캡처한 16 kHz mono PCM을 `AndroidPcmRecognizer`가 `EXTRA_AUDIO_SOURCE` 파이프와 segmented session으로 인식기에 전달한다. 후보(n-best) 중 하나라도 정규화 후 `헤이테슬라프렁크열어줘`와 정확히 일치하면 수락하고, 하나라도 `취소`/`열지마`를 포함하면 차단한다. 인식기가 점수를 주지 않으면(0.0·−1·null·비유한값) "점수 미제공"으로 기록하고 신뢰도 게이트를 생략하며, 실제 점수는 0.85 이상이어야 한다. STT 일치는 차량 제어 허가가 아니며 P·HANDOFF 5초·명령 10초·안전 동의 게이트는 그대로다. **v0.50 실기·실차 결과는 아직 기록되지 않았다.** [v0.50 검증 절차](wiki/Device-Validation.md#0500-probe--android-온디바이스-speechrecognizer-전환)를 따른다.
 >
@@ -20,18 +20,23 @@
 - 대상 휴대폰은 Samsung Galaxy S23 Ultra, 차량은 Tesla Model Y 주니퍼 AWD/롱레인지다.
 - 실제 Android·One UI·차량 펌웨어 버전은 실기기에서 확인한다.
 - Tesla 공식 앱의 폰키 등록은 우리 앱의 차량 제어 권한을 의미하지 않는다.
-- 첫 실제 차량 명령은 **프렁크 개방 요청 하나**다. 래치 해제와 후드를 끝까지 들어 올리는 기능은 구분하며, 대상 차량의 물리 동작은 확인 전까지 확정하지 않는다.
+- 인증된 ASLEEP 상태의 **BLE 깨움은 승인된 준비 명령**이고, 음성 인정 뒤의 차량 액션은 **프렁크 개방 요청 하나**다. 깨움 ACK는 물리 기상·P가 아니며, 프렁크 래치 해제와 후드를 끝까지 들어 올리는 기능도 구분한다.
 
-```text
-원거리 대기: 마이크 OFF · STT OFF
-  → 실제 차량 접근 감지
-  → 제한된 시간 동안 호출어 대기
-  → 짧은 명령 인식
-  → 필요 시 음성 확인
-  → 권한·신선한 차량 상태·만료·중복 검사
-  → 명령 전달 또는 안전하게 거부
-  → 확인된 결과만 음성 안내하고 오디오 종료
+```mermaid
+flowchart TD
+    A["서비스 ON · 음성 동의 · 비서/권한 준비"] --> B["fresh BLE 광고 · 기존 키 BODY 인증"]
+    B --> C{"인증된 상태가 ASLEEP인가"}
+    C -->|"예"| D["신선한 BODY · 회차당 1회 BLE 깨움"]
+    C -->|"AWAKE / UNKNOWN"| E["새 domain3 인증 · fresh 명시 P"]
+    D -->|"검증 ACK / 정상 명목 ACK"| E
+    E --> F["음성 대기 · exact 명령 인식"]
+    F --> G["오디오 실제 해제 · 새 P · 단발 프렁크"]
+    G --> H["ACK · 후속 BODY 결과 구분"]
 ```
+
+자동 깨움은 차량 전력 사용을 늘릴 수 있다. 상태 미확인에는 깨우지 않으며 실패·불명·기한·취소에서의 동작과 마이크/프렁크 차단 조건은 위 현재 계약을 따른다. 기상 준비 추가가 기존 실차 인증 무응답의 원인 해결을 증명하는 것은 아니다.
+
+연결 대기에는 고정 10/90초 제한이 없다. 발화는 최대 10초, handoff는 5초, 명령 작업은 40초다. 비명령·낮은 신뢰도는 조건 재확인 후 새 발화를 기다리고 취소·실패·기한 만료는 회차를 끝낸다.
 
 성공 기준은 음성 인식 버튼이 있는 것이 아니라, **잠긴 휴대폰을 주머니에 둔 사용자가 실제 차량 밖에서 접근부터 명령 인식까지 한 번도 화면을 만지지 않는 것**이다. 이후 승인된 실제 연동에서 안전 조건을 만족할 때만 명령을 전달한다.
 
@@ -46,31 +51,31 @@ Android 앱은 React Native가 아닌 **Kotlin 네이티브**로 개발한다. �
 | 명령 해석·상태 머신·차량 게이트웨이 | Kotlin, UI와 분리한 정책 로직 |
 | 설정 | DataStore, 토큰·키 저장과 분리 |
 | 시스템 연동 | VoiceInteractionService, 적절한 foreground service, Bluetooth/CDM API의 실기기 검증 |
-| 음성 | 접근 세션 내 호출어 감지, Android 내장 온디바이스 `SpeechRecognizer`(`ko-KR`, PCM 파이프·segmented session) STT, Android TTS |
+| 음성 | 인증 연결·fresh P 동안 제품 sherpa 한국어 모델 대기, 별도 수동 Android 온디바이스 `SpeechRecognizer`(`ko-KR`, PCM 파이프)·TTS 진단 |
 | 테스트 | Kotlin/JVM 파서·상태 전이 테스트, Android 실기기 서비스·오디오 검증 |
 | 차량 연동 | 앱 자체 AndroidKeyStore P-256 키·키카드 승인·로컬 BLE 우선. 공식 공개 wire contract와 JCA 사용 |
 | 선택 인터넷 경로 | 필요성과 승인 확인 후 Fleet API/OAuth 검토. 서버가 필요하면 Node.js + TypeScript 가능, 서명 프록시는 공식 Go `vehicle-command` 재사용 |
 
-개발 도구와 라이브러리는 아래 빌드 조합으로 고정했다. 호출어 엔진과 접근 경로의 최종 채택은 아직 확정하지 않았다. 진단·실차 음성 STT는 v0.50에서 Android 내장 온디바이스 `SpeechRecognizer`로 전환했으며(v47~v49의 Moonshine 경로는 제거) 실제 인식·실차 경로 검증은 별도다. v0.52에서는 사용자 승인에 따라 sherpa-onnx 1.13.8 런타임과 `sherpa-onnx-zipformer-korean-2024-06-24` 모델을 **진단 화면 전용 그림자 인식**에 한해 추가했다(명령 판정·차량 제어 미사용, 네트워크 전송 없음). 그 밖의 새 외부 음성 SDK·모델, 계정·비용 발생 또는 외부 오디오 전송은 사전 동의 없이 추가하지 않는다.
+개발 도구와 라이브러리는 아래 빌드 조합으로 고정했다. v0.50 Android PCM/STT와 v0.52 sherpa 진단 도입은 당시 이력이다. 현재 제품 자동 경로는 기존 sherpa 모델·튜닝을 재사용하고 수동 진단 경로와 차량 제어 권한을 구분한다. 새 외부 음성 SDK·모델, 계정·비용 발생 또는 외부 오디오 전송은 사전 동의 없이 추가하지 않는다.
 
 ### 기능별 Kotlin 소스구조
 
-단일 Android `app` 모듈을 유지하며, `app/src/main/java/com/heytesla/app/` 아래 Kotlin 파일을 기능별 폴더와 실제 패키지로 정리한다. `app/`은 앱 런타임·설정, `service/`는 Android 서비스·리시버, `vehicle/`은 `detection/`·`ble/`·`protocol/`·`key/`·`uwb/`·`navigation/`·`frunk/`, `speech/`는 음성, `diagnostics/`는 진단, `logging/`은 로그, `ui/`는 Compose 표현을 담는다. 세부 경계는 [네이티브 아키텍처](wiki/Native-Architecture.md#기능별-실제-소스구조)에 둔다.
+단일 Android `app` 모듈의 `app/src/main/java/com/heytesla/app/`에서 `app/`은 런타임·설정, `service/`는 Android 서비스·리시버, `vehicle/`은 `detection/`·`ble/`·`protocol/`·`key/`·`connection/`·`frunk/`, `speech/product/`는 제품 음성, 나머지 `speech/`는 공용 음성, `diagnostics/`는 수동 진단, `logging/`은 로그, `ui/`는 Compose 표현을 맡는다. `logging/legacy/`와 분석기는 역사 로그 해석을 보존한다. [소스구조](wiki/Native-Architecture.md#기능별-실제-소스구조)를 참고한다.
 
-Manifest에 등록된 Android component는 파일을 용도별 폴더로 옮겨도 기존 `com.heytesla.app.*` FQCN을 유지한다. 기존 CDM 연결·기본 비서 선택·PendingIntent·런처의 component identity를 보존하기 위한 예외이며 중간 래퍼나 호환 alias를 추가하지 않는다. 패키지 이관 뒤에는 현재 제품 시작점이 없는 구형 BLE 비교·관찰·자동 BODY→DRIVE 조회·자동 마이크 실행 가지와 전용 테스트를 제거했다. 현재 서비스 UWB·좌표 안내·수동 키 조회·음성·프렁크와 공통 송수신·안전 회귀·과거 로그 해석은 보존한다. Nordic 빈 패키지·빈 아이콘 폴더·미사용 Preview 직접 의존성도 제거했다. 앱 ID·namespace·버전66·저장키·현재 서비스 정책·권한은 유지하며 사용자 데이터·로컬 모델·벤더 라이선스는 삭제하지 않는다.
+Manifest의 기존 Android component identity와 사용자 VIN·앱 키·등록·설정·수동 녹음·로그는 유지한다. UWB·navigation 실행 경로와 전용 UI/권한은 제거하며 공유 암호·GATT·안전 계약은 연결 경로에서 보존한다.
 
 ## 반드시 지킬 조건
 
 - 초기 설치·권한·계정·설정 단계 외에는 앱 실행, 알림 터치, 잠금 해제, 마이크 버튼, 매번 지문 인증, 매사용 서비스 수동 시작을 요구하지 않는다.
-- 차량과 떨어져 있으면 오디오를 수집하지 않는다. 상시 STT, 무제한 고빈도 BLE 스캔, 주기적 차량 조회·깨우기, 상시 wake lock을 사용하지 않는다.
+- 인증 연결·fresh P가 없으면 제품 오디오를 수집하지 않는다. 거리 판정은 없다. 같은 GATT의 기어 감시는 응답 뒤 2초 간격이며 RX 5초/source 10초/future 2초 기준을 적용한다. D/R/N/UNKNOWN·stale·disconnect 관측 시 즉시 로컬 음성을 봉인하지만 실제 D 진입 감지는 통신 지연이 있다. 주기적 서버 조회·차량 깨우기·상시 wake lock은 사용하지 않는다.
 - 앱 런타임에서 GPT·Codex·OpenAI API를 호출하지 않는다. 제한된 한국어 명령을 명시적인 규칙으로 해석한다.
 - “프렁크 열지 마”, “아까 열어달라고 했잖아”, 모호한 “문 열어줘”를 실행하지 않는다. 부분 인식 결과로 먼저 명령을 보내지 않는다.
 - 기어 정보 `null`·오래된 데이터·속도 0을 안전한 P 상태로 간주하지 않는다. 호출어와 음성 확인은 사용자 인증 수단이 아니다.
 - 원시 오디오는 일반 동작에서 저장·전송하지 않는다. 사용자가 직접 시작한 개발용 마이크 시험은 녹음·최종 인식 원문을 백업 제외 전용 영역에 기본 저장하며 외부로 자동 전송하지 않는다. 민감정보와 토큰·키를 코드·일반 로그·Wiki에 기록하지 않는다.
-- 기본값은 **mock/dry-run**이다. 계정 연결·결제·차량 키 등록·실제 프렁크 동작은 승인된 단계에서만 진행한다.
+- 기존 서비스 ON은 새 마이크·제어 동의가 아니다. 별도 영속 제품 음성 동의는 기본 false이며 사용자가 직접 승인한다. 음성은 화자 인증이 아니므로 타인·재생음이 명령으로 인정될 위험을 고지한다. mock/dry-run은 별도 수동 진단이며 승인된 제품 경로를 무조건 mock으로 바꾸지 않는다.
 - 취소·만료된 명령을 저장해 나중에 실행하지 않는다. 전송 후 결과가 불명확하면 자동 재전송하거나 “열렸어요”라고 안내하지 않는다.
 
-## 개발 순서
+## 과거 개발 순서 — 현재 사용법 아님
 
 1. **기술 타당성 확인:** 공식 문서와 실제 기기 조건을 분리해 기록한다.
 2. **Android 검증 앱:** Tesla 실제 제어 없이 `잠금 + 실제 차량 접근 + 무터치 마이크 + 한 문장 인식 + 종료`를 확인한다.
@@ -82,26 +87,21 @@ Manifest에 등록된 Android component는 파일을 용도별 폴더로 옮겨�
 
 **차량 키를 API에서 발급받는 전제는 두지 않는다.** OAuth는 선택 Fleet API 호출용, 앱의 P-256 키는 BLE 인증용, UWB 세션 키·파라미터는 정밀 거리 측정용이다. 공식 앱 폰키를 복사하지 않으며 UWB는 BLE 키 등록과 별도 과제다. v21의 실차 인증·암호 상태 수신·새 BLE 연결에서 같은 키 조회는 두 방문으로 통과했다. 프렁크 제어와 UWB 거리 측정은 미확인이다. 개발 기준과 공식 근거는 [요구사항](wiki/Requirements.md#차량-연동-개발-기준), [Tesla 연동](wiki/Tesla-Integration.md)에 둔다.
 
-## 프로젝트 전용 REA MCP
+## 개발 도구
 
-- `.omp/mcp.json`에 기존 `mobile-mcp`와 함께 REA `6.5.0`을 등록한다. 사용자 전역 MCP·별도 named profile·앱 Gradle 의존성은 변경하지 않는다. 이 프로젝트를 여는 OMP 실행 별칭들이 같은 프로젝트 등록을 읽는다.
-- 호스트 전용 런타임은 `~/.local/share/hey-tesla/rea/6.5.0`에 두고 npm 설치 스크립트·선택 의존성은 실행/설치하지 않았다. Android 분석은 JDK21과 별도 `jadx-headless-mcp-0.7.1-all.jar`를 사용하며 공식 고정 SHA-256을 확인했다. 프로젝트 MCP의 Node/JDK/JAR 절대 경로는 다른 개발 환경에서 해당 설치 경로로 맞춰야 한다.
-- 이미 열린 OMP에서는 `/mcp reload` 후 `/mcp list`, `/mcp test rea`로 확인한다. 실제 일회 OMP RPC 검증에서 모델 호출 없이 `rea [project]` 발견·207개 도구 연결을 확인했다. 도구 등록은 모든 외부 분석 엔진의 설치·실행 가능성을 뜻하지 않는다.
-- Android smoke는 연결된 기기의 Tesla `4.61.6-4647` APK 5개를 읽기 전용 획득하고 base APK의 패키지/Manifest 요약·클래스 검색·메서드 목록·메서드 Java 디컴파일까지 실제 MCP로 확인했다. APK 서명·split 통합·실행 중 BLE 동작은 이 검증에 포함하지 않는다.
-- 초기 사용 범위는 APK 정적 분석과 읽기 전용 조회다. REA에는 설치·강제 종료·Frida 같은 변경 도구도 노출되므로 연결됐다는 이유로 사용을 승인한 것으로 취급하지 않는다. 폰키·토큰·사설 저장소 접근과 차량 명령은 하지 않는다. 분석 출력은 사용하는 모델 제공처로 전달될 수 있어 비밀값을 입력하지 않는다.
-- 이번 설치에서 승인된 정리 범위는 새 REA 전용 캐시·임시 분석 공간뿐이다. 원 APK·사용자 데이터·기존 현장 로그·차량 키를 삭제하거나 초기화하지 않는다.
+프로젝트 MCP 설정에는 공용 `mobile-mcp`만 등록한다. 선택 도구인 REA는 각 개발자가 로컬 설정에 등록하며, 호스트별 Node/JDK/JAR 경로·분석 결과·기기에서 회수한 자료는 커밋하지 않는다. 앱 빌드와 실행에 REA는 필요하지 않다.
 
 ## 빌드와 실행
 
-소스와 S23의 기존 설치본은 모두 `com.heytesla.app` / `0.66.0`(`versionCode=66`)이지만, **이번 소스구조 리팩터링은 폰 설치 전**이다. 기존 설치본의 데이터 보존 설치 후 실제 설정 버전·홈 OFF·실행 서비스0을 확인한 기록과 구분하며 사용자 ON/OFF 설정은 바꾸지 않는다. 앱 정보는 BuildConfig 기반 버전 이름·빌드 번호를 표시한다. 홈 ON은 차량 감지·좌표 안내·자동 UWB를 제어하며 `RANGING` 미허용 시 감지는 유지하되 UWB 측정은 차단한다. 기존 VIN·앱 키·등록·녹음·로그를 초기화하지 않는다.
+`com.heytesla.app`의 설치·기기 상태는 [기기 검증 정본](wiki/Device-Validation.md#현재-소스설치검증-상태)만 따른다. 앱 버전 표시는 `BuildConfig`에서 읽는다.
 
-직접 GATT는 지원 OS(minSdk36)에서 `autoConnect=true`로 생성하고, 접근 읽기와 서비스 UWB의 초기133 중 전송·연결 진전 전인 경우에만2초 뒤 같은 handle의 `connect()`를1회 호출한다. 최종 중지/기한 종료에서 disconnect+close하며 기존 연결/탐색/MTU/CCCD/암호 검증 경계를 유지한다. 세대 가드는 재접속 전 이미 진입·게시된 콜백을 거절하지만 Android가 제공하지 않는 연결 요청ID를 만들어 가정하지 않는다. SDK Boolean 접수는 연결·차량 인증 성공이 아니다.
+초기 설정에서 저장 VIN·시스템 차량 등록·기존 앱 키를 준비하고 Bluetooth/감지 권한을 승인한다. 설정에서 기본 비서를 **Hey Tesla로 직접 선택**하고 마이크 권한과 **별도 제품 음성 동의**를 승인한 뒤 홈 서비스 ON을 사용한다. 이전 ON을 동의로 취급하지 않는다. UWB 버튼·RANGING 권한·거리 시험은 현재 절차에 없다.
 
-v41은 SDK 201(BUSY)로 **미접수된** 쓰기만 같은 조각으로100ms 뒤 최대2회 추가 발급한다. 원 쓰기5초·전체40초 기한을 유지하며 SDK0 뒤 callback 오류/타임아웃은 같은 쓰기를 재전송하지 않는다.100ms/2회는 Tesla APK의 확정 정책이 아닌 우리 제한값이다. 검증된 BODY 응답의 절전 원 코드를 기록하지만 Infotainment가 깨어 있음·현재 P·제어 허가로 승격하지 않는다. 자동 차량 깨우기는 추가하지 않았다.
+홈은 실제 연결/인증·fresh P·음성 대기·인식 중·명령 진행을 구분한다. SDK 전송, 차량 ACK, BODY 열림 보고는 각각 다른 근거이며 실제 후드를 들어 올린 물리 완료로 합치지 않는다. OFF·동의 철회는 즉시 음성/명령을 봉인한다. 오디오와 BLE 정리 완료 전에는 예약을 반환하지 않으며 정리 불명은 재시작 필요다. 동의 false 저장 실패도 RAM에서는 철회하고 저장 오류를 유지한다.
 
-v0.50의 실차 경로는 개발자 진단→음성에서 별도 안전 동의 후 직접 시작한다. 앱이 16 kHz·mono·PCM16을 최대 10초(320,000바이트) 캡처하고, 같은 PCM을 `AndroidPcmRecognizer`가 온디바이스 `SpeechRecognizer`(`ko-KR`)에 `EXTRA_AUDIO_SOURCE` 파이프(non-blocking 쓰기)로 전달한다. segmented session(`EXTRA_SEGMENTED_SESSION`)의 `onSegmentResults`를 결합하며, 비segmented 파이프는 S23에서 결과가 null이었다. 파일·무음 대조도 같은 경로를 쓴다. `FrunkVoicePolicy`는 후보 중 하나라도 정규화 후 `헤이테슬라프렁크열어줘`와 정확히 일치하면 수락하고, 하나라도 `취소`/`열지마`를 포함하면 차단한다. 발음 변형 문자열(페이/해이 테슬라, 브렁크/프랑크 등)은 수락하지 않는다. 점수 0.0·−1·null·비유한값은 "점수 미제공"으로 기록하고 신뢰도 게이트를 생략하며, 실제 점수가 오면 0.85 이상이어야 한다. 인식기 실패는 부분 세그먼트가 있어도 명령 없음이다. STT 일치는 차량 제어 허가가 아니며 P·HANDOFF 5초·명령 10초·안전 동의 게이트를 모두 통과해야 전송 단계로 간다. 인식 타임아웃은 운영 15초다. v0.50의 실기·실차 프렁크 결과는 아직 기록되지 않았다.
+제품 음성 PCM은 RAM에서만 처리하며 녹음 파일로 저장하지 않는다. 개발 확인용으로 인식 텍스트와 종료 결과는 앱 내부의 백업 제외 영역에 자동 보관하며, 홈에 최근 결과를 표시한다. 주변 대화가 포함될 수 있다. 일반 로그에는 인식 원문을 쓰지 않고 자동 업로드나 자동 삭제는 하지 않는다. 사용자가 직접 시작한 수동 마이크 진단의 녹음·최종 원문 저장은 별도다.
 
-AltBeacon2.21.2·FGS·스캔 공백0과 별도 읽기 진단의 제한 복구는 유지한다. 제품 UWB는 한 접근당 한 회차이며 반복 광고·자체 GATT·스캔 재개만으로 재시도하지 않는다. 저장 ON 복원은 새 token·빈 후보·새 광고부터 시작하고 이전 조회/명령/음성 동의/UWB 세션은 재생하지 않는다. v0.54의 수동 RAW UWB에 이어 v0.55 제품 서비스도 사용자 승인 `RANGING` 권한을 요구한다. 새 키 등록·자동 깨우기·클라우드·대기 중 wake lock은 추가하지 않았다. Android16/API36 이상, AGP9.3.1·Gradle9.5.0·Compose compiler2.4.10·BOM2026.06.01·protobuf0.10.0/protoc4.36.2를 사용하며 Gradle/Lint는 명령별 JDK21을 지정한다.
+Android16/API36 이상, JDK21 기반 빌드다. 빌드·설치·합성 결과는 차량 제어·잠금 음성 동작의 실측을 대신하지 않는다.
 
 1. JDK 21과 Android SDK Platform 36 / Build Tools 36.0.0을 준비한다. 이 저장소의 실제 빌드는 Android Studio bundled JDK 21.0.10으로 수행했다.
 2. `JAVA_HOME`을 JDK에 맞추고, Git에서 제외된 `local.properties`에 자신의 `sdk.dir`을 지정한다. `ANDROID_HOME`과 `ANDROID_SDK_ROOT`를 함께 설정했다면 동일한 SDK를 가리키게 하거나 빌드 명령의 환경에서 일치시킨다. 전역 환경을 자동 변경하지 않는다.
@@ -125,7 +125,7 @@ APK는 `app/build/outputs/apk/debug/app-debug.apk`에 생성된다. 승인된 US
 adb -d install -r app/build/outputs/apk/debug/app-debug.apk
 adb -d shell am start -n com.heytesla.app/.MainActivity
 ```
-**설정 → 개발자 진단 → UWB**에서 **UWB 지원 확인**과 **거리 진단 시작**을 구분한다. 지원 확인은 기존 capability 조회만 하며 RF 거리 세션·BLE TX를 시작하지 않는다. 거리 진단은 서비스 OFF·저장 VIN·시스템 차량 등록·기존 앱 키·사용자가 허용한 `RANGING` 권한을 요구한다. 실제 backend 지원을 확인하고 BLE 세션 HMAC 검증→암호화 FiRa 응답→RAW UWB 세션을 진행하며, peer별 실제 거리(m)·confidence·유효/무효 횟수와 종료 사유를 표시한다. `onOpened`/`onStarted`는 거리 수신 성공이 아니고 종료 후 값은 과거 결과다. 거리·원시 framework 시각·callback 수신 시각은 비민감 순환 로그와 분석기에 보존하며 VIN·주소·STS는 기록하지 않는다. capabilities 비트 의미·차량 수락·실거리는 아직 미확인이다. [구현 계약과 한계](wiki/Tesla-Integration.md#v54-수동-tesla-uwb-거리-진단)를 따른다.
+과거 수동 UWB 버튼·거리 진단 절차는 [v54 역사 기록](wiki/Tesla-Integration.md#v54-수동-tesla-uwb-거리-진단)에 보존한다. v76에는 해당 실행 UI가 없으며 현재 사용자에게 거리 시험을 요구하지 않는다.
 
 **설정 → 개발자 진단 → 차량 키**는 제품 자동 제어와 별도의 수동 진단이다. v21의 실차 앱 키 인증·암호 상태 조회·같은 키의 새 BLE 연결 조회는 통과했으므로 키 등록을 반복하지 않는다. 새 대상의 초기 등록에만 직접 동의한 **키 추가 요청 · 카드 승인 후 상태 1회 조회**와 실제 키카드 승인이 필요하다. 앱은 Driver 역할의 Android 키만 추가하며 기존 폰키를 제거·교체하지 않는다. **우리 앱 키로 인증·상태 1회 조회**와 **주차 기어 상태 1회 조회**는 등록 요청과 별개이며 개발자 진단 상단의 저장 VIN을 사용한다.
 
@@ -133,13 +133,13 @@ adb -d shell am start -n com.heytesla.app/.MainActivity
 
 
 
-차량 감지는 **홈 → 서비스 사용 ON/OFF**에서 제어한다. 저장 VIN으로 광고명을 계산하는 감지 전용 모드이며 비교 프리셋·BLE 시험·접근 관찰 조작은 개발자 진단에서 제거했다. 켜짐 설정과 실제 감시 실행은 별도 표시하고, Bluetooth·스캔·위치·알림 등의 준비가 부족하면 이유를 표시한다. 사용자가 OFF로 끄면 저장 설정과 실제 감지를 함께 종료하며, 실행 실패로 서비스 owner가 없어도 OFF를 저장한다.
+홈 **서비스 사용 ON/OFF**는 연결 제품의 사용 의도다. 저장 ON과 실제 감시·연결·음성 실행은 별개이며 준비 부족·권한 상실·실패를 표시한다. OFF는 서비스 owner가 없어도 가능하다.
 
-기존 v28 접근 인증·상태 조회 구현은 내부에 남지만, 홈 감지 서비스와 부팅 복원에서는 실행하지 않는다. 수동 차량 키·상태 읽기는 **설정 → 개발자 진단 → 차량 키**에 유지한다. 부팅 완료·패키지 교체의 기존 `BleDetectionRecoveryReceiver`는 저장 ON일 때 새 감지 세션만 요청하며, VIN 복원이 끝나기 전의 OFF도 존중한다. 사용자 강제 종료·권한 상실·OS 시작 거절을 우회하거나 이전 후보·음성·차량 명령을 복원하지 않는다.
+저장 ON 복원은 새 token·빈 후보·새 광고부터 시작한다. 과거 인증/P·음성·명령은 재생하지 않고 새 제품 동의를 자동 생성하지 않는다. 사용자 강제 종료·OS 시작 거절을 우회하지 않는다. 수동 키·상태 조회는 설정 → 개발자 진단에 유지한다.
 
 작업 순서는 [AGENTS.md](AGENTS.md)의 **구현·검증·데이터 보존 설치 → 사용자 실차 테스트 → USB 로그 분석 → 다음 단계 판단**을 따른다. USB 없이도 내부 로그는 기록된다. 현재 조회 ON 여부와 미검증은 [기기 기록](wiki/Device-Validation.md)을 확인한다.
 
-AltBeacon이 등록 차량 BLE 감시용 **connectedDevice FGS**와 알림을 소유한다. v66 좌표 안내는 같은 `BeaconService`의 **connectedDevice|location 실제 type ACK** 뒤에만 준비하며 새 접근에서만 휴대전화 위치·센서를 수집한다. `ObservationService`는 bound-only이며 중복 FGS 알림을 만들지 않는다. 선택 백그라운드 위치 권한은 사용자가 Android 설정에서 직접 허용한다. 미허용 재부팅 복원은 BLE/UWB를 유지하되 좌표 안내만 앱에서 명시적으로 재개한다. [수집 수명·권한 계약](wiki/Tesla-Integration.md#v66-좌표-기반-나침반uwb-병행)을 따른다.
+AltBeacon은 BLE 감시용 **connectedDevice FGS**만 소유하며 `ObservationService`는 bound-only다. 제품 오디오는 별도 **ProductMicrophoneService microphone FGS**가 정확한 활성 음성 lease 아래 실행한다. location FGS·좌표 수집은 제품에 없다.
 
 AltBeacon 스캔 기간은 기본 foreground 1,100ms·background 30,000ms를 유지하고, 두 모드의 betweenScanPeriod를 명시적으로 0ms로 설정한다. 이전 기본 background 5분 대기는 제거했다. 기본 무선 모드와 콜백 주기는 별개이며 OS/OEM 지연·무선 duty cycle까지 없어진다는 보장은 아니다. `longScanForcingEnabled` 기본값은 유지한다. stock `NonBeaconLeScanCallback`은 원 수신 timestamp와 정확한 이름 필터 주입을 제공하지 않으므로 고정 소스의 좁은 어댑터를 사용한다. 가짜 BeaconParser·주소 고정·서비스 UUID 광고 포함을 가정하지 않는다. 상세 변경 범위는 [아키텍처](wiki/Native-Architecture.md)를 따른다.
 
@@ -147,8 +147,14 @@ AltBeacon 스캔 기간은 기본 foreground 1,100ms·background 30,000ms를 유
 
 명시적 ON/OFF와 실행 상태를 분리한다. 프로세스 초기화·재부팅·업데이트·Bluetooth ON에서 감지만 복원하며 이전 근접 상태·명령은 재생하지 않는다. Android background/while-in-use FGS 제한·사용자 강제 종료 때문에 즉시 복원은 보장하지 않는다. FGS fallback은 정상 실시간 감지로 표시하지 않는다. 대기 wake lock은 추가하지 않았고 기존 짧은 GATT wake lock은 그대로다.
 
+### 역사적 감지·음성 검증과 보존 로그
+
+아래 버전별 실측은 당시 범위이며 현재 설치·검증 수치가 아니다. 현재 상태는 기기 검증 정본만 따른다. UWB 분석 옵션은 보존 로그 해석용이지 제거된 제품 실행 절차가 아니다.
+
 `0.15` APK·110개 회귀 통과, Lint 오류 0·경고 13개다. 이전 `0.14` S23 실측에서는 실제 Compose 조작·감지만 후보 1/GATT 0·자기 BT 억제·실제 GATT 타임아웃 2회 제한·백그라운드 연결 요청 정리·알림 중지·계측 HOME/화면 OFF 15초 유지를 확인했다. 사용자 수동 SCAN 승인 뒤 실제 스캔 40초 종료/120초 재개·GATT 중 정지·최종 중지 뒤 재개 없음도 확인했다. 합성 입력은 실차 방문이 아니며 광고 match·차량 인증·UWB 거리를 증명하지 않는다. [0.14 실측과 한계](wiki/Device-Validation.md#0140-probe--ble-감지-대조-시험), [0.15 지원 조회 실측](wiki/Device-Validation.md#0150-probe--차량-방문-전-준비)
-현장 분석기는 Python 표준 라이브러리만 사용하는 `tools/analyze_field_log.py`다. `python3 -B tools/analyze_field_log.py LOG --json`으로 보존 JSONL을 읽기 전용 분석한다. v1~v17·null/SDK0·실제 완료 callback·부분 조회·최종 회차·본시험/정리를 구분한다. v17은 `NATIVE`와 실제 SDK/callback 관측을 사용하고 과거 Nordic 필드는 v14~v16 행에서만 읽는다. 이전 버전의 미지원 값을 false/정상으로 채우거나 library 전달 시각을 native/RF 시각으로 바꾸지 않는다. 합성 실행은 `--exclude-trial UUID`를 반복해 제외한다. `--visits CSV --observer-offset-ms INTEGER`는 실제 관찰자 기록과 측정한 시계 차이만 전달한다. `tools/field_visits.csv`는 헤더만 있는 양식이며 빈 기록·시계 미확인에서는 비율을 만들지 않는다. [대조 조건·시각·제외 목록](wiki/Device-Validation.md#실행-조건과-관찰자-csv)을 먼저 확인한다. 오류0은 로그 완전성·물리 감지 성공의 증거가 아니다.
+현장 분석기는 Python 표준 라이브러리만 사용하는 `tools/analyze_field_log.py`다. `python3 -B tools/analyze_field_log.py LOG --json`으로 **schema1..33** 보존 JSONL을 읽기 전용 분석한다. null/SDK0·실제 완료 callback·부분 조회·최종 회차·본시험/정리를 구분하고, 과거 Nordic/UWB/좌표 관측은 당시 스키마 범위로 해석한다. 미지원 값을 false/정상으로 채우거나 전달 시각을 RF 시각으로 바꾸지 않는다. `--exclude-trial UUID`, `--visits CSV --observer-offset-ms INTEGER`는 실제 제외 회차·관찰 기록·측정 시계 차이만 사용한다. [대조 조건](wiki/Device-Validation.md#실행-조건과-관찰자-csv)을 따르며 오류0은 물리 성공 증거가 아니다.
+
+v72의 native 세션 관측과 보존 OS metric은 `python3 -B tools/analyze_field_log.py LOG --uwb-dump DUMPSYS_UWB.txt --json`으로 대조한다. 입력은 변경하지 않으며 보고서에는 원 session ID·주소·키 대신 상관용 태그와 허용된 metric만 포함한다. 과거 로그에는 태그를 소급 생성하지 않는다. 일치·미일치·중복 후보를 구분하며 **태그 일치는 RF 성공이나 종료 원인 확정이 아니다**. [계약·정적 분석·한계](wiki/Tesla-Integration.md#v72-native-세션-관측과-os-대조)를 따른다.
 휴대폰 단독 실측은 일반 앱 FGS의 35분 생존·30분 heartbeat, 별도 65초 `Dozing` 유지, Bluetooth OFF 종료/ON 후 자동 복원 없음, 사용자 잠금 해제 후 실제 `USER_STOP`까지 확인했다. **35분 화면 OFF는 입증되지 않았고**, 비충전 deep Doze·배터리 비용·실차 감지율은 미확인이다. 시험 종료 시 서비스/오디오/GATT wake lock 없음·Bluetooth ON, 1,277행 로그와 이전 1,156행 전체 prefix 보존을 확인했다.
 
 
@@ -200,6 +206,8 @@ USB 없이도 코드 작업·빌드·정책 검증을 할 수 있다. 새 APK를
 
 개발용 마이크 시험은 시작 버튼 근처에 기본 저장을 고지하며, 사용자가 버튼을 눌러야 녹음한다. 화면 진입·복원·복귀만으로 시작하지 않는다. WAV·원문 결과는 앱 내부 `no_backup/speech-recordings/<UUID>/`에 평문으로 저장되므로 개인정보가 포함될 수 있다. 자동 업로드·백업·자동 삭제는 하지 않는다. 일반 로그에는 기존 마스킹만 남긴다. 합성·무음 파일 시험은 자동 저장하지 않으며, 고정 합성 WAV `app/src/main/res/raw/speech_trial_ko.wav`는 비개인 시험 자산이다. 취소·화면 이탈·오류·시간 초과에 캡처·추론 객체·RAM을 정리하고 해제 불명은 새 시험을 막는다. 실차 프렁크 1회 안전 동의는 별도로 유지한다. 런타임 모델 다운로드·클라우드 대체는 없으며 API 키·계정이 필요 없다.
 
+동봉 WAV는 [Supertonic 2](https://huggingface.co/Supertone/supertonic-2) 기본 F1 음성으로 생성한 한국어 합성 시험 음성이다. 사람의 녹음, 음성 복제 입력, 합성 모델은 동봉하지 않는다. [모델 라이선스 §6 및 부속서 A](https://huggingface.co/Supertone/supertonic-2/blob/75e6727618a02f323c720cba9478152d4bc16ca4/LICENSE)와 [자산 출처](wiki/Native-Architecture.md#진단-wav-출처)를 참고한다. 과거 Apple 시스템 음성으로 얻은 실측은 이 파일의 결과가 아니다.
+
 ### USB 녹음 회수와 휴대폰 재시험
 
 디버그 앱과 계측 APK가 설치된 USB 기기가 필요하다. 아래 실행예제·도구는 소스 이관 뒤의 `com.heytesla.app.speech.SpeechRecordingReplayDeviceTest`를 대상으로 하므로, 기존 설치본에 실행하기 전에 이관본 앱·계측 APK를 함께 데이터 보존 설치해야 한다. PC에서 음성 모델을 실행하지 않으며, 저장 PCM은 휴대폰의 Android 온디바이스 `SpeechRecognizer`로만 재시험한다(재생 타임아웃 30초). 마이크·BLE·차량 명령은 실행하지 않는다.
@@ -214,7 +222,7 @@ python3 -B tools/speech_recordings.py --serial DEVICE_SERIAL replay --id RECORDI
 
 `replay`는 계측 테스트 `com.heytesla.app.speech.SpeechRecordingReplayDeviceTest#replaySavedRecording`(인자 `recordingId`)을 실행해 저장 녹음을 재인식하고 결과를 해당 녹음의 `runs/`에 추가한다. 재시험 뒤 같은 `fetch` 명령으로 새 결과만 추가 회수한다. 기존 다른 파일은 덮어쓰지 않고 원본은 지우지 않는다. 회수물은 Git 제외 영역인 `.local-recordings/`에만 보관한다. 녹음의 생성 시각·ID로 마스킹 순환 로그의 해당 시험 시각과 비교한다.
 
-고정 합성 fixture와 저장된 모든 녹음을 현재 정책에 한 번에 통과시켜 보려면 `replayAll`을 쓴다. 결과는 `HTSTT` 태그 로그로만 남고 저장하지 않는다.
+고정 합성 fixture와 저장된 모든 녹음을 현재 정책에 통과시키려면 `replayAll`을 쓴다. `HTSTT` 진단 로그에는 일치·후보 수·판정·시간만 남기며 인식 원문과 녹음 식별자는 남기지 않는다. 휴대폰의 녹음·결과 파일은 바꾸지 않는다.
 
 ```sh
 adb shell am instrument -w -e class com.heytesla.app.speech.SpeechRecordingReplayDeviceTest#replayAll com.heytesla.app.test/androidx.test.runner.AndroidJUnitRunner
@@ -223,7 +231,7 @@ adb logcat -d -s HTSTT:I
 
 마이크·Bluetooth 상태·알림 권한은 사용자가 직접 승인한다. 기본 비서는 음성 진단에 필요하지 않으며, 선택하면 기존 비서를 대체한다. 기본 비서 등록용 인식 서비스는 일반 `SpeechRecognizer` 요청을 여전히 명시적 비지원 오류로 거절하며, 진단 STT는 `AndroidPcmRecognizer`를 통해 시스템 온디바이스 인식기를 직접 사용한다. 실제 차량의 VIN은 앱에만 입력하며, CDM 선택·기본 비서 변경·실제 접근은 [기기 검증 절차](wiki/Device-Validation.md)에 따라 별도로 수행한다. VIN 보호로 화면 캡처는 차단되며 UI 요소 조회로 진단할 수 있다.
 
-시험 후 기능은 OFF로 두었다. 프로세스 재생성 시 실행도 OFF이므로 현재 앱을 무인 자동 복구까지 완성된 제품으로 해석하지 않는다. 디버그 키는 개발용이며 공개 배포용 서명은 아직 구성하지 않았다.
+과거 시험 후 OFF 기록과 현재 상태를 구분한다. 현재 설치·저장 서비스 의도·실제 실행은 [기기 검증 단일 정본](wiki/Device-Validation.md#현재-소스설치검증-상태)을 따른다. 저장 ON 복원도 새 token·빈 후보·새 광고만 사용하고 이전 세션·좌표·명령을 재생하지 않는다. 무인 자동 동작·RF·실차 제어 성공을 보장하지 않는다. 디버그 키는 개발용이며 공개 배포용 서명은 아직 구성하지 않았다.
 
 ## Wiki
 
@@ -256,3 +264,5 @@ Wiki 원본은 루트의 `wiki/`에서 관리한다. 문서의 커밋·푸시와
 - 배터리 사용량, 반복 접근 성공률, 차량 절전 영향.
 
 Hey Tesla는 Tesla 공식 앱이나 Tesla가 인증한 제품이 아닌 개인 개발 프로젝트다.
+
+공개 열람과 재배포 허가는 별개다. 프로젝트 자체 코드에 대한 별도의 오픈소스 라이선스는 지정하지 않았다. 포함된 제3자 구성요소에는 각 구성요소의 라이선스와 고지가 적용된다.

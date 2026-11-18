@@ -4,26 +4,480 @@
 
 ## 문서 상태와 범위
 
-현재 소스·생성 APK는 **`0.66.0`(`versionCode=66`)**이다. [기능별 소스구조](Native-Architecture.md#기능별-실제-소스구조)와 미사용 실행 가지를 정리하고 호스트 빌드·회귀·실제 소비자 smoke를 완료했지만 **정리 APK는 폰 설치 전**이다. S23의 기존 같은 버전 설치본은 [좌표 기반 나침반·UWB 병행 계약](#v66-좌표-기반-나침반uwb-병행)을 구현한 것으로 당시 FGS/source·UI 검증·데이터 보존 설치와 서비스 OFF·실제 서비스 실행0을 확인했다. 실제 차량 위치 응답·UWB 거리·방향 성공은 미검증이다. 과거 버전 관측은 당시 근거로 보존한다.
+현재 제품 동작은 아래 **v80 인증된 수면 상태의 단발 BLE 깨움과 v78 검증 모델 연결**을 따르며, v81의 wake 직후 HELLO 재송신·v82의 인증 DRIVE 진단·v83의 초기 INVALID 제한 재조회·v84의 발화 확인/lease별 모델 준비·v86의 자동 결과 보관/홈 확인을 적용한다. v85 별도 텍스트 저장 동의는 제거했고 당시 계약은 역사로 보존한다. 현재 버전·설치 차이·저장 ON/OFF·실행검증 수치는 [기기 검증 단일 정본](Device-Validation.md#현재-소스설치검증-상태)에만 둔다. 소스 구현·설치를 실제 발화/잠금·실차 개방 성공으로 승격하지 않는다.
 
-현재 개발 기준은 **로컬 BLE 우선**이다. v42는 실제 프렁크 명령과 화면 표시 음성 확인을 연결했다. 감지/조회 진단과 실차 명령은 분리하며, 실차 시험 준비를 위해 감지는 정상 중지하고 RAM 동의는 미선택으로 남겼다. 데이터 보존 설치·S23 기기31개 검증을 수행했지만 실제 사용자 발화·차량 명령/개방·잠금 주머니 동작은 미검증이다. [v42 실차 절차](Device-Validation.md#0420-probe--화면-표시-음성-프렁크-실차-시험)를 따른다.
+로컬 BLE·기존 앱 키·Kotlin/Compose·Coroutines/StateFlow 기반을 유지한다. 일반 음성 진단의 `DryRunVehicleGateway`와 실제 제품 프렁크 경로는 별개이며 실패를 mock 성공으로 바꾸지 않는다. Fleet/OAuth·서버·결제는 필수 조건이 아니고 별도 승인할 선택 경로다. AndroidKeyStore 개인키를 추출하거나 공식 앱 폰키를 가져오지 않는다.
 
-`0.14.0-probe`의 BLE 감지 대조 시험은 별도 경로다. CDM 기준과 선택된 BT·주소 필터 스캔·제한 재시도로 근접 후보와 GATT 회차를 분리하며, 서비스는 등록 차량 GATT·Tesla 서비스/TX/RX·RX 구독과 정리만 검사한다. 감지만 모드는 GATT도 하지 않는다. `VehicleGateway`는 여전히 로컬 dry-run이며 연결/구독·첫 RX는 가상 키·권한·차량 인증이 아니다. CCCD 제어 외 TX characteristic 쓰기·차량 명령·Fleet API 호출은 하지 않는다. 실제 검증과 합성 입력은 [기기 검증](Device-Validation.md#0140-probe--ble-감지-대조-시험)에 구분하고 UWB 세션 start·유효 거리·폰키 인증을 아래에서 따로 다룬다.
+공개 문서는 자체 구현의 계약·관측과 공개 표준·SDK를 설명한다. 제3자 APK에서 추출한 코드·캡처·분석 번들은 포함하지 않는다. 과거 정적 비교의 요약은 공식 공개 API 계약이나 실제 실행 검증으로 해석하지 않는다.
 
-앱 내부 UI·도메인·파서·상태 머신·게이트웨이는 Kotlin, Compose, Coroutines/StateFlow, DataStore를 사용한다. 현재 수동 BLE 등록·읽기 진단의 공유 프로토콜과 AndroidKeyStore 경계를 재사용해 향후 네이티브 BLE 차량 게이트웨이를 개발한다. 선택 Fleet 경로에서 서버 필요성이 확인되고 사용자가 승인한 경우에만 Node.js+TypeScript를 검토하며, 해당 경로의 서명은 공식 Go `vehicle-command` 프록시 재사용을 우선한다. Node 서버를 먼저 개발하거나 AndroidKeyStore 개인키를 서버로 옮기는 방식은 채택하지 않는다. SDK·라이브러리 버전은 실제 호환성 검증 뒤 고정하며 외부 음성 SDK는 미선정·미승인 상태다.
+## v86 자동 결과 보관·홈 확인·실패 알림
 
-현재 제품에서 시작점이 없는 구형 주소 GATT 비교·관찰 모드·자동 BODY→DRIVE 조회·자동 마이크 실행 가지는 제거했다. 아래 v38 이전 비교·접근 읽기·자동 마이크 설명은 당시 이력이다. 현재 서비스 UWB·좌표 sidecar, 수동 BODY/DRIVE·키 등록·별도 승인 프렁크, 공통 암호화/송수신과 과거 로그 모델·해석은 보존한다. Nordic 실행 코드/의존성뿐 아니라 빈 소스 패키지도 제거했다.
+- 개발 확인을 위한 별도 텍스트 저장 승인/토글·preference 복원·권한 세대를 제거했다. 기존 preference 키/값은 삭제·수정하지 않고 읽지 않는다. 기존 제품 마이크/차량 동의·기본 비서·권한·fresh P·정확 문법·취소 우선·발화10초/handoff5초/명령40초·native 정리/lease 게이트는 유지한다.
+- 자동 결과는 앱 내부 `noBackupFilesDir/product-voice-transcripts/<UUID>.json`에 비동기 보관한다. 새 파일 schema2는 기존 메타·nullable 원문·수치와 고정 `reason`을 담으며 기존 schema1 완료파일은 변경 없이 읽는다. 일반 FieldLog schema39·logcat·최근 이벤트·알림·Intent에는 원문을 넣지 않는다. PCM/WAV·업로드·백업·자동 삭제는 추가하지 않는다.
+- 정상 EMPTY/GRAMMAR_NO_MATCH/실제 full-close 후 ACCEPTED는 exact lease/service·현재 요청/readiness·실제 cleanup에서만 원문을 보관한다. 최종 readiness 탈락도 해당 발화를 버리지 않고 수치 행 생성 전에 SEALED·text=null·고정 차단 사유로 바꾼다. 실패·잘림·봉인 요약은 null 원문과 실제 사유만 남기며 인식하지 않은 발화에 이전 문장을 붙이지 않는다. 발화 수치 없는 중복 closure는 보관하지 않는다.
+- 홈 서비스 상태 바로 아래 최근 5개에 원문·판정·시각·고정 사유, 빈 결과·원문 없음·인식 전 잘림을 구분한다. 현재 RAM 결과는 쓰기 실패에도 보이고 앱 재시작 시 최신 완료파일 5개를 비동기 복원한다. 늦은 복원은 현재 RAM 결과 우선·중복 제거로 병합하며 과거 알림/제어 상태·마이크·명령을 재생하지 않는다.
+- reader는 Android `Os.lstat().st_mtim`의 초·나노초를 직접 비교한 mtime 최신순이며 1MiB/4096항목·최대5개·엄격한 JSON token/범위/완료 UUID파일/경로 검사를 적용한다. 비완료·외부 파일은 읽지 않지만 용량에 포함한다. 선택한 손상 파일은 제외하고 고정 읽기 오류를 표시하며 기존 파일을 고치거나 삭제하지 않는다. 원문4096자·queue16·용량 한도를 유지하고 실제 SAVED만 건수다. 저장 실패는 이번 실행 latch로 남아 이전 pending 성공이 더 최신 손실 안내를 지우지 않는다.
+- 상태바에는 원문 없이 **명령 불일치/음성 확인 안 됨 · 음성 대기**, 잘림/처리 실패를 표시한다. 같은 lease의 재대기 PREPARING에는 직전 판정을 유지하고 새 lease·다음 RECOGNIZING·accepted에서 해제한다. microphone FGS를 억지로 남기지 않으며 terminal 실패는 기존 관찰 서비스 알림에 반영한다. 두 알림 탭은 `ACTION_SHOW_VOICE_RESULTS`로 홈에 진입하며 기존 진단 이탈 정리를 거친다.
+- 저장·UI·알림·복원은 관측일 뿐 차량 실행 권한이 아니다. 기존 sherpa 모델·핫워드/디코더 튜닝을 유지하며 개인 재학습·유사 발음 치환·문법 완화는 추가하지 않는다.
+
+## v85 별도 동의 제품 음성 텍스트 진단
+
+이 절은 v85 당시 계약이다. 현재는 위 v86 자동 보관·홈 확인을 따르며 별도 저장 동의 과정은 없다.
+
+- 개발자 진단의 **제품 음성 텍스트 저장**은 기본 OFF인 별도 영속 동의다. 화면 표시·잠금 해제·감지 OFF·진행 작업/회차 없음 상태에서 명시 승인하고 설정 commit 성공 후에만 켠다. 허용·복원은 마이크/차량 실행이나 이전 결과 재생이 아니다.
+- 끄기는 활성 회차에도 허용하며 writer 세대 철회·RAM false를 설정 저장보다 먼저 적용한다. 텍스트 저장만 끄며 음성·차량 실행을 중단하거나 허가하지 않는다. 설정 저장 실패는 이번 실행의 false를 유지하고 다음 실행 전 재확인을 안내한다. 철회 시 대기 원문을 버리고 재동의로 부활시키지 않는다. 이미 권한을 확인해 시작한 파일 쓰기는 완료될 수 있고 기존 파일은 남는다.
+- 정상 `EMPTY / GRAMMAR_NO_MATCH`와 실제 full-close·최종 gate 확인 후 `ACCEPTED`의 최종 원문만 별도로 전달한다. 정확 lease ID/service·현재 요청·미봉인·현재 readiness·현재 저장 동의·마이크/stream 해제를 다시 검사한다. 취소·실패·봉인·늦은 결과·정리 미확인 원문은 저장하지 않는다. 잘려 decode하지 않은 발화에는 원문이 없다.
+- 저장소는 `noBackupFilesDir/product-voice-transcripts/<UUID>.json`, private schema1이다. 일반 수치 사건을 만든 **동일 `FieldRecord`**의 process/trial·wall/elapsed·앱 버전과 lease별 발화 순번·원문·수치를 함께 보관한다. 원문은 `FieldRecord`·일반 로그/logcat·화면 state·최근 이벤트에 넣지 않는다. 일반 FieldLog schema39는 바꾸지 않는다.
+- 텍스트만 저장하며 PCM/WAV·VIN·차량/키 식별자·자동 업로드·백업·자동 삭제는 추가하지 않는다. 주변 대화가 포함될 수 있음을 승인 전에 고지한다. 새 완료 JSON만 추가하고 실패 임시파일도 보존한다. UTF-8 실제 보관량1MiB·원문4096자·비동기 대기16건을 넘으면 고정 실패를 표시하며 기존 파일을 회전/교체하지 않는다.
+- 저장 IO는 별도 worker에서 실행한다. queue 접수는 저장 성공이 아니며 실제 `SAVED`만 이번 실행 건수로 표시한다. 저장 오류·용량·철회는 명령 gate·기한·native 정리·lease 반환을 바꾸지 않는다. 기존 정확 문법·취소 우선·fresh P·발화10초/handoff5초/명령40초는 유지한다.
+- 이전 “보정”은 개인 재학습이 아닌 녹음 replay로 고른 sherpa `modified_beam_search`·paths16·hotword score3.0과 “헤이 테슬라/프렁크 열어줘” 부스트다. 현재 자동 경로에도 적용된다. 수동 Android n-best에서 정확한 다른 후보를 채택했던 효과와는 다르며, 자동 경로는 sherpa 단일 최종 결과를 판정한다. 유사 발음 치환·LLM 교정·개인 ONNX 가중치 학습은 추가하지 않는다.
+
+## v84 음성 발화 확인·lease별 모델 준비·비민감 진단
+
+- VAD는 기존 RMS 임계값에서 실제 PCM의 연속120ms 유성을 확인한 뒤 발화를 시작한다. 200ms pre-roll로 첫 음절을 보존하고 확인 chunk를 중복하지 않는다. 짧은 후보가 무음으로 끊기면 억제 횟수만 증가하며 큰 발화 버퍼·decode를 시작하지 않는다. 실제1초 무음 endpoint와 최대10초 PCM 상한은 유지한다. 이는 소음 억제 휴리스틱이며 화자 인증·실차 최적값의 증거가 아니다.
+- fresh P 등 기존 입장 조건 뒤 `PREPARING`에서 Main 밖으로 모델을 준비하고 완료 후 마이크를 연다. 모델은 한 제품 lease 안에서만 보유하며 수동 인식·다른 회차와 공유하지 않는다. 비명령은 발화별 새 stream을 실제 해제한 뒤 같은 모델로 대기한다. `RECOGNIZING`에는 마이크를 실제 해제하며 이 구간을 연속 청취로 표시하지 않는다.
+- `KoreanSpeechStreamResult.streamCleanupConfirmed`는 stream만의 정리다. 보유 중인 recognizer를 full cleanup으로 표시하지 않는다. standalone `KoreanSpeechResult.cleanupConfirmed`는 여전히 stream+recognizer 전체 정리다. 명령 인정·OFF·P/권한/owner 상실·실패에는 JNI 반환 뒤 owner를 닫고 전체 정리 확인 전 gate/lease를 반환하지 않는다. 생성·해제 불명은 예약 유지·재시작 필요로 실패닫는다.
+- 준비 중에도100ms readiness/P 감시를 유지한다. 발화10초는 확인 시각이 아닌 첫 유성 후보 시작부터이며 decode도 포함한다. handoff5초·명령40초·fresh P·정확 wholephrase·취소 우선·confidence 미제공은 유지한다. Android STT fallback·이전 P 보충·명령 재전송은 없다.
+- schema39 `PRODUCT_VOICE_DIAGNOSTIC`은 `PREPARED / EMPTY / GRAMMAR_NO_MATCH / ACCEPTED / FAILURE / SEALED / CLOSED`와 PCM 바이트 수·유성/끝무음 길이·짧은 후보 억제 횟수·capture/load/decode/cleanup 경과·모델 재사용·실제 해제 Boolean만 기록한다. 원문·PCM·키·VIN·식별자·차량 절대 시각은 추가하지 않는다. ACCEPTED는 전체 정리와 completion gate 확인 뒤에만 기록하며 전송·물리 개방 증거가 아니다.
+- 진단은 실행 권한이 아니며 정확한 활성 lease의 종료 정리까지 관측한다. 구 schema에는 결과를 소급 생성하지 않고 미관측은 null로 둔다. 분석기의 `voiceOutcomes`는 전용 진단 행만 세며 기존 명령 인정·fresh P·프렁크 카운터에 합치지 않는다.
+
+## v83 wake 후 초기 INVALID 제한 재조회와 네이버맵 비교
+
+v82 실차는 인증된 DRIVE에서 기어를 명시 INVALID로 받았다. v83은 최초 fresh P 이전·wake ACK/nominal 뒤에만 같은 GATT에서2초 간격·추가 최대3회 새 인증 DRIVE를 허용한다. ACK부터 고정25초와 원 global 기한 중 이른 기한을 넘기지 않고 각 protocol/write 기한도 유지한다. INVALID는 P가 아니며 대기 중 마이크/명령은0이다. ABSENT/EMPTY/SNA/미지원/D/R/N 및 불량 시각의 P는 재조회로 우회하지 않는다. source 시각과 진단 callback은 재조회 자격/기한의 근거가 아니다.
+
+매번 새 conversation·인증·요청 identity를 사용하고 후속 HELLO에는 최초 재송신 창을 다시 주지 않는다. 새 fresh P가 기존 receipt/source/future 검사를 통과하면 초기 재조회 자격을 영구 해제한다. 이후 monitor/command INVALID는 즉시 봉인한다. wake·BODY·명령·과거 P를 재생하지 않으며 OFF/권한/owner/consent/BT 상실·회차 전체 시계 역행·기한·late RX를 각 경계에서 검사한다. schema38의 `TESLA_CONNECTION_DRIVE_RETRY`는 새 조회 시작 시도이며 SDK 접수나 P 성공이 아니다.
+
+### 설치된 네이버맵의 비교 근거와 한계
+
+설치 앱과의 정적 비교에서는 첫 기어가 유효하지 않아도 별도 상태 조회를 계속할 수 있음을 확인했다. 이전 P를 유효하지 않은 새 결과에 덮어쓰지는 않았다. 차량 깨움·키 등록·동시 BLE 점유나 INVALID 원인은 확인하지 못했다. 자체 구현은 음성·제어 없이 초기 INVALID만 제한 재조회하며, 비교 앱의 조회 주기나 카테고리는 채택하지 않았다.
+
+## v82 인증 DRIVE 기어·Timestamp 진단
+
+v81 실차는 새로운 domain3 인증과 AEAD 검증 DRIVE 응답까지 진행했지만 기어 UNKNOWN으로 중단됐다. 공식 Tesla4.62.3-4697 APK의 `nd0.s1.a.encode`, `nd0.z3.a.encode`, `nd0.l6.a.encode`, `od0.x.a.decode`, `md0.y.a.decode/encode`를 REA로 대조한 결과 요청·응답·기어·Timestamp 태그가 일치한다. 공식도 생략/빈 ShiftState를 명시 P로 보충하지 않는다. 근거는 `비공개 로컬 보관 경로`이다. 실제 입력 형태는 구로그로 복원할 수 없고 wake 직후 기어 준비 지연은 가설이다.
+
+schema37은 제품 연결의 `rxResponse`에 아래 고정 분류만 추가한다. 새 인증 DRIVE 결과를 받은 관측이며 새 권한이나 성공 단계가 아니다.
+
+|필드|값과 의미|
+|---|---|
+|`driveShiftState`|`ABSENT` 필드 없음, `EMPTY` 빈 메시지, `INVALID / P / R / N / D / SNA` 명시 oneof, `UNRECOGNIZED` 알려진 oneof 없이 미지원 wire 필드 존재.|
+|`driveTimestampStatus`|`ABSENT` 없음, `INVALID` seconds/nanos 범위 오류, `NON_POSITIVE` canonical epoch milliseconds≤0, `VALID` canonical 양수. source freshness를 뜻하지 않는다.|
+
+runtime·JSON codec·분석기는 domain3·현재 송수신 destination/요청 상관·암호 응답·AEAD VERIFIED·STATUS_VERIFIED/COMPLETE 전체 문맥을 요구한다. 비인증·실패·다음 RX에는 null이며 schema≤36에는 키를 내보내지 않는다. 실제 protocol 소비만 작업별 집계하고 반복 snapshot을 중복 집계하지 않는다. 원 응답·식별자·미지원 필드 내용·차량 절대 시각은 저장하지 않는다.
+
+gear UNKNOWN 차단·fresh 명시 P·수신/source 시각 경계·단발 wake·기존 HELLO 재송신 창은 그대로다. 이 진단을 이유로 DRIVE 재조회·wake 재실행·P 추정·마이크/명령 허용을 추가하지 않는다. 실행 검증·설치·실차 한계는 [기기 검증 정본](Device-Validation.md#현재-소스설치검증-상태)을 따른다.
+
+## v80 인증된 수면 상태의 단발 BLE 깨움
+
+### 새로 확인한 공식 준비 경계와 한계
+
+Tesla **4.62.3-4697**, APK SHA-256 `22260bc60de8435cc1abb7cc5d6d694057f142904e9209c513ade1626225e8c2`를 실제 REA로 새로 대조했다. `jg0.j.b`는 nonlegacy domain3 요청을 큐에 넣기 **전**, ONLINE이 아니면 `sc0.g.C/B`의 조건부 `wakeVehicleIfNeeded`를 거친다. `letSleep`이면 생략하고, ONLINE·최근 wake도 생략하며, 명령은 domain2의 `RKE_ACTION_WAKE_VEHICLE`다. 공식은 wake 성공/실패 뒤 원 요청을 계속할 수 있다.
+
+핵심 근거는 domain3 전단 `ev_6555652e8a7296ce7d8ad2a6aacd94be9dcd0416d206540899d073a4e0309c48`, wake 정책 `ev_44fad79eaa51d07946442f29ab4f5dd0ce1da15d22d8a309ff7fb56abad12205`, RKE action/transport `ev_be2916fb934f4435ddddf3c9417660d2ada36e60af03e68e8880b6ede2f95c42`다. 보존본은 `비공개 로컬 보관 경로`이다.
+
+**v79 당시 차량/Infotainment가 잠들어 있었는지는 미확정이다.** domain2 선행 인증·legacy GET_STATUS·passive DRIVE 권한·앱 metadata가 모든 domain3의 필수 조건이라는 근거는 없다. 공식 route=UUID·전체 프레임 legacy write·요청 MTU250과 우리 구현의 차이도 원인으로 입증되지 않아 복사하지 않았다. 이번 수정은 사용자 승인으로 조건부 깨움 준비를 추가하는 것이지 과거 실패 원인을 확정한 것이 아니다.
+
+[고정 SDK의 BLE wake 설정](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/cmd/tesla-control/commands.go#L145-L157)은 asleep Infotainment가 인증할 수 없어 VCSEC만 먼저 인증한다고 설명한다. [BODY 조회](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/vehicle/state.go#L11-L14)는 asleep에서도 동작하며 [실제 RKE wake](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/vehicle/vcsec.go)는 별도 차량 명령이다. 휴대폰 CPU wake lock과 차량 wake를 구분한다.
+
+### 승인된 실제 준비 경로
+
+사용자는 **인증된 차량 상태에서 ASLEEP이 확인됐을 때만 BLE 깨우기1회**를 허용했다. 우리 구현은 공식의 UNKNOWN에서도 가능한 wake를 그대로 복제하지 않고 다음 조건으로 제한한다.
+
+1. 새 접근 회차에서 기존 앱 키로 domain2 BODY를 인증·복호화한다. 원 BODY ingress가 없거나 음수·미래·5초 초과면 중단한다.
+2. 명시 ASLEEP일 때만 같은 GATT·같은 owner에 묶인 wake 전용 conversation을 한 번 만든다. AWAKE·UNKNOWN은 **깨움 없이 읽기 전용 DRIVE**로 진행한다. UNKNOWN은 P가 아니다.
+3. wake는 RKE30만 생성한다. 암호화·TTL과 각 실제 wake 조각의 SDK 발급 직전에 BODY freshness·owner/OFF·권한·동의·원 기한을 재검사한다. wake TTL/송신 허용은 BODY receipt+5초와 기존 전체 기한 안이다. 이5초는 우리 송신 허용 정책이며 차량 기상 소요시간 보증이 아니다.
+4. SDK201 미접수는 기존 pump의 같은 frame/chunk만 제한적으로 재발급한다. 접수 뒤 timeout·거절·회차 복원으로 wake를 새로 만들거나 재전송하지 않는다. 기존 전체 기한·각 실제 protocol 단계10초는 유지하고 Waiting/타 요청 입력으로 갱신하지 않는다.
+5. AEAD ACK는 물리 기상/P 증거가 아니다. 현재 요청과 일치하는 **signature/payload 없는 명목 status OK/fault0**은 별도 `NOMINAL_ACK`로 남기고 독립적인 새 domain3 읽기만 허용한다. 이는 인증된 wake 성공이 아니다. 그 밖의 UNCONFIRMED·REJECTED·timeout은 중단한다.
+6. 새로운 domain3 인증과 fresh 명시 P가 완료돼야 제품 마이크를 시작한다. 이후2초 DRIVE poll·음성 뒤 새 P·단발 프렁크/BODY 확인은 기존 경로이며 BODY/wake preflight를 반복하지 않는다.
+
+### 목적·로그·표현 경계
+
+`VEHICLE_WAKE`·`Send.wake`·`WakeResult`는 프렁크 목적·actuator·reply와 구분한다. 수동 조회/등록·프렁크 시퀀스에서 wake 결과나 frame이 섞이면 실패닫는다. `TeslaConnectionWakePolicy`는 실제 인증 BODY의 원 ingress와 단발 준비 소유권을 갖고 이전 회차 상태를 재생하지 않는다.
+
+`CHECKING_VEHICLE`은 인증·수면 상태 확인, `WAKING_VEHICLE`은 조건부 깨움 준비·응답 확인이다. 두 단계 모두 P·마이크 준비 완료로 표시하지 않는다. 홈·설정의 동의 근처에 차량 전력 증가 가능성을 안내하고 OFF/동의 철회는 계속 허용한다. 기상/차량 데이터 조회를 위해 잠금 해제·passive DRIVE 권한·cloud·UWB를 추가하지 않는다.
+
+schema35는 새 단계·고정 wake 이벤트·`WAKE_RESULT`와 고정 disposition만 지원하며1..34 역사 의미를 보존한다. 키·VIN·주소·route/UUID·packet 원문·새 식별 hash·제품 PCM/인식 원문은 기록하지 않는다. 실제 실행 검증과 설치 여부는 [기기 검증 정본](Device-Validation.md#현재-소스설치검증-상태)을 따른다.
+
+### 기존 프렁크 관측 누락 복구
+
+같은 GATT가 프렁크 시퀀스로 넘어간 뒤의 DRIVE/ACTION/BODY 수신도 일반 conversation과 같은 실제 protocol 소비 카운터·원 ingress·결과 관측을 사용한다. 내부 ACTION의 `FRUNK_RESULT`가 다음 BODY `Send`로 바뀌어도 원 판정을 보존하고 예외·OFF 재진입에는 다음 전송을 봉인한다. 목적·명령 조건을 바꾸거나 옛 로그의 누락 판정을 복원하지 않는다.
+
+분석기는 KEY 정리로 활성 제품 scope를 닫되, 같은 process/trial/시계 segment의 바로 다음 제품 사건이 FRUNK 정리일 때만 같은 세션 꼬리에 포함한다. 새로운 시작·다른 사건·다른 scope와 섞지 않고 실제 정리 이벤트와 Boolean이 없으면 성공을 채우지 않는다.
+
+## v78 검증 모델 연결
+
+v77까지 제품 자동 음성에는 Android STT만 연결되어 있었고, 기존에 평가한 sherpa 모델은 비교진단에만 쓰였다. v78은 `KoreanSpeechRecognizer`를 제품과 비교진단의 공통 인식기로 사용한다. **BLE 인증·P 조회 실패를 수정한 것은 아니다.**
+
+- APK의 기존 한국어 zipformer int8 모델과 `modified_beam_search`·`maxActivePaths=16`·`hotwordsScore=3.0`을 그대로 쓴다. 16 kHz mono PCM16·featureDim80·dither0·CPU2 threads·bpe 설정과 `SpeechCommandPhrases.sherpaHotwords`도 유지한다. 새 모델·재학습·LLM 보정·호출어 변형 허용은 추가하지 않는다.
+- v78 당시에는 완전한 발화와 실제 마이크 해제 뒤 모델을 매번 로드·decode하고 stream와 recognizer를 함께 해제했다. 현재 제품 수명은 [v84 prepared owner](#v84-음성-발화-확인lease별-모델-준비비민감-진단)를 따른다. PCM 전체 접수·decode 완료·단일 최종 원문의 exact wholephrase·취소 우선·confidence 미제공 `null` 정책은 유지한다.
+- 발화 시작부터10초·인정 후 handoff5초·명령40초는 그대로다. v78은 모델 로드도 발화10초에 포함했으며 v84는 발화 대기 전 준비한다. JNI를 강제 중단한 것처럼 표시하지 않는다. OFF·P/권한/owner 상실·기한에 Main이 결과를 봉인하고 실제 native 반환·정리까지 예약을 유지하며 늦은 결과를 폐기한다.
+- 모델 누락·로드/인식 실패는 고정 사유로 종료하며 Android STT fallback은 없다. 생성 중 예외나 어느 release든 실패하여 실제 정리를 확인하지 못하면 재시작 필요·예약 유지·명령 차단을 우선한다. stream 해제 실패에도 recognizer 해제를 시도한다.
+- 제품 PCM은 RAM 전용이며 현재 개발 확인용 원문은 [v86 자동 결과 보관](#v86-자동-결과-보관홈-확인실패-알림)과 홈 전용 결과에만 허용한다. 수동 Android STT·별도 수동 `FrunkVoiceProbe`는 기존 경로를 유지하며 제품의 대체 엔진이 아니다. 진단의 **제품 모델 비교 인식** 결과는 계속 차량 제어에 사용하지 않는다.
+
+## v79 성공 경로 대조·실패 분리
+
+**차량 인증 무응답의 근본 원인은 미확정이며 인증·송신 동작은 변경하지 않았다.** v78 실차 두 회차는 BLE 연결·CCCD·쓰기 callback을 마쳤지만 현재 domain3 HELLO에 맞는 응답 없이 `HANDSHAKING / PROTOCOL_STAGE` 기한이 만료됐다. 완성 frame12개를 모두 protocol이 소비했고 domain2 11개·from 없는1개였다. fresh P·제품 마이크·프렁크 명령은 없었다. 다른 요청의 domain2 fault를 현재 키 거절로 해석하지 않는다.
+
+### 과거 성공과 현재 실패
+
+- v24 실차 원시 로그의 `TESLA_KEY_DRIVE_STATE_VERIFIED → COMPLETE → LOCAL_CLOSED`와 당시 UI의 P 관측은 유효한 성공 이력이다. 기어 값 자체는 당시 원시 로그에 없으며 현재 fresh P로 재사용하지 않는다.
+- v72·v75의 같은 GATT 위치 sidecar에도 domain3 `SESSION_READY / HANDSHAKE_ACCEPTED`가 있다. domain2 primary 인증 뒤 시작한 경로지만, v24는 직접 domain3 조회 성공이므로 domain2 선행을 필수 해결책으로 추가하지 않는다.
+- Git `355f175`는 정확한 v24 설치 소스가 아니라 **성공 직후의 v25 인접 소스**다. 현재와 HELLO builder·domain3·16바이트 route/UUID·P256 공개키·SessionInfo HMAC·BE16·요청 MTU247·DEFAULT write 계약이 같고, `.proto`9개는 바이트 단위로 동일하다.
+- autoConnect false→true, CDM 대상→fresh ScanResult, callback 항상 post, 기존 키 read-only 로드, 연결 settle·BUSY 처리에는 차이가 있다. 어느 차이도 이번 무응답의 원인으로 확인되지 않았다. timeout 연장·추가 retry·wake·VCSEC 선행·상관관계 완화·키 교체를 해결책으로 넣지 않는다.
+
+### 실제 수정 범위
+
+공통 `VehicleServicePresentation`에서 연결 실패를 `CONNECTION_FAILED`, 음성 실패를 `VOICE_FAILED`로 분리한다. 연결 실패·음성 IDLE을 음성 엔진 오류로 표시하지 않는다. 정상 정리 뒤 음성이 STOPPED여도 **연결이 STOPPED/FAILED이며 종료 reason이 같을 때만** 모델 누락·로드·decode 오류를 음성 실패로 보존한다. 이전 회차의 모델 오류가 새 연결 진행이나 새 연결의 GATT/기한 실패를 덮지 않는다. 진행 단계의 잔존 reason이나 정상 취소·P 상실을 모델 실패로 승격하지 않는다. 정리 불명·OFF·중지 우선순위와 제어 게이트는 유지한다. 홈·설정·진단·서비스 알림은 같은 표현을 사용한다.
+
+### 차량 없는 추가 송신 검증의 한계
+
+cache의 독립 Java smoke는 생산 session·conversation·native owner·write pump와 기존 독립 상대편을 실행한다. MTU23/247/517 × SDK0 또는201→201→0 × 정상 domain3 응답 유무의12조합을 확인했다. submit 반환 뒤 callback 전 빌린 chunk를 소비하여 HELLO framing·공개키/route/UUID·버퍼 수명을 검사했고, foreign frame 뒤 정상 응답은 암호화 DRIVE/P로 진행하며 정상 응답이 없으면 기존 기한에 종료·P/actuator0이었다. 실제 Android `writeCharacteristic` adapter·차량 RF·실제 키 전송 검증은 아니다.
+
+근거: `비공개 로컬 보관 경로`의 `comparison-summary.json`, `historical-proto-comparison.json`, `v24-commit-355f175/`, 호스트·화면 검증 결과. 변경·설치·실차 성공을 구분하며 세부 실행 결과는 [기기 검증 정본](Device-Validation.md#현재-소스설치검증-상태)을 따른다.
+
+## v77 DRIVE 인증 비교·관측 보존
+
+**v76의 연결·P 조회 실패 원인은 미확정이며 이번 변경은 통신 해결이 아니다.** 실차에서 GATT 구독·notification6개 뒤 `DEADLINE_EXPIRED`를 관측했지만, UI의 `AUTHENTICATING`는 `HANDSHAKING`과 `READING_STATUS`를 함께 표시했다. RAM의 상세 GATT 관측이 영속 로그에서 누락되어 인증 거절·차량 sleep·공식 앱 충돌 중 어느 것도 확정할 수 없다.
+
+### 현재 공식 APK와의 REA 비교
+
+대상은 **Tesla4.62.3-4697**, APK SHA-256 `22260bc60de8435cc1abb7cc5d6d694057f142904e9209c513ade1626225e8c2`다. 아래 obfuscated 이름은 이 APK에만 해당한다. 과거 4.61.6의 클래스명을 현재 본문 근거로 재사용하지 않았다.
+
+|경계|현재 APK에서 확인한 사실과 판단|
+|---|---|
+|주행 상태 조회|`CommandActionsKt.getDomain`, `CommandActionExtensionsKt.getRequiresSigning`, `lf0.l.f`, `jg0.j.S/x`는 INFOTAINMENT domain3의 세션이 없으면 같은 domain의 SessionInfo를 먼저 요청한다. 조사한 요청 gate에서 domain2 선행 인증 필수성은 확인되지 않았다. `GetDriveState`와 VCSEC DRIVE 권한 부여는 별개다.|
+|SessionInfo HMAC|`me0.e.b`의 `"session info"` 파생키·signature type·VIN personalization·request UUID challenge·원본 SessionInfo bytes 구성이 우리 구현과 핵심적으로 같다. 공식의 FW별 검증 예외·재조회는 존재하지만 해당 차량 조건이 미관측이므로 인증 완화·재시도를 이식하지 않는다.|
+|응답과 ACK|`RoutableMessageDecoder.b/f/h`, `me0.c.c`는 payload 없는 domain3 OK를 정상 데이터로 만들지 않고 WAIT도 별도 오류로 평가한다. “정상 plaintext ACK를 우리가 버려 실패했다”는 결론을 뒷받침하지 않는다.|
+|상관관계·암호|`lf0.l.m`·`qe0.d.a/b`는 to-route로 요청을 찾는다. request hash와 AEAD metadata의 핵심 구성도 대조했다. 공식의 전체 upstream UUID 비교·replay 소비 정책은 미확정이며 우리 domain/route/UUID/HMAC/AEAD/counter 경계를 완화하지 않는다.|
+|세션과 기한|공식은 domain별 세션을 재사용하고 우리는 같은 GATT에서 poll마다 새 conversation을 만든다. 실제 차이지만 최초 10초 실패의 원인이라는 증거는 없다. 공식의 조건부 timer 값을 그대로 복사하지 않는다.|
+
+공개 [`vehicle-command`의 상태 조회](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/vehicle/state.go)와 [dispatcher](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/internal/dispatcher/dispatcher.go)도 고정 commit으로 대조했다. asleep 지원 설명은 `BodyControllerState`에 관한 것이며 DRIVE_STATE까지 확대하지 않는다. SDK의 고정 route와 우리 요청별 route 차이만으로 결함을 단정하지 않는다.
+
+근거는 `비공개 로컬 보관 경로`과 `rea-evidence.json`에 보존한다. bundle347 records는 **이전 세션 자료를 포함한 전체 보존량**이지 이번 신규 분석 횟수가 아니다. 핵심 Evidence는 HMAC `ev_2ffd4737f3e7c28b7fa2d66a90841a00b3ffe0685524ab80da038c36289e671a`, domain gate `ev_8201696b1285ee2e4adb021e5a873ade5755cf2888c5a56be4988e17893c26f5`, domain3 decoder `ev_e8e22ca262734c21bd8e69f7ca798a3eea83b593a88cdf6d1d2319ec09b40ed1`다. 일부 consumer 본문 부재·type-inference warning이 있고 정적 디컴파일은 실제 차량 실행 증거가 아니다.
+
+### 수정한 관측 계약
+
+- schema34의 `connectionObservation`은 정확한 `TESLA_CONNECTION_GATT_OBSERVATION` 행에만 기록한다. 이벤트 호출 시점의 immutable 관측을 캡처하여 main queue 지연 중 최신 상태로 덮이지 않게 한다. schema1..33·다른 이벤트·미관측은 `null`이며 과거 누락을 복원한 것처럼 표시하지 않는다.
+- 내부 단계·deadline 원인, notification/frame/실제 protocol 소비 분모, SDK 접수/쓰기 callback, domain/route/UUID 불일치·HMAC/AEAD 판정을 구분한다. 원 UUID·route·키·VIN·payload·PCM·발화 원문은 추가 저장하지 않는다.
+- 분석기는 process/trial/clock segment/operation별로 분리한다. 모든 앞선 snapshot의 counter 상한보다 증가한 실제 `PROTOCOL` 행만 새 결과로 센다. 반복 snapshot·역행 counter·빠진 판정을 성공이나 새로운 응답으로 보충하지 않는다.
+- 기존 protocol·기한·재시도·wake·제품 음성/프렁크 허용 조건은 변경하지 않는다. SDK 접수·CCCD 성공·notification 수를 인증·fresh P·물리 개방으로 승격하지 않는다.
+
+
+## v76 연결 기반 음성 프렁크
+
+### 제품 경로와 승인
+
+`새 정확 BLE 광고 → 스캔 정지 확인 → 기존 앱 키·단일 GATT 인증 → fresh 명시 DRIVE P → 연결 동안 제품 음성 대기 → 기존 정확 명령 인정 → 마이크·로컬 인식 자원 실제 정리 → 같은 GATT의 새 DRIVE P → 단발 ACTION → 후속 BODY → 정리`가 현재 경로다. UWB·좌표 거리/방향은 입장·음성·명령 조건이 아니며 해당 실행/UI/전용 권한·전용 테스트는 제거했다. 공유 암호·GATT·보안 회귀는 connection 경로로 이관하고 역사 REA·로그·분석기와 `logging/legacy` 모델은 보존한다. 아래 과거 클래스명은 현재 실행 소스가 존재한다는 뜻이 아니다.
+
+- 사용자가 시스템 설정에서 Hey Tesla를 기본 비서로 직접 선택해야 한다. 선택되어 ready인 `AssistantService` 인스턴스만 RAM ticket·정확한 runtime lease로 `ProductMicrophoneService`를 시작한다. 기본 비서 자동 변경·권한 자동 승인·이전 Intent 재생은 없다.
+- 서비스 ON과 별개인 `productVoiceConsent`는 기본 false·별도 영속 동의다. 기존 ON·앱 키 등록·과거 실차 시험 동의를 새 마이크/제어 승인으로 승격하지 않는다. 화면 표시·잠금 해제 상태의 명시 행동으로 동의하고, 허용은 새 접근 회차부터 적용한다.
+- 동의는 인증된 P 동안 마이크가 대기하고 정확 명령에 실제 프렁크를 요청한다는 점, 기어 조회 지연, 연결/기어 불명 시 중지, 제품 녹음 미저장을 포함한다. 음성은 화자 인증이 아니며 타인 발화·재생 음성도 실행될 위험을 고지한다. 별도 확인 발화나 매사용 화면 승인은 추가하지 않는다.
+- OFF·동의 철회는 즉시 음성/송신을 봉인한다. false 저장 실패도 RAM 동의는 false이고 현재 회차를 종료하며 `productVoiceConsentSaveFailed`를 유지한다. 저장 실패를 철회 성공으로 숨기거나 기존 ON으로 동의를 복구하지 않는다.
+
+### 연결·기어 신선도와 단발 전송
+
+- `TeslaServiceConnectionRequest`는 현재 owner/token/후보/회차/association/VIN·원 광고 `BluetoothDevice`/timestamp에 묶인다. 최초 SDK 연결 발급 전 광고10초 신선도와 native scan pause를 확인한다. 실제 반환 GATT를 소유한 뒤에도 owner·권한·BT·ON과 유한 초기 연결/단계 기한은 유지하며 과거 `connectedObserved`를 live 연결로 쓰지 않는다.
+- `TeslaParkMonitor`는 인증된 명시 P만 받는다. 같은 GATT에서 매번 새 `TeslaBleConversation(DRIVE_STATE, READ_ONLY)`를 만들어 순차 조회하며 outstanding 요청은 하나다. 유효 응답 후2초에 다음 조회를 예약한다. HMAC/AEAD·domain/route/UUID·counter/replay·원 ingress와 요청 기한을 그대로 적용한다.
+- P는 RX monotonic5초·source wall10초·미래 skew2초를 모두 만족해야 한다. 시각 누락·D/R/N/UNKNOWN·stale·응답 실패·disconnect에는 즉시 로컬 음성/새 명령을 봉인하고 회차를 종료한다. BLE 조회 지연이 있으므로 실제 D 전환과 동시 감지를 보장하지 않는다. 트래픽·타이머·지난 P로 freshness/watchdog을 연장하지 않는다.
+- 연결 음성 대기에 고정10초/90초 상한은 없다. 새 유효 P가 계속 있어야 유지되며 초기 연결은 유한하다. 종료 후 같은 접근에서 자동 재입장하지 않고 실제 후보 철회/만료 뒤 새 광고를 기다린다. pause·GATT·정리 시간을 이탈로 세지 않는다.
+- 인정된 명령은 오디오 정리 확인과 `FrunkVoicePolicy.takeForDispatch()` 단발 소진 뒤에만 `dispatchServiceFrunk()`로 넘긴다. 진행 중 monitor 응답이 있으면 원 conversation에서 drain·검증한 후 같은 GATT의 새 `TeslaFrunkSequence(DRIVE → ACTION → BODY)`로 전환한다. monitor P를 명령용 P로 재사용하거나 두 번째 GATT를 열지 않는다.
+- 명령 인정부터40초 안에 새 P와 SDK 전송 직전 조건을 재검사하고 프렁크 ACTION은 단발이다. SDK 접수 이후 결과 불명 명령은 재전송하지 않는다. 명령 접수·차량 ACK·후속 BODY의 OPEN·후드 물리 개방은 별개이며 ACK와 OPEN이 모두 확인되지 않으면 전체 완료로 표시하지 않는다.
+
+### 제품 음성·서비스 소유권
+
+- `speech/product`는 idle capture에서 발화 시작을 찾고 bounded PCM을 RAM에만 모은다. 발화 시작부터 기존 COMMAND10초 안에 최종 판정하며 무음 때문에10초마다 세션을 재시작하지 않는다. 잘린 긴 발화·부분 결과·PCM 전체 접수/decode 완료 미확인은 명령이 아니다.
+- 마이크를 실제 해제한 뒤 [v84 lease별 로컬 인식기](#v84-음성-발화-확인lease별-모델-준비비민감-진단)의 새 stream으로 decode한다. 인식 중에는 수집 중으로 표시하지 않는다. 단일 최종 결과의 정확 wholephrase·취소 우선·점수 미제공 정책을 재사용한다. 빈 결과·문법 불일치만 readiness 재검사 후 같은 모델로 새 발화를 기다리고 취소·실패·기한 만료는 회차 종료다.
+- 인정 후 handoff5초 내에도 마이크·native stream/recognizer·FGS 정리를 모두 확인해야 한다. PCM·원문은 일반 state/로그/파일에 내보내지 않고, 원문만 [v86 개발 확인용 결과](#v86-자동-결과-보관홈-확인실패-알림)의 전용 state/파일에 보관한다. 기존 수동 진단 녹음·원문 보관을 제품 PCM 자동 저장의 예외로 넓히지 않는다.
+- AltBeacon `BeaconService`는 connectedDevice FGS만, `ObservationService`는 감지 owner/회차·scan pause·BLE 예약을, `ProductMicrophoneService`는 microphone FGS·제품 오디오를 소유한다. 통화/communication·silenced·권한/기본 비서/owner 상실은 음성을 봉인한다.
+- 제품 서비스는 `START_NOT_STICKY`이며 late callback/start·프로세스 복원으로 이전 음성/명령을 재생하지 않는다. 전체 회차의 예약 반환·감지 재개는 audio와 BLE 정리가 모두 확인된 뒤다. 정리 불명은 참조·예약/필요 FGS·재입장 차단을 유지하고 재시작 필요로 표시한다.
+
+### 역사 자료의 범위
+
+**이 아래 v75 이하의 REA·실측·프로토콜 설명은 각 버전 당시의 역사 자료다.** UWB/FiRa·좌표 구현·전용 권한·무음성 서비스·수동 시험만 실제 제어 허용 등의 문장은 v76 운영 계약이 아니다. 과거 함수/경로/회귀 수·RF 미확정 원인은 삭제하거나 현재 성공으로 재작성하지 않는다. v72 RX_TIMEOUT, v73 초기화/정리 실패, v74 초기 협상 만료와 v75 수신 우선 수정의 직접 인과는 여전히 미확정이며 v76 전환이 이를 해결했다는 뜻이 아니다.
+
+
+## v75 이미 수신한 FiRa와 새 송신의 순서
+
+### 공식 앱 REA·동시간대 실행 대조
+
+대상은 기존 보존 **Tesla4.61.6-4647** APK이며 SHA-256은 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`다. 이번 추가 메서드 검사18개와 기존 자료를 함께 보존한 `비공개 로컬 보관 경로`은 총190 records다. 전체190개를 새 분석으로 세지 않는다. 비교 요약은 `comparison-summary.json`, 민감값 없는 공식 실행 순서는 `official-auth-sequence-facts.json`이다.
+
+|경계|확인한 사실·판정|
+|---|---|
+|초기 단말정보→capabilities|공식 `u1.k/x0`, `ag0.n.l`, `oc0.e.D/E`와 앱을 대조했다. field40 모델 SHA-256·자체 앱 버전·enum·proto3 기본값 및 field40→58 실제 송신 순서에서 확정 결함은 발견하지 못했다. 공식 값 복사나 Tesla 앱 버전 위장은 하지 않는다.|
+|차량 인증 응답|공식 로그에서 15:08:04.106/.199 DRIVE 요청, .110/.200 `rejection:none` 응답이 metadata15:08:05.129·FiRa15:08:05.367보다 앞선다. `ag0.n.i`→`oc0.e.c`와 `ag0.j.S`의 요청별 인증 경로도 확인했다. **HMAC SessionInfo와 DRIVE 권한 응답은 별개**이며, 선행 사실만으로 FiRa 필수조건·이번 실패 원인을 확정하지 않는다. 자동 DRIVE 응답을 이식하지 않는다.|
+|요청 context 관리|공식 요청별 보관과 우리 current-only 정책의 차이 자체를 결함으로 단정하지 않는다. 이미 수신한 current 응답을 앱 내부 새 송신이 추월하는 문제는 별도 생산 경로 재현으로 확인했다. previous context 허용·키 보관 확대로 해결하지 않는다.|
+|공식 native 측정|동시간대 공식 세션의 ACTIVE를 확인했지만 data notification은 DISABLE이다. OS metric의 report0을 RF 실패로 해석하지 않으며, 공식 병행 실행도 우리 실패의 원인으로 확정하지 않는다.|
+
+주요 새 Evidence: metadata `ev_ace5767ed9bafca14edc237d664b94d3f7da0ce1db239c574cca580a5b648e96`, `ev_2b14fa635ab880bd4768d1a83301f077615df36df75bfff3d320d7f4b1335bb9`, capabilities `ev_e30837a8c29eee1ff5c03651cd6c4af713fc8cf4756981238001f7061af2b27c`, auth response `ev_6d714419b3b83fb456320a0fb672d543da980e462485b4f088d7806c287ed974`, `ev_d880d6738a4bbe9a51f30ec19eb8c0d24f91f18fc06f7968fd535b5b92a69c92`, 요청별 관리 `ev_829e8a142fe9cd310a33c550c0e42a13f05ce2a80a5b87b7176e04e44ec16de9`.
+
+### 재현한 로컬 결함과 수정 계약
+
+- 독립 peer가 **GET_MODEL + 현재 요청에 결합한 암호 FiRa**를 한 notification으로 보냈다. 기존 consumer는 GET_MODEL 응답을 먼저 생성·송신하며 current request identity/hash를 회전했다. 이미 RX 큐에 있던 뒤의 유효 FiRa가 `PREVIOUS/ROUTE_MISMATCH`, AEAD `NOT_ATTEMPTED`로 제외됐다. 이는 합성 입력을 실제 생산 consumer에서 실행한 재현이며 v74 실차 packet의 복원은 아니다.
+- `TeslaBleKeySession.sendNextUwb()`는 이미 큐에 있는 완성 RX를 소비하기 전 새 UWB 요청을 만들지 않는다. 기존 sidecar 전용 RX 가드를 primary metadata·FiRa·battery 송신에도 적용했다. STOP도 새 metadata 송신보다 먼저 처리하지만 정상 STOP을 무조건 즉시 세션 봉인으로 바꾸지는 않는다.
+- `sendFira()`와 `sendDeviceInfo()`는 같은 슬롯 검사를 사용한다. **기존 active frame1+대기 body8의 총9슬롯**을 유지하면서 active가 없을 때 대기 body가 빈 슬롯을 사용할 수 있다. 인증 frame+metadata 요청7개의 허용된 RX 묶음을 새 overflow로 만들지 않는다. 전체 프로세스 메모리가9개 body뿐이라는 뜻은 아니며 기존 battery·sidecar 별도 슬롯은 유지한다.
+- 현재 request 결합·AEAD·replay·이전 context 거부, OFF/owner/기한·봉인·소거 정책을 유지한다. timeout 연장·재시도·RF 설정·서비스 토글·DRIVE 응답·자동 음성·프렁크·로그 필드를 추가하지 않았다.
+
+수정 전 실패4개/통과1개였던 새 회귀5개와 같은 생산 smoke의 수정 후 결과는 [v75 검증](Device-Validation.md#0750--수신-우선과-요청-context-보존)에 둔다. **로그 보강만 한 변경은 아니지만, v74 실차에서 같은 입력 조합이 있었는지는 미확인이다. 유효 거리 수신·기존 RX_TIMEOUT 해결을 선언하지 않는다.**
+
+## v74 열기 실패 terminal과 정리 완료
+
+### 확인한 결함과 근거
+
+- [AOSP Android16 `RangingServiceManager.SessionListener.onSessionClosed`](https://android.googlesource.com/platform/packages/modules/Uwb/+/refs/heads/android16-release/ranging/service/java/com/android/server/ranging/RangingServiceManager.java?format=HTML)는 세션을 제거한 뒤 이전 상태가 ACTIVE면 `onClosed`, 그 외에는 **`onOpenFailed`를 terminal로 전달**한다. 제거된 세션에 다시 stop을 요청해도 별도 종료 콜백을 보장하지 않는다.
+- 기존 보존 `fix-v72-20261029-170053-qa65pmxr/service-ranging-dexdump.txt:40465-40537`에서도 같은 분기를 확인했다. 이는 10월23일 회수 모듈의 SDK dexdump이며 새 REA 디컴파일 결과나 오늘 탑재 모듈과의 동일성 재검증이 아니다.
+- v73 앱은 `onOpenFailed`를 STARTING/OPEN 데이터 콜백 게이트로 처리했다. 전체 peer 중지 뒤 CLOSING이면 버리고, 먼저 도착해도 별도 `onClosed`를 기다렸다. 상위 endpoint도 closing 중 open failure를 버려 원인이 `NATIVE_CLOSE_TIMEOUT`으로 바뀔 수 있었다. 실차 순서는 이 경로와 부합하지만 당시 원시 콜백 도착은 미관측이다.
+
+### 수정 계약
+
+- 실제 같은 세션의 `onOpenFailed`에서 먼저 terminal 봉인·timeout 해제·소유 바이트 소거를 수행하고 원 실패를 전달한다. 실패 전달이 끝난 뒤 close completion을 처리하며, listener의 재진입 close도 그 순서를 지킨다. 별도 native close 요청이나 가짜 `onClosed`를 추가하지 않는다.
+- 상위는 현재 endpoint의 `NATIVE_OPEN_FAILED`·`openFailedReason`을 유지한다. 전원 peer 중지로 시작한 close와 명시 stop·동일 ID 교체·사용자 OFF/취소·만료 처리를 구분하고, 실패 상태 게시 뒤에도 소유권을 재검사한다. 구세대 실패가 새 세션이나 이미 결정된 취소 결과를 덮지 않는다.
+- start/close 예외·이미 도달한5초 정리 기한·기존 cleanup failure는 terminal 뒤에도 해제하지 않는다. peer STOPPED나 close 호출 반환만으로 정상 종료를 선언하지 않고 실제 terminal 부재는 기존 timeout으로 실패한다.
+- 실제 종료 확인과 측정 실패를 분리한다. 실패 세션의 자원을 정상 반환할 수 있어도 거리/차량 성공은 아니며, GATT·등록 해제 등 다른 정리 실패가 있으면 기존 예약·FGS 유지 경계를 보존한다. RF 설정·차량 송신·retry·권한·측정 기한·FieldLog schema32는 유지한다.
+
+호스트 회귀·독립 생산 consumer 실행과 v73 실차/진단 원복 근거는 [v74 검증](Device-Validation.md#0740--초기-uwb-실패의-종료-처리)에 둔다. **v74 데이터 보존 설치 후 저장 OFF·앱 재실행·서비스 및 활성 알림 없음**을 확인했다. 이는 설치 교체 후 상태이며 **실제 SDK 실패 콜백 뒤 정상 정리·RF 거리 수신은 미검증**이다. 추가 차량 방문 전에 종료 처리의 호스트 검증을 먼저 완료했으며, 이번 변경을 최초 UWB 실패의 해결로 보고하지 않는다.
+
+## v73 좌표 시각 분류와 v72 UWB 대조
+
+### UWB에서 확인한 경계와 남은 원인
+
+보존 자료는 `field-v72-20261030-094316-nl4uxz96/`, 재대조·호스트 검증은 `비공개 로컬 보관 경로`다. 공식 Tesla4.61.6-4647의 기존 REA `pg0.f.o`·GMS `o6.b.C1984b.invokeSuspend` 및 보존 시스템 DEX와 실제 UCI를 대조했다. response와 native plan의 ID·STS·주소·channel/preamble 소유권, uint32·config namespace·controller 역할에서 확정 앱 결함을 발견하지 못했다. 독립 peer 통과가 실제 차량의 응답 수락이나 OEM RF 동등성을 증명하지는 않는다.
+
+|실제 UCI 대조|공식 Tesla / Hey Tesla|판정|
+|---|---|---|
+|`RangingRoundControl` / `ResultReportConfig`|양쪽3 / 양쪽1|RRRM·control message 켜짐, ranging-control phase 꺼짐, ToF report. notification 차이를 RF report-phase 차이로 추정하지 않는다.|
+|slot / interval / peer 수|양쪽2400 RSTU / 200ms / 5|one-to-many·provisioned STS·channel9·SP3/BPRF·hopping·block stride·key rotation도 동일하다.|
+|preamble / notification|12/9, 0/1|별도 세션 preamble 차이는 오류 증거가 아니다. 공식 report0은 notification0 때문에 성공·실패 근거가 될 수 없다.|
+|실제 session priority|60/70|SDK 요청은 양쪽50이나 하위 적용은 다르다. 공식 우선순위가 더 높아 실패했다는 설명과 맞지 않으며 충돌 자체를 배제하지도 않는다.|
+|키·시작|양쪽 SessionKey16바이트, 우리 config status0·ACTIVE/reason0|키를 native에 아예 전달하지 않은 것은 아니다. 차량과의 최종 일치·수락·RF 송신 성공까지 입증하지 않는다.|
+
+원 logcat 근거는 공식 `:9237`, 우리 `:10008`이며 민감값 없는 재투영은 `sanitized-uci-comparison.json`이다. [FiRa encoder 비트 정의](https://android.googlesource.com/platform/packages/modules/Uwb/+/adcc2fe7aadac53e67402901e2246af21699749d/service/java/com/android/server/uwb/params/FiraEncoder.java?format=HTML)와 enum 공간을 구분한다. 보존 generic DEX의 NTF0은 RRRM까지 끄므로 **공식 notification0 복사는 실제 공식 설정 복제가 아니다**. timeout 연장·peer 재정렬·주소 뒤집기·retry 추가도 채택하지 않는다.
+
+하위 RX_TIMEOUT은 수신 실패 단계의 결과이고, 대상별10초 타이머는 그 실패가 계속된 뒤의 종료 정책이다. `SessionMap: No Key`는 양쪽에 있고, multicast 제거 오류·unknown-peer는 타이머 만료 이후다. 이를 초기 원인으로 역해석하지 않는다. **남은 결정적 결손은 차량의 해당 OOB 세션 수락과 frame/slot 단위 RF 경과**다. 공식 병행 실행은 관측됐지만 충돌의 인과는 미확정이다. 정확 분모·순서는 [v72 실차 기록](Device-Validation.md#0720--하위-rx_timeout과-시스템-종료-실차-분석)에 둔다.
+
+### 좌표 시각의 최소 수정
+
+- `VehicleNavigationTracker`는 시각0·허용 범위 밖 미래·fix/state 모순·잘못된 receipt처럼 age를 판정할 수 없는 입력을 `VEHICLE_LOCATION_TIME_INVALID`로 분리한다. **실제 age가60초를 초과할 때만 STALE/VEHICLE_FIX_EXPIRED**다. 기존 수용 조건·TTL·clock anchor·미래 허용치는 유지한다.
+- `TeslaLocationStateParser`는 존재하지만 seconds/nanos 범위가 잘못된 Timestamp를 `LOCATION_STATE_TIME_INVALID`로 거부한다. 실제 timestamp 부재만 null로 허용한다. GPS 시각을 응답 수신시각으로 대체하지 않는다.
+- runtime의 수신·readiness tick·attempt 종료 모두 시각 무효 상태를 보존하고 `VEHICLE_FIX_TIME_INVALID`로 센서 수집을 중지한다. raw RAM을 지우고 거리·화살표를 숨기며 UI는 “차량 좌표 시각 확인 불가”로 표시한다. UWB primary 수명·RF 설정은 변경하지 않는다.
+- **schema32**는 기존 navigation status/reason의 고정 enum만 확장한다. 좌표·원 시각·age 숫자 필드는 추가하지 않는다. 이전 schema의 새 enum은 미관측 null이며 과거 STALE/EXPIRED를 새 원인으로 소급 분류하지 않는다.
+
+이 수정은 v72 실제 stale의 원시 입력을 복원한 것이 아니다. 단위·epoch·Long 정밀도 변환 오류는 조사 경로에서 발견하지 못했으며 실제 오래된 GPS도 가능한 설명이다. 호스트 재현·회귀·표면 한계는 [v73 검증](Device-Validation.md#0730--차량-좌표-시각-분류와-호스트-검증)을 따른다. **UWB 거리 수신 문제는 미해결**이다.
+
+## v72 native 세션 관측과 OS 대조
+
+### v71 실패에서 확인한 것과 남은 원인
+
+FiRa 요청·응답 송신·native 열림 뒤 대상5개가 시작됐지만 유효/무효 거리 표본은 모두0이었다. 약10~13초에 대상들이 순차 정지했고 generic 종료 reason4(`SYSTEM_POLICY`) 뒤 `NO_DISTANCE_RECEIVED`로 끝났다. `uwbDeadlineCause=null`이며 첫 거리60초 만료가 아니다. 공식 Tesla와 겹치는 OS 세션은 있지만 기존 로그에 상관 태그가 없어 앱과 OS 세션의 직접 연결·충돌 원인을 확정하지 않는다. 정확 시각·로그 분모는 [v71 실차 기록](Device-Validation.md#0710--native-시작-뒤-무거리-실차-분석)에 둔다.
+
+보존 분석은 `비공개 로컬 보관 경로`과 같은 디렉터리의 REA JSON·원 DEX 출력이다. 공식 APK는 **Tesla4.61.6-4647**, SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`다.
+
+|대조 경계|확인한 사실·해석 한계|
+|---|---|
+|공식 `pg0.f.o` → GMS `o6.b.C1984b.invokeSuspend`|STS별 config1..7·키·채널·대상 목록·slot2를 전달한다. generic Android의 config 숫자 공간과 의미를 구분해 대조했으며 현재 앱의 config 번호 오류·5대상 grouping 오류를 입증하지 못했다. Evidence `ev_ab167e8242afb7a63546140f8c399f7eab36dd8255c16f92796963867bd33689`, `ev_a251cc73072522f2be0ee3c865343e2402402ab96c433f0fdd170096d24b2327`.|
+|공식 notification·AoA 설정|`pg0.d.a`의 변환과 enum/static 초기화·`l6.m` 생성자를 함께 보면 **data notification DISABLE(0), isAoaDisabled=false**다. Evidence `ev_ceb9908858add78d36c273e6a01d3e591dbf0ac46c8103e437cf16d842f246af`, `ev_98d8482d20a7552a9502cc701edaa60318eadc6857babe6a0e0346cbd1a9ffc3` 및 `tesla-ntf-static-legacy.smali`·`tesla-option-enums-legacy.smali`. v71 분석 당시 실제 GMS 적용은 미관측이었으며 이후 v72 UCI에서 확인했다. 공식 OS report0을 RF 실패 증거로 쓰거나 거리 수신이 필요한 우리 앱에 DISABLE을 복사하지 않는다.|
+|보존 폰 시스템의 오류 제한|10월23일 회수한 `service-ranging.jar`의 `ConfigurationManager.createOpenSessionParams`는 `setRangingErrorStreakTimeoutMs(10000)`을 설정한다. `service-ranging-dexdump.txt:23686–23687`. SHA-256 `c2710eee5f7e56a4ac148f297e1e572073f3ea257336b93711908c37af1b7858`; v71 시험 당시에도 같은 모듈이었는지는 재확인하지 않았다.|
+|종료 reason의 정보 손실|같은 DEX의 `RangingDevice$1.onClosed`는 하위 reason을 버리고 ranging 활성 상태이면 backend6을 만든다(`29526–29543`, `29355–29366`). `UwbAdapter.closeForReason`은 남은 대상의 stopped를 먼저 전달하고 closed를 뒤에 전달한다(`78712–78740`). 따라서 generic reason4만으로 절전·앱 정리·구체 RF 오류를 역복원할 수 없다.|
+
+[AOSP Android16 고정 소스](https://android.googlesource.com/platform/packages/modules/Uwb/+/adcc2fe7aadac53e67402901e2246af21699749d/service/java/com/android/server/uwb/UwbSessionManager.java?format=HTML)는 native 실패 결과가 연속될 때 대상별 오류 타이머를 시작하고 성공 시 해제한다. 만료 시 다중 대상에서 해당 대상을 제거하고 마지막 대상이면 policy 종료한다. **v71 분석 시점에는 후보 경로**였으나 이후 v72 실차 로그에서 하위 RX_TIMEOUT과 실제 타이머 만료를 확인했다. 앱 callback 부재만으로 확정한 결론이 아니다.
+
+[generic 설정](https://android.googlesource.com/platform/packages/modules/Uwb/+/adcc2fe7aadac53e67402901e2246af21699749d/ranging/uwb_backend/src/com/android/ranging/uwb/backend/internal/ConfigurationManager.java?format=HTML)과 [AndroidX 설정](https://android.googlesource.com/platform/packages/modules/Uwb/+/adcc2fe7aadac53e67402901e2246af21699749d/androidx_backend/src/androidx/core/uwb/backend/impl/internal/ConfigurationManager.java?format=HTML)의 의미 대조는 실제 GMS backend·Samsung HAL과의 실행 동등성 증명이 아니다. FGS 지원·병행 세션 수만으로 RF 호환성이나 충돌을 판정하지 않는다. REA의 JAR 미지원·static initializer 누락은 SDK dexdump/legacy apkanalyzer로 보완했으며 이 출력을 REA decompile 결과로 표시하지 않는다.
+
+### 관측 계약과 유지한 동작
+
+- `TeslaUwbNativeObservation`은 endpoint별 **STARTING / OPENED / PEER_STARTED / PEER_STOPPED / CLOSED**를 기록한다. config·channel·preamble·updateRate·peerCount·endpoint-local peerIndex·시작부터 callback 처리까지의 경과·해당 시점의 closeRequested만 보관한다. 경과는 RF timestamp가 아니고 closeRequested는 종료 원인이 아니다.
+- `sessionTag`는 `SHA-256(UTF8("hey-tesla/uwb-session/v1:") + backend sessionId의 uint32 big-endian4바이트)`다. endpoint 세대마다 한 번 계산해 재사용하며 원 ID·주소·키·좌표·plan을 관측 객체에 보관하지 않는다. **32비트 임시 ID의 상관용 태그이며 암호화·익명성·차량 식별 보장이 아니다.**
+- STARTING은 native start 직전 계획 관측이다. listener 재진입으로 취소·소유권 변경이 생기면 실제 start를 하지 않는다. 종료 후 늦은 callback은 새 endpoint를 덮지 못하며 봉인된 consumer에서도 실제 CLOSED 관측은 보존한다. 반복 snapshot은 새 callback으로 세지 않는다.
+- **FieldLog schema31**의 `uwbNativeSessionTag`, `uwbNativeConfigId`, `uwbNativeChannel`, `uwbNativePreambleIndex`, `uwbNativeUpdateRate`, `uwbNativePeerCount`, `uwbNativeEvent`, `uwbNativePeerIndex`, `uwbNativeElapsedSinceStartMs`, `uwbNativeCloseRequested`를 분석기에 전달한다. 과거1..30은 미관측 null이며 시각·reason으로 새 필드를 소급 추정하지 않는다.
+- `uwbNativeSessions`는 process/trial/clock segment/tag에 기존 `operationStartedElapsedMs`와 관측 STARTING/CLOSED 경계를 적용해 수명주기를 나눈다. `lifecycleIndex`는 해당 scope 입력의0-based 묶음 순번이며 backend generation이 아니다. `startingObserved`·`closedObserved`는 실제 대응 사건 여부다. 시작 없는 묶음이나 종료 누락을 허용하되 경과 감소만으로 사건을 합성하지 않고, 반복 snapshot을 재시작으로 세지 않는다.
+- 분석기의 `--uwb-dump PATH`는 `mRangingSessionList`만 읽어 원 ID를 메모리에서 같은 태그로 변환하고 고정 metric만 출력한다. `mOpenedSessionMap` 중복·임의 필드·주소·키·원 ID는 보고서에 포함하지 않는다. package는 android/Tesla/GMS 또는 OTHER로 제한한다.
+- 태그 대조는 **UNMATCHED / UNIQUE_TAG_MATCH / AMBIGUOUS_TAG_MATCH**로 구분한다. initTime에는 연도·시간대가 없으므로 시각으로 자동 귀속하지 않는다. 유일한 태그 일치도 해당 보존 자료의 상관관계일 뿐 RF 성공·병행 충돌·정확한 종료 원인 증명이 아니다.
+
+RF 설정·송신·권한·기한·재시도·기존 정리 조건은 바꾸지 않는다. 자동 마이크·음성·프렁크를 연결하거나 미수신을0m로 채우지 않는다. 호스트에서 native callback 경계와 분석기를 실행했지만 실제 기기·RF 검증은 별개다.
+
+## v71 기한 만료 원인 관측
+
+### v70 실차·공식 초기 경로 재대조
+
+실차에서 인증·초기 field40/58 송신 뒤 AEAD 검증을 통과한 빈 본문 응답2개를 관측했으며 첫 FiRa 요청과 native 시작은 없었다. 인증 뒤 약30초 종료는 기존 초기 협상 기한과 일치한다. **기존 로그에 원인 enum이 있었던 것은 아니며**, 시간·코드 대조 해석과 신규 typed 관측을 구분한다. 정확 시각·분모는 [실차 기록](Device-Validation.md#0700--초기-fira-요청-미수신-실차-분석)에 둔다.
+
+공식 Tesla **4.61.6-4647**의 동일 APK(SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`)를 REA로 재대조했다. 보존본은 `비공개 로컬 보관 경로`(**118 records·5,376,152 bytes**)이다. 정적 Evidence 수는 실행·RF 성공 수가 아니다.
+
+|정적 경계|근거·한계|
+|---|---|
+|초기 controller 시작|`u1.Y0`·`kg0.c.i`는 이벤트 수집 준비이며 RF 시작이나 누락된 별도 wire 요청의 증거가 아니다. Evidence `ev_46112267c4046d21a6de03d0d7d91c081d17b2f8fdd3b4d6f1730d37095c1586`, `ev_4b04b02e5c898713bdf5d7cbf7cedf0d705d031976c683cd8fa820288615a1da`.|
+|연결 뒤 처리|`u1.k`는 passive-auth 정책 평가와 지연 field40 경로를 가진다. field40은 이미 v68에 반영했으며 DRIVE 허가를 UWB 진단 승인만으로 추가하지 않는다. Evidence `ev_9564ad68e0b037e9a4247cb16e8f750bdfdb95d8925324a09dca4152dad83233`.|
+|field58 경로|`u1.K0`에서 받은 field19 객체를 계기로 capability 조회·`lg0.b.a`의 all-zero FiRa capability를 보낸다. 우리 인증 뒤 자발적 field58과 트리거 차이는 있지만 이번 실패의 인과는 입증되지 않았다. Evidence `ev_f3284ba165f74fd4832c74a5632bd5c118cecaf10db809fdb080bbb5db8bbbca`, `ev_26d6d33ee444b76084fcf6a71cae90c32fc8d687c16ad39ba725294a9cc15874`.|
+
+field19의 general capability와 field58 FiRa capability는 다른 메시지다. `CAPABILITIES_UNSPECIFIED`는 우리 진단 이름이며 공식 wire enum·차량 미지원 확정값이 아니다. decompiler의 본문 누락·경고와 정적 분석 한계는 유지한다. 공식 앱 동시 알림만으로 UWB 충돌을 확정하거나 공식 앱을 강제 종료하지 않는다.
+
+### 관측 계약과 유지한 동작
+
+- `TeslaBleKeySession`이 실제 설정한 stage 기한의 소유 원인을 추적한다. `now >= minOf(operation, stage, write)`의 종료 시점은 그대로이며, 이미 여러 기한이 지났어도 가장 먼저 도래한 기한을 기록한다. 동률은 **OPERATION → WRITE → STAGE** 순이다.
+- `TeslaGattDeadlineCause`는 **OPERATION / INITIAL_NEGOTIATION / PROTOCOL_STAGE / WRITE** 네 값뿐이다. 초기 `UwbReady`의30초 설정만 INITIAL_NEGOTIATION이며 화면 단계에서 추정하지 않는다. facade의 별도 전체기한 분기는 OPERATION이다.
+- 기존 `TIMED_OUT`·`DEADLINE_EXPIRED`는 유지한다. 최초 종료의 cause 또는 미관측 null을 cleanup·재진입 뒤에도 보존하고 새 operation은 null로 시작한다. OFF·owner·권한 종료를 기한 만료로 바꾸지 않는다.
+- **FieldLog schema30**의 optional state `uwbDeadlineCause`와 분석기 operation 요약에 고정 enum만 추가한다. 기존1..29는 원인 미관측이며 `DEADLINE_EXPIRED`에서 역추정하지 않는다. packet·키·주소·ID·GPS·heading·새 시각 필드는 추가하지 않는다.
+- 홈/알림과 수동·서비스 UWB 진단은 `DEADLINE_EXPIRED`일 때만 관측 원인을 설명한다. null은 기존 일반 표시, 정리 실패·OFF·소유권·별도 거리 미수신 종료는 기존 우선순위다.
+
+실제 production consumer·독립 암호 peer에서 빈 응답2개 뒤 raw/wrapped/encrypted FiRa 모두 후속 진행함을 **수정 전후** 확인했다. 이미 동작하던 경로를 회귀로 고정한 것이지 빈 응답 처리 버그를 고친 것이 아니다. 초기30초·write5초·전체180초·첫 거리60초·유효 수신 후10초와 송신 내용/순서·권한·재시도는 바꾸지 않았다. 자동 마이크·음성·프렁크는 연결하지 않으며 호스트 통과를 실차 거리 성공으로 표현하지 않는다.
+
+## v70 FiRa 재요청 교체·유지 정본
+
+### v69 실차 실패와 해석 한계
+
+첫 요청은 응답 전송·native 열림·peer 시작까지 진행했지만 거리 표본은 없었다. 뒤의 FiRa 요청을 단발 협상 guard가 `NEGOTIATION_ALREADY_ACTIVE`로 거부해 전체 정리했다. 실제 시각·분모·로그 보존과 수정 전후 production consumer 관측은 [검증 정본](Device-Validation.md#0690--10월29일-실차-fira-재요청-실패)·[v70 호스트 검증](Device-Validation.md#0700--fira-재요청-교체유지와-호스트-검증)에만 둔다.
+
+두 실차 request의 ID·payload 동일/변경 여부는 기록되지 않아 알 수 없다. 첫 요청 후 무거리의 RF 원인과 차량이 재요청한 이유도 미확정이다. 선행 RX 제외 분기는 이번 회차에서 발생하지 않았으므로 v69 수신 경계의 효과를 이번 결과로 판정하지 않는다. 폰 GPS·heading 관측은 차량 fix가 아니며 위치 sidecar의 `SESSION_CLOSED`를 위치 timeout 원인으로 바꾸지 않는다.
+
+### 공식 REA와 동일 원 DEX 보완
+
+설치 앱 정적 비교에서 같은 요청의 중복과 새 요청으로 교체되는 경우가 구분될 수 있음을 확인했다. 공식 공개 프로토콜 계약이나 실제 차량 실행 확인은 아니다. 실차에서 수신한 요청의 동일 여부는 미확정이고, 기존 UWB 관측 실패의 원인으로 결론내리지 않는다.
+
+### 구현의 소유권·교체 순서
+
+- 단발 `NEGOTIATION_ALREADY_ACTIVE` guard를 제거한다. 순수 `builder.prepare(request, peerOffset, excludedFiraSessionIds)`는 **이번 plan만** 만들고 caller가 소유한다. 실패 시 이번 임시 민감 배열만 소거하며 survivor의 plan·STS·native를 소거하지 않는다.
+- coordinator는 원 uint32 request ID로 비교한다. **같은 ID: old native의 실제 close 확인 → 새 response 전체 frame TX 완료 → new native 시작**, **다른 ID: 기존 세션 유지·새 ID 추가**다. replacement 종료 자체로 old stopped를 보내지 않는다. 이미 정상 stop의 stopped가 queue에 있으면 전체 TX 완료 전 같은 ID 교체를 기다린다.
+- response callback은 그 response가 소유한 endpoint **객체 batch만** 시작한다. 이전 response·close·표본 callback이 같은 숫자 ID의 새 세대를 시작·종료·갱신하지 못한다. 종료 record 회수·세대 표본 정리와 최종 historical 관측 보존을 함께 적용한다.
+- 최신 capability와 기존+pending plan의 호환 검사를 통과한 뒤 **후속 builder만 최신화**한다. 지원 축소/확대 뒤 구 builder를 쓰지 않으며 살아남은 plan/native는 변경하지 않는다.
+- active8·pending8·batch당8은 **우리 자원 상한**이지 공식 값이 아니다. peer index는 단조 증가하며 overflow는 fail-closed다. close 실패는 즉시 latch로 새 TX/start를 차단하고 유한 정산 뒤에도 actual cleanup·lease가 불명이면 예약·재입장 차단을 유지한다.
+
+### 안전 불변과 무승격
+
+첫 거리60초는 **최초 response 전체 TX에서 한 번만** 시작하고 재요청으로 갱신하지 않는다. 서비스 유효 receipt+10초 무수신 종료·기존 초기 operation180초·write5초·close5초·location15초와 기존 수동/서비스 수명 차이를 유지한다. 재요청·response·peer 시작으로 거리 freshness·wake lock·유효 거리 기한을 갱신하지 않는다.
+
+초기 metadata 전송·source 수명·좌표 sidecar 시작은 기존 operation 범위를 유지하며 명시 field44 GET_MODEL/ONCHANGE 처리는 그대로다. 새 GATT·retry·field3 승인·cloud·마이크·자동 프렁크를 추가하지 않는다. HMAC/AEAD·route/UUID·counter/replay·owner/token/VIN·OFF/권한·late callback 봉인·정리 불명 예약·민감 RAM 소거와 schema29·기존 로그 해석을 보존한다. **호스트 실제 consumer 통과·설치·응답 TX·backend peer 시작은 RF 수신·유효 거리/방향·차량 권한·물리 완료의 증거가 아니다.**
+
+## v69 선행 RX 수신 경계 정본
+
+### v68 실차에서 관측한 경계
+
+CCCD 완료 뒤 시작한 conversation보다 앞선 callback ingress가 owner queue에서 나중에 소비되어 **parse 전 수신 시각 검사에서 거부되고** 로컬 `RESPONSE_INVALID`·`UWB_PROTOCOL_RESPONSE_INVALID`로 종료됐다. input/envelope 관측은 null이고 AEAD는 미시도였으므로 최초 payload를 HMAC·field3·metadata·FiRa·타 요청 응답이라고 복원하지 않는다. 정확한 시각·분모·정리와 저장 상태는 [v68 실차 기록](Device-Validation.md#0680--10월29일-실차-선행-rx-실패)에 둔다. 사용자 방문 횟수도 로그의 후보·광고 횟수로 추정하지 않는다.
+
+### 공식 REA·공개 근거와 한계
+
+동일 공식 Tesla **4.61.6-4647**, APK SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`의 새 REA 보존본은 `비공개 로컬 보관 경로`(**462,305 bytes·30 records**)이다. 정적 Evidence 수는 실행·실차 검증 통과 수가 아니다.
+
+|정적 경계|메서드 / 정확 Evidence|
+|---|---|
+|descriptor callback보다 앞선 indication 처리|`Peripheral.a.l` — `ev_340107259a0e74c37f3f726667dfbd42eccdc1bd8ac186ba92a27bbc156258ad`|
+|raw VCSEC / envelope 분류·decode 뒤 시각|`gg0.p.b` — `ev_7051974e595fbf20112365d76dc558cf8fad6b8515455f6ea10538ab7d1aaa0e`|
+|VCSEC와 request/response bus 분리|`u1.i` — `ev_f729be12d08066c8af8b91ab04bb0394a5b7fb57506a764bb714692528848d7c`|
+
+- `Peripheral.a.l`의 `got onCharacteristicChanged before onDescriptorWrite for indications! connection established`는 공식도 조기 notify를 예상하고 연결 통지 뒤 처리하는 코드 근거다. parse catch가 전체 disconnect를 뜻하지는 않는다. 우리 ingress를 공식의 decode 뒤 시각으로 덮으라는 계약도 아니다.
+- `gg0.p.b`에는 JADX 중복 block 경고가 있으므로 decompile 표현의 한계를 유지한다. `u1.i`의 VCSEC `K0`와 request/response bus `ag0.j`는 별도 경로이며 조기 수신이 어느 종류였는지 실차 원문 없이 단정하지 않는다.
+- 공개 [vehicle-command issue #390](https://github.com/teslamotors/vehicle-command/issues/390)은 연결 직후 passive-auth 메시지와 응답 `ToDestination` 상관관계에 관한 답변을 제공한다. 별도 encryption-flag 오류와 혼동하지 않는다. [dispatcher](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/internal/dispatcher/dispatcher.go)의 unknown-handler/unparseable drop도 HMAC/AEAD·domain/route/UUID 검사를 완화할 근거가 아니다.
+
+### 수신 판정과 관측 계약
+
+1. 매 `receive()`에서 관측을 reset하고 **비활성 conversation → oversize → 실제 now 역행 → 음수/미래 ingress → 기존 전체/응답 기한 만료** 거부를 먼저 적용한다. 실제 now 역행을 단순 queue 지연으로 무시하지 않는다.
+2. 이 검사를 통과한 **`0 <= receivedAt < conversation.startedAt`만 parse 전에** `TeslaBleStep.Ignored` singleton으로 반환한다. 원 callback ingress는 보존하고 `receivedAt == startedAt` 및 이후 입력은 기존 파싱·검증 경로를 유지한다. 시작 이후 malformed까지 일반적으로 무시하는 변경이 아니다.
+3. reset·판정·판정 뒤 관측 기록은 `resetResponseObservation()`·`receiveResponse()`·`recordResponseObservation()` private helper로만 분리한다. 새 transport·파서·상태 머신이나 큰 리팩터링은 추가하지 않는다.
+4. 판정 관측은 `TeslaBleRxStep.IGNORED` / `RESPONSE_BEFORE_START`이며 parse 전이므로 input/envelope·body·auth 관측은 미관측, AEAD는 `NOT_ATTEMPTED`다. 이전 수신의 판정을 이월하지 않는다. 실제 `receive()` 소비와 반복 snapshot의 새 수신 여부는 기존 분모로 구분하고 거리·freshness·기한·wake lock을 갱신하지 않는다.
+5. primary·sidecar·frunk 모두 제외 입력을 인증·metadata·FiRa·차량 좌표·성공·새 BODY fallback·actuator로 승격하지 않는다. phase·기한·request identity·counter/replay·HMAC/AEAD·domain/route/UUID·single write pump·owner/OFF/권한·정리 경계는 불변이다.
+6. **FieldLog schema29**는 기존 `rxResponse`/state·읽기 요약·`navigationObservation`의 해당 고정 enum만 확장한다. 새 값 `IGNORED` / `RESPONSE_BEFORE_START`는29+에만 허용하고 기존1..28 해석·필드 의미·notification/frame/protocol 분모를 유지한다. 구 schema 직렬화에서는 새 enum을 내보내지 않으며 읽기 요약도 객체 복사 없이 serializer에 전달할 disposition만 제한한다. 새 raw·시각·PII·원문·키·주소·UUID·좌표·heading 필드는 추가하지 않는다.
+
+RF 설정·기한·retry·passive-auth DRIVE·field3 grant/rejection·자동 마이크·프렁크 통합은 추가하지 않는다. 실제 production consumer/session/write pump와 독립 AES peer의 수정 전후 smoke 및 실제 로그 분석 CLI 근거는 [v69 검증 기록](Device-Validation.md#0690--선행-rx-경계-수정과-실제-consumer-smoke)에만 둔다. 호스트의 정상 후속 입력 진행은 **로컬 결함 교정의 근거**이지 차량 수락·실차 RF/거리·v66/v67 근본 원인 해결의 근거가 아니다.
+
+## v68 초기 실제 단말정보 전송 정본
+
+### 공식 연결 경로와 정확 근거
+
+대상은 Tesla **4.61.6-4647**, APK SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`다. 새 REA export는 `비공개 로컬 보관 경로`(**2,472,175 bytes·148 records**)이다. 이는 정적 Evidence 보존본의 크기/레코드 수이지 검증 통과 수·공식 앱 실행·차량 packet 복원·RF 인과 근거가 아니다.
+
+|정적 경계|정확 메서드 / Evidence|
+|---|---|
+|onWhitelist 연결 콜백·지연 작업 예약|`com.teslamotors.plugins.ble.u1.k` — `ev_1f61045c26c14daed6f47cd72f6797c9892f7e18515b52a949b26a986c05408b`|
+|약1초 뒤 자발적 단말정보 전송|`com.teslamotors.plugins.ble.u1.x0` — `ev_dff6bf263d66035ad147f5987ed6fac68373cc9408c8fc3d6c19bbe5eaa1d2bb`|
+|실제 metadata 생성|`ag0.n.k` 및 `oc0.e.D`로 이어지는 builder 경로 — `ev_b8b41684b17060020245607522a797135f7c3fbdc0fd526309bde8a52202a9ec`|
+|명령별 필요한 SessionInfo 선택|`ag0.j.S` — `ev_13eef29463dd1912bfd8734f4f85321a64146483fb5c6a422a075cbe899eaace`|
+|연결 시 별도 passive-auth 정책 평가|`u1.Q0` — `ev_11eb7c3df129e3544626769def0d0850f89435fc2acb7484c67758d9ce4c9b84`; `se0.t.c` — `ev_74db8d31705730cd4373e1f0df4ae74cafdda6d815bd46fe7b43ca12d78f6959`|
+|field1 상태 소비·CONNECTED_IDLE의 요청 부재|`ig0.b.g.run` — `ev_ad25ab2556792f1ed503f18c69cf12fc933b48dc73debb30ab4ea32e4b4f011a`; `ig0.b.R` — `ev_44031f249d76d66291562d263351071fd3d41ff95d8e5590b31fcc55c833f096`|
+|차량별 준비 구현 선택|`com.teslamotors.plugins.ble.h0.a.a` — `ev_ccd081cdad1df3d66ccff17f036f0f075610a9b32b535f7d8b636fe9ea29995b`|
+
+공식의 `onWhitelist 연결 u1.k → 약1초 지연 x0 → ag0.n.k → oc0.e.D → AppDeviceInfo(field40)`는 **field44 요청 없는 자발적 metadata 경로**다. v67은 HMAC 검증 뒤 field58만 송신하고 field40은 명시 field44에만 응답했다. 공식은 onWhitelist 연결 약1초 뒤, 우리는 **기존 키 HMAC 검증 성공 뒤 즉시** 전송하므로 시점과 보안 gate가 같지 않다. 공식 passive-auth DRIVE 정책 평가·AuthenticationResponse는 별도 권한 경로이며 자동 이식하지 않는다.
+
+동일 캐시의 `ag0-j-c.smali`·`pg0-f-collector.smali`는 **부모가 별도로 획득한 원 DEX 보조근거**다. REA 추출물이나 위 Evidence 본문으로 표시하지 않는다. 공식 request lookup의 로그 라벨은 `request_uuid`지만 실제 lookup 대상은 **목적 `routing_address`**이고, 이를 대기 request tag/key/VIN과 연결한 뒤 decoder를 호출한다. decoder 코드와 합쳐 보더라도 우리 domain+route+UUID 검사를 완화하라는 계약은 아니다. 우리 더 엄격한 상관 정책과 domain별 crypto 분리는 그대로 유지한다.
+
+### 초기 metadata 보완과 불변 경계
+
+- 기존 키 HMAC 검증을 통과한 **UWB operation당 한 번**, 기존 실제 단말정보 `source.snapshot(false)`를 사용해 암호화 field40을 **기존 field58 송신 앞**에 추가한다. 실제 Android 모델/버전·현재 UWB 지원/권한/준비 관측을 쓰고 Tesla 앱 버전·다른 모델·가짜 AVAILABLE로 위장하지 않는다.
+- 초기 metadata에는 battery/thermal 조회·구독이 없다. 기존 명시 field44 GET_MODEL과 ONCHANGE의 snapshot·단일 구독·coalescing·해제 계약은 그대로 유지한다. 초기 한 번 전송은 새로운 상태 subscribe나 반복 field1 기반 metadata/capability 재송신이 아니다.
+- 기존 single write pump·bounded queue·BE16 frame 경계·personalized AES-GCM·request identity·route/UUID·AEAD·검증 후 counter 소비·replay를 보존한다. owner/token/VIN·OFF·권한 상실·late callback 봉인과 정리 불명 예약 유지도 그대로다. **30초 협상·15초 sidecar·첫 거리60초**를 연장하거나 새 retry·GATT·wake·cloud·키 등록·마이크·프렁크·잠금/주행 제어를 추가하지 않는다.
+- **전체 field40 BE16 frame의 모든 조각이 성공 callback을 마친 경우만** 고정 이벤트 `TESLA_UWB_INITIAL_DEVICE_INFO_SENT`를 남긴다. 생성/queue/SDK 접수는 완료가 아니며 이 이벤트·field58 전송을 차량 수락·native RF 시작·거리 수신으로 해석하지 않는다. v68 도입 당시 FieldLog schema28 유지와 metadata 전용 raw 필드 미추가 계약은 이력이며 이후 v69는 기존 필드의 고정 enum만 확장한다.
+- 모델 원문·모델 digest·버전 hash·battery/thermal 등 metadata raw값·packet 원문·키·주소·UUID·VIN·token은 로그/이벤트에 추가하지 않는다. wire/RAM에 필요한 실제 정보와 진단의 고정 이벤트를 분리한다. 좌표/heading·절대 GPS/state 시각 미기록과 v67 schema28 비민감 관측 계약도 유지한다.
+
+### 동작 차이와 해결 미확정
+
+- v67 실차에서 field44·FiRa 요청은 관측되지 않았으며 입력은 field1이었다. 초기 field40 부재라는 공식 대비 차이를 보완하지만 **field40이 FiRa 개시 필수조건인지, v67 무거리 원인인지, 차량이 v68을 수락하는지는 미확정**이다. domain3 HELLO 무응답과 RF root cause도 미확정이다.
+- signed mismatch2건은 domain2/protobuf·signedStatus 없음·primary route/UUID UNMATCHED·AEAD 미시도였다. domain3 HELLO의 늦은 응답으로 단정하거나 header/UUID 검사를 완화하지 않는다. 정상 domain3 HELLO의 source만 domain2로 바꾼 합성 음성대조는 query0, 정상 원본 뒤 query1·primary sealed=false였다. 이는 단순 header 우회 필요성 가설의 음성대조이지 실차 packet 복원·원인 규명은 아니다.
+- 공식 field19 존재 시 field58 재송신 차이도 발견했지만 이번 실차 입력에는 field19가 없어 추가하지 않는다. field1 상태 소비에서 capability 재송신·GetReaderKey·status wire subscribe 발행 근거는 없었고 이를 해결책으로 만들지 않는다.
+- 공식 legacy GET_STATUS 초기화는 차량별 구현이 달라 누락을 필수 결함으로 단정하지 않는다. passive-auth DRIVE 평가·field3 grant/rejection은 별도 승인 경계이고 이번 변경에 없다.
+- v68 당시 production consumer+독립 AES peer의 초기 metadata 전후 비교와 완료 이벤트→FieldRecord/FieldJson→실제 Python CLI 근거는 [당시 검증 기록](Device-Validation.md#수정-후-검증과-설치-상태)에 보존한다. 초기 field40/field58 전송과 실제 callback 완료·설치를 차량 수락·실차 FiRa·좌표·거리/방향 성공으로 확대하지 않는다. 이후 v68 실차의 시작 전 RX 종료는 [실차 기록](Device-Validation.md#0680--10월29일-실차-선행-rx-실패), 현재 검증·설치는 [단일 정본](Device-Validation.md#현재-소스설치검증-상태)을 따른다. v66 RF 무거리·v67 FiRa/domain3 무응답의 근본 원인은 여전히 미확정이다.
+
+## v67 metadata 주소 처리·위치 관측 정본
+
+이 절은 v67에 도입한 주소 처리·schema28과 당시 검증 이력이다. 초기 metadata는 [v68](#v68-초기-실제-단말정보-전송-정본), 시작 전 RX와 고정 enum 확장은 [v69](#v69-선행-rx-수신-경계-정본)를 따르며 아래 주소 검사·비민감 관측·안전 계약은 유지한다.
+
+### v66 실차에서 확인한 범위
+
+- 2026-10-28 **15:22:49~15:23:09.498의 실차1회**는 기존 앱 키 인증·FiRa·backend 열림·peer5까지 진행했지만 유효/무효 거리0/0이었다. native stop이 먼저이고 `closed` 사유4 뒤 앱 stop·`NO_DISTANCE_RECEIVED`로 끝났다. 앱 timeout이 먼저 RF를 끊었다거나 차량이 권한을 거절했다고 단정하지 않는다.
+- protocol 수신17건 중 field3의 **31바이트·최상위 `3/2/29`** 형태가3건이다. 내부 level/reason/token은 기록되지 않아 UNLOCK/DRIVE 요청이나 token 유효성은 미확정이다. route mismatch9건 중7건은 signature 존재·현재 route/UUID 불일치여서 타 요청/세션 가능성이 있으며 기존 제외를 유지한다.
+- 나머지2건은 plaintext·from domain2·to DOMAIN·UUID 없음이다. **[INFERENCE] v66의 field44 분기에서만 해당 route 제외가 발생한다는 소스 경로로 field44와 연결**되지만 field44 enum과 목적 domain 값은 로그에 없었다. 필수 모델정보 요청2건을 놓쳤다거나 BROADCAST 목적지였다고 복원하지 않는다.
+- phone source가 약18초 활성인 것은 logcat 관측이다. 당시 sidecar 진행·응답 판정·최종 reason의 영속 관측이 빠져 **미시도/HELLO 무응답/query 미송신/차량 거절/좌표 해석 거절을 구분할 수 없다.** domain3 긍정 수신·차량 좌표 성공·RF 무거리 원인은 미확정이다.
+
+### 새 공식 APK REA 근거와 한계
+
+대상은 Tesla **4.61.6-4647**, APK SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`다. 아래는 새 REA 세션에 보존된 정적 메서드/참조 Evidence이며 공식 앱 실행·차량 wire 복원·RF 인과 검증이 아니다. 부모가 export한 보존본은 `비공개 로컬 보관 경로`(29,845,457 bytes·412 records, **기존 세션 포함**)이다. 전체412개를 이번 신규 분석 수나 검증 통과 수로 세지 않는다.
+
+|확인한 경계|정확 DEX prototype / Evidence|
+|---|---|
+|VCSEC field3 decode|`vd0.w0.a.decode(Lcom/squareup/wire/k;)Ljava/lang/Object;` — `ev_ae173f32ba5ccc99bfbd8e4a35fccbffb517136aa4b316bed7d678f8cfb76811`|
+|AuthenticationRequest decode|`vd0.p.a.decode(Lcom/squareup/wire/k;)Ljava/lang/Object;` — `ev_7f57a0f2e12210319b84f76724821d3eda2cf9f52b22e0c716e9684b7643aa9c`|
+|raw/plaintext VCSEC 분리|`gg0.p.b([B)Lgg0/o;` — `ev_266c1bd3a325b2d3072870acf678b0e32d8371cff503fb167e0db5112f1c9ac2`|
+|별도 VCSEC dispatch|`com.teslamotors.plugins.ble.u1.i(Lgg0/o;Lcom/teslamotors/plugins/ble/Peripheral;)V` — `ev_3747a4be82b55ca99e4eb673d42584e0ce1c8c177f9cb19f293b059510ebbb95`|
+|metadata·FiRa·인증요청 분기|`com.teslamotors.plugins.ble.u1.K0(Lvd0/w0;Lcom/teslamotors/plugins/ble/Peripheral;ZJ)V` — `ev_2a2520b8a6ea4855d5cf5e1be203cc917227f6e437bdd94067bbb8746cb18b17`|
+|인증 권한 정책|`com.teslamotors.plugins.ble.u1.I0(Lvd0/p;J)Z` — `ev_7a0f822df3e7db87f0a45bbb74e27d7b88f4f603c480763ae270daaef4114b27`|
+|별도 명령 응답 decode|`RoutableMessageDecoder.b(Lsd0/h;Lie0/a;Ljava/lang/String;[BLjava/lang/String;)Lcom/tesla/messagedecoding/RoutableMessageDecoder$Result;` — `ev_9f93ee58101bb6e801ac59b76673b9394d547365ffcc9c90bcf9abe32c6b8494`|
+|실제 location getter|`fd0.s1.n()Lfd0/a1;` (`getGetLocationState`) — `ev_520ca14d24b730869e15cf5f4ffae0b5461021669e4c444af5a4621998031ff9`|
+|getter 명칭 소비|`CommandActionExtensionsKt.getCommandCenterName(Lfd0/w5;)Ljava/lang/String;` — `ev_e7a7c565cdbc06f3db18cbd99e29b920bf60790f5ceb24cea033115ad7803aec`|
+|location 응답 getter|`fd0.k6.p()Lgd0/l0;` (`getLocation_state`) — `ev_03028bf60b5256197d8c3b2bf9a434c767d9238d9d154a88f11fc75f811d08e1`|
+|CarServer domain3 분류|`CommandActionsKt.getDomain(Lid0/c;)Lsd0/b;` — `ev_aa9bd3335a213e615fa28096e870166191dac5351609ca9829b57dfdec189512`|
+|domain별 세션 map|`ff0.g.v(Lsd0/b;)Ljava/util/Map;` — `ev_9d3e0f461db0ac7d210be0676426dc14e2b7bd8114da948f60350d9b4a5f0f12`|
+|Infotainment 응답 decode|`RoutableMessageDecoder.f(Lsd0/h;Ljava/lang/String;Lokio/k;)Lcom/tesla/messagedecoding/RoutableMessageDecoder$Result;` — `ev_cfda5ed1eb894fd98f73a730212a7d60c3b654ee65135631448b1d6ae0860dcf`|
+
+공식 plaintext from-domain2의 비동기 VCSEC dispatch와 request lookup·route·복호화를 거치는 명령 응답은 별도 경로다. 이것을 signed 응답 상관관계 완화 근거로 쓰지 않는다. `I0`의20바이트 token 길이·이력·권한 gate는 token 암호 검증이나 이번 실차 level의 증거가 아니다.
+
+위치 wire의 `GetLocationState=7 → location_state=8`과 domain3 독립 세션에서 확정 결함은 발견하지 못했다. 직접 field7/8 근거는 [고정 공개 요청 schema](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/protocol/protobuf/car_server.proto)·[응답 schema](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/protocol/protobuf/vehicle.proto#L478-L524)와 우리 schema다. APK encoder `fd0.s1.a.b(Lcom/squareup/wire/l;Lfd0/s1;)V`의 `ev_07a59bef6dc8a0c268c70938e9f91b5bd6b50f2dc5d5a237806c8f826c401a88`는 **본문 not_available**이므로 APK encoder 본문으로 field7을 새로 입증했다고 하지 않는다. decoder `f`에는 type-inference warning이 있고 xref의 complete는 provider의 using-node 범위이지 동적/UI 전체 경로 보장이 아니다.
+
+### 수정1 — unsigned field44만의 주소 정책
+
+- 기존 field44는 `toDestination`이 있으면 응답용 `matchesRequest()`를 적용해 DOMAIN 목적지를 일괄 차단했다. 또한 body semantic decode가 주소 검사보다 먼저라 잘못된 route의 malformed field44가 현재 owner를 종료할 수 있었다. 후자는 정적 순서 결함이며 이번 실차 종료 원인이라는 뜻은 아니다.
+- **unsigned field44에만** to 없음 또는 `DOMAIN_BROADCAST=0` / `DOMAIN_VEHICLE_SECURITY=2`를 허용한다. 이는 **합성 안전 allowlist**이지 기록되지 않은 실차 목적 domain을 복원한 것이 아니다. 명시 ROUTING_ADDRESS는 현재 route와 정확 일치해야 하고 비어 있지 않은 UUID도 독립적으로 정확 일치해야 한다. source-domain 제외는 기존대로 유지한다. 잘못된 주소의 body는 bounded top-level tag probe가 **실제 field44 tag를 확인한 경우에만** field44 의미 파싱 전에 Waiting으로 제외한다.
+- field44 tag 이전에 이미 wire가 손상되어 probe가 tag를 확인할 수 없는 입력·field44 없는 malformed FiRa와 허용 주소의 malformed/중복/충돌 field44는 기존 fail-closed다. 주소가 다르다는 이유로 일반 malformed 전체를 무시하는 변경이 아니다. signed 응답의 route/UUID·request hash·AEAD·검증 후 counter 소비·replay 정책과 기존 FiRa/stop 경로는 불변이다. 전체 `matchesRequest()`를 느슨하게 하거나 이전 요청 crypto context를 되살리지 않는다.
+- **field3 자동 grant/rejection은 여전히 미승인·미추가**다. wake·cloud·키 등록·마이크·프렁크·잠금/주행 제어를 추가하지 않는다. metadata 수락을 차량 권한·UWB 거리 성공으로 표시하지 않는다.
+
+### 수정2 — schema28 비민감 위치 관측
+
+- `FieldLog schema28`은 optional top-level **`navigationObservation`**과 고정 이벤트 **`VEHICLE_NAVIGATION_OBSERVATION`**으로 위치 전용 typed 관측을 분리한다. 기존 schema1..27의 필드 의미·notification/frame/protocol 분모·순환 상한은 유지한다. 이전 로그에 관측이 없으면 미확인이지 미시도/실패/0으로 보충하지 않는다.
+- payload는 `kind`·`reason`·`status`·`disposition`·`authEvidence`의 고정 enum, 권한/위치 활성/FGS armed·collecting·등록/cleanup·route/UUID 일치·vehicleFixPresent Boolean과 기존 `candidate`/`attempt`의0이상 count만 허용한다. 새 원시 시각 필드는 없고 기존 이벤트 시각으로 진행을 연결한다. HELLO/QUERY 생성·queue·SDK 접수와 **전체 BE16 frame의 모든 조각이 성공 callback을 마친** `HANDSHAKE_TX_COMPLETE` / `QUERY_TX_COMPLETE`는 다르다. 생성/접수만으로 완료·차량 수락을 주장하지 않는다.
+- 실제 sidecar `onResponseObservation`의 `requestUuidMatches`·`toRouteMatches`·`disposition`·`authEvidence`를 `SIDECAR_RX`로 전달한다. primary `rxResponse`와 섞지 않고 실제 `SESSION_READY` 뒤 `HANDSHAKE_ACCEPTED`, 실제 query TX 완료, 실제 결과의 `RESULT`·`vehicleFixPresent`·고정 reason을 분리한다. 원본 domain/step/AEAD 전체 객체나 자유 reason을 통째로 저장하지 않고 미지원 reason은 `UNKNOWN`이다. `TERMINAL`은 시도당1회이며 `LOCATION_TIMEOUT`·`OPERATION_DEADLINE`·`OWNER_ENDED`·`SESSION_CLOSED`를 구분한다. 일시 coordinatesWanted=false를 최종 skip으로 만들지 않고 종료까지 미시도면 `SIDECAR_SKIPPED` / `OPERATION_ENDED_BEFORE_START`다. owner 소거 직전 근거를 남겨도 늦은 UI callback·세션 재생은 허용하지 않는다.
+- `ADMISSION`은 실제 permission/location-enabled/ACK armed, `FOREGROUND_ARMED`는 양성 type ACK 뒤, `FOREGROUND_STOPPED`는 lease 실제 close completion과 cleanup 결과다. `SOURCE_STARTED`는 실제 위치/센서 등록 반환이며 fix 수신 성공이 아니다. `SOURCE_STOPPED`는 실제 source.close 반환/실패를 기록한다. source 시도마다 기준을 통과한 첫 phone location/heading은 `PHONE_LOCATION_FIRST_VALID` / `HEADING_FIRST_VALID`, 불가 사유는 enum별1회이고 `DISPLAY_STATUS_CHANGED`는 실제 presentation status 변경에만 발행한다. 센서 매표본·반복 snapshot을 새 사건/수신으로 만들거나 위치·거리 freshness·기한·wake lock을 갱신하지 않는다. 과거 필드/enum 모델은 v76에서 [`logging/legacy/VehicleNavigationObservation.kt`](../app/src/main/java/com/heytesla/app/logging/legacy/VehicleNavigationObservation.kt)로 이관해 보존하며 현재 좌표 실행 경로가 아니다.
+- **차량/폰 raw GPS·heading·절대 GPS/state 시각·키·VIN·주소·request ID/UUID·token·packet 원문·자유 문구는 금지**다. raw는 RAM 전용이고 UI는 좌표 없는 presentation만 받는다. schema28은 이 금지를 해제하지 않으며 기존 허용 UWB raw AoA 계측과도 별개다.
+- 한 접근 단발15초·primary 우선·domain별 crypto/identity/replay 분리·FGS/권한·source 수집/정리·좌표 TTL·RF 설정·기한·재시도 동작은 [v66 도입 계약](#v66-좌표-기반-나침반uwb-병행)을 유지한다. 공식 native BLE 위치 경로와 `LOCATION_STREAMING` 서버 경로는 공존 가능하며 우리 앱은 이 경로에 BLE만 쓴다.
+
+### 구현과 검증의 구분
+
+v67 당시 실제 consumer의 DOMAIN0/2 metadata 처리와 wrong-route malformed44의 owner 종료 방지·합성 위치 실패 분류·idle armed 관측은 [당시 검증 기록](Device-Validation.md#0670--metadata-주소-처리위치-관측-검증과-설치)에 보존한다. 검증 수치·APK hash·보존 내역도 그 기록에만 둔다. 이후 v67 실차 실패·알림 OFF와 v68 설치 직후 OFF·실차 저장 ON을 현재로 복사하지 않고 [현재 상태 정본](Device-Validation.md#현재-소스설치검증-상태)을 따른다. 실차 차량 좌표·UWB 거리/방향 성공·실제 source cleanup 실패 주입·잠금/OEM RF와 RF root cause는 여전히 미확정/미검증이다.
 
 ## v66 좌표 기반 나침반·UWB 병행
 
-이 절은 v66의 현재 좌표 안내 정본이다. 아래 v59의 GPS/나침반 미추가·UWB 화살표 보류, 과거 connectedDevice-only·location FGS 설명은 각 버전/경로의 이력이며 현재 좌표 안내를 금지하거나 허가하는 근거로 재사용하지 않는다. **좌표 기반 대략적 안내와 UWB 거리/AoA는 독립 출처**다. 자동 마이크·호출어·프렁크·잠금/주행 제어에는 연결하지 않는다.
+이 절은 v66에 도입한 좌표 안내 계약과 당시 근거를 보존한다. metadata 주소·위치 관측은 [v67](#v67-metadata-주소-처리위치-관측-정본), 이후 시작 전 RX·schema29 enum은 [v69](#v69-선행-rx-수신-경계-정본)를 따르며 아래 전송·좌표·수명·안전 계약은 유지한다. 아래 v59의 GPS/나침반 미추가·UWB 화살표 보류, 과거 connectedDevice-only·location FGS 설명은 각 버전/경로의 이력이다. **좌표 기반 대략적 안내와 UWB 거리/AoA는 독립 출처**이며 자동 마이크·호출어·프렁크·잠금/주행 제어에는 연결하지 않는다.
 
 ### 근거·전송 경로
 
 - 공개 BLE 근거는 고정 revision의 [GetState](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/vehicle/state.go), [Infotainment 처리](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/vehicle/infotainment.go), [dispatcher](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/internal/dispatcher/dispatcher.go), [LocationState schema](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/protocol/protobuf/vehicle.proto#L478-L524)다. domain3 `READ_ONLY`의 `GetVehicleData.GetLocationState` field7 → `VehicleData.location_state` field8을 읽는다. `DriveState.active_route`는 목적지 정보이며 현재 차량 좌표가 아니다.
 - 기존 앱 키·단일 GATT·BE16 decoder·단일 write pump를 재사용한다. UWB domain2가 인증된 뒤 domain3의 fresh handshake/암호화 읽기 sidecar를 **한 접근 한 번·15초**만 시도한다. domain2와 domain3의 crypto context·route/UUID·request identity/hash·counter/replay 집합은 완전히 분리한다. 새 BLE 연결·키 생성/등록·wake·반복 poll·위치 재시도는 없다.
 - primary FiRa/stop·기존 metadata와 대기 중 primary 수신을 sidecar TX보다 우선한다. 이미 SDK에 접수한 sidecar 프레임은 BE16 경계까지 마치고 조각 사이에 primary를 끼워 넣지 않는다. 미접수 위치 프레임만 취소할 수 있으며 실제 SDK 쓰기 오류·BUSY 소진·공유 transport 실패는 전체 작업 실패다. 위치 인증 거절·파싱 오류·무응답/15초 만료는 위치만 unavailable로 끝내고 UWB 협상/측정을 실패시키거나 기한을 연장하지 않는다.
-- `rxProtocolCount`는 공통 consumer의 **실제 `receive()` 호출 수**다. 활성 sidecar domain3 소비는 frame/protocol을 각각 증가시키되 `rxResponse=null`로 이전 primary 판정을 지운다. 종료 sidecar의 늦은 domain3는 frame만 증가하고 protocol·primary 판정을 만들지 않는다. sidecar를 전혀 시도하지 않은 UWB-only 작업의 잘못된 domain3는 기존 primary `DOMAIN_MISMATCH` 계측을 유지한다. 위치 값·GPS/state 시각·새 telemetry schema는 추가하지 않는다.
+- `rxProtocolCount`는 공통 consumer의 **실제 `receive()` 호출 수**다. 활성 sidecar domain3 소비는 frame/protocol을 각각 증가시키되 `rxResponse=null`로 이전 primary 판정을 지운다. 종료 sidecar의 늦은 domain3는 frame만 증가하고 protocol·primary 판정을 만들지 않는다. sidecar를 전혀 시도하지 않은 UWB-only 작업의 잘못된 domain3는 기존 primary `DOMAIN_MISMATCH` 계측을 유지한다. v66은 새 telemetry schema를 추가하지 않았고 v67은 raw 금지를 유지한 schema28 typed 위치 관측, v69는 기존 필드의 시작 전 RX 고정 enum만 추가했다.
 
 ### 좌표 선택·시각·표시 정책
 
@@ -43,14 +497,14 @@
 - 위치 읽기 거절·15초 timeout/null 결과 또는 좌표 없이 operation 종료 시 phone source를 봉인·해제한다. 유효 차량 fix가 있으면 operation 종료 뒤에도 **원 fix의 기존 나이를 반영한60초 이내 남은 기간**만 유지하며 fix 만료/clock invalid에는 UWB 측정 중이어도 해제한다. 같은 접근에서 자동 재수집하지 않고 새 poll/retry/GATT를 만들지 않는다. 정상 source 종료 후 FGS lease만 armed로 남겨 다음 **새 접근**에 재사용한다.
 - 화면 표시·잠금 해제 상태에서 합법적으로 시작한 location FGS는 background 위치 권한 없이 HOME·잠금에서도 유지할 수 있다. background 권한 없는 boot/복원은 BLE/UWB 감지를 유지하되 좌표는 명시적 앱 재개를 기다린다. background 권한이 있더라도 복원은 **새 owner·빈 좌표**로만 시작하고 과거 fix/heading/sidecar를 재생하지 않는다. 권한 결과/팝업 복귀는 죽은 서비스를 다시 시작하지 않는다.
 - OFF·VIN/owner/권한 상실은 입력·새 TX·late callback을 봉인하고 raw RAM을 먼저 지운다. source unregister·FGS demotion/해제 불명은 정리 성공으로 숨기지 않으며 기존 예약·FGS·재입장 차단을 유지한다.
-- **FGS IPC 보완의 최종 계약(편집 중; 통과 미주장):** 접근 세대 `fieldToken`과 각 바인딩의 새 `leaseId`를 분리한다. owner binder·token·lease·단조 sequence를 대조하고 실패한 enable도 sequence를 소비한다.128개 bounded terminal ledger로 종료 lease의 replay를 거부하며 기록을 지워 오래된 enable을 되살리지 않는다. death/응답 실패 정리는 owner generation까지 맞는 경우에만 적용한다. close 완료 callback은 단발이며 type 확인 없는 양성 결과·이전 owner의 demotion/death·중복/늦은 결과가 새 소유권을 바꾸지 못해야 한다.
+- **v66 FGS IPC 계약:** 접근 세대 `fieldToken`과 각 바인딩의 새 `leaseId`를 분리한다. owner binder·token·lease·단조 sequence를 대조하고 실패한 enable도 sequence를 소비한다.128개 bounded terminal ledger로 종료 lease의 replay를 거부하며 기록을 지워 오래된 enable을 되살리지 않는다. death/응답 실패 정리는 owner generation까지 맞는 경우에만 적용한다. close 완료 callback은 단발이며 type 확인 없는 양성 결과·이전 owner의 demotion/death·중복/늦은 결과가 새 소유권을 바꾸지 못해야 한다. 당시 정상 ACK·source 해제 bench와 실제 Binder death/해제 실패 미검증은 [기기 기록](Device-Validation.md)에서 구분한다.
 
 ### 개인정보·공식 앱 비교·검증 경계
 
-- 차량/폰 원시 GPS·heading 입력은 **RAM 전용**이다. UI StateFlow에는 좌표 없는 presentation만 전달하고 source 종료/clear·OFF·owner 교체·프로세스 종료 뒤 재생하지 않는다. 파일·일반/RAM 이벤트·FieldLog·Intent·영속 설정·백업·서버로 좌표를 내보내지 않는다. **FieldLog schema27 유지·raw GPS 로그 금지**이며 기존 허용 UWB raw 각도 로그와 혼동하지 않는다.
+- 차량/폰 원시 GPS·heading 입력은 **RAM 전용**이다. UI StateFlow에는 좌표 없는 presentation만 전달하고 source 종료/clear·OFF·owner 교체·프로세스 종료 뒤 재생하지 않는다. 파일·일반/RAM 이벤트·FieldLog·Intent·영속 설정·백업·서버로 raw 좌표·heading·절대 GPS/state 시각을 내보내지 않는다. v66 schema27은 당시 이력이며 [v67 위치 관측](#수정2--schema28-비민감-위치-관측)과 [v69 고정 enum 확장](#v69-선행-rx-수신-경계-정본)도 이 금지를 유지한다. 기존 허용 UWB raw 각도 로그와 혼동하지 않는다.
 - 우리 앱은 이 경로에 **Tesla 계정·OAuth·Tesla 서버를 쓰지 않고 BLE만** 쓴다. 이는 Android NETWORK provider의 OS 내부 통신까지 차단했다는 뜻이 아니다.
 - 공식 앱은 “GPS에 서버를 쓰지 않는다”는 추측으로 설명하지 않는다. REA native/정적 관측과 별도 parent Hermes parse에서 `getAccessToken → LOCATION_STREAMING WebSocket → Vitals UPDATE → Redux 위치 갱신`의 실제 코드 경로를 발견했다. 공식 앱 위치의 유일 transport라는 증거도, 실행 중 그 경로가 사용됐다는 관측도 아니다. native 좌표/나침반 소비와 서버 경로는 공존할 수 있다.
-- 분석 캐시는 `~/.cache/hey-tesla/rea/tesla-location-compass-rea-20261028-0915.json`, `tesla-location-compass-hermes-20261028-091534-812782.json`, `tesla-location-streaming-20261028-092249-118136.json`이다. **REA Evidence와 parent의 별도 Hermes 추출/parse를 모두 REA 단독 추출로 표시하지 않는다.**
+- 분석 캐시는 `비공개 로컬 보관 경로`, `tesla-location-compass-hermes-20261028-091534-812782.json`, `tesla-location-streaming-20261028-092249-118136.json`이다. **REA Evidence와 parent의 별도 Hermes 추출/parse를 모두 REA 단독 추출로 표시하지 않는다.**
 - 최종 production consumer·단일 fakeNative 경계·독립 AES peer 실행 기록은 `~/Library/Caches/hey-tesla/coordinate-v66-smoke-20261028-100819-190720/final-combined-production-smoke.txt`에 있다. domain2/3 병행·location response1·좌표 약111m/화살표90도·UWB valid1 및 heading2초/폰15초 만료·clear 비재생을 관측한 **호스트 합성 근거**다. 차량 RF 성공이 아니다.
 - 최신 수치·설치·실기기 결과는 [기기 검증](Device-Validation.md)에서 관리한다. 실제 FGS type ACK 뒤 native source 등록·정상 해제와 종료 후 callback0을 확인했으나 짧은 bench에서 유효 위치/heading 표본은0이었다. boot/잠금/다음 실제 접근 재사용·실차 위치/BLE/UWB 동시 수신·전력·방향 정확도는 미확인이다.
 
@@ -154,7 +608,7 @@ APK 근거는 PC 캐시 `tesla-frunk-next-evidence-20261019-4cc343d29ce84ae9851a
 
 ### 대상과 근거 경계
 
-설치된 공식 앱은 `4.61.6-4647`이며 기존 보존 `base.apk`의 SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`와 같은 분석 버전이다. 새 REA 메서드 분석과 기존 증거를 대조했다. 새 증거는 PC의 `~/.cache/hey-tesla/rea/tesla-4.61.6-frunk-connect-v60-20261026-081306.json`에 보존했다. APK 원문·키·VIN·STS·토큰은 위키에 넣지 않는다. 정적 shipped-artifact 근거이며 공식 앱 실행·후킹·차량 명령·실차 개방은 수행하지 않았다.
+설치된 공식 앱은 `4.61.6-4647`이며 기존 보존 `base.apk`의 SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`와 같은 분석 버전이다. 새 REA 메서드 분석과 기존 증거를 대조했다. 새 증거는 PC의 `비공개 로컬 보관 경로`에 보존했다. APK 원문·키·VIN·STS·토큰은 위키에 넣지 않는다. 정적 shipped-artifact 근거이며 공식 앱 실행·후킹·차량 명령·실차 개방은 수행하지 않았다.
 
 ### 연결·UWB 수명 차이
 
@@ -215,7 +669,7 @@ flowchart TD
 
 v61은 아래 식별자 해석 오류를 수정했다. 빌드·JVM428개·분석기116개·생산 wire smoke·실기기 비차량 coordinator 회귀7개를 통과했고 데이터 보존 설치·실제 설정 버전·서비스 ON/FGS를 확인했다. **차량의 response 수락·RF 시작·유효 거리·각도 성공은 아직 확인하지 않았다.** v60의 연결·인증 진전이나 정적 분석·비차량 검증을 v61 차량 성공으로 확대하지 않는다. 구체적 실행 범위는 [v61 검증](Device-Validation.md#0610--fira-요청-id와-중지-enum-분리)에 둔다.
 
-분석 대상은 같은 공식 Tesla **4.61.6-4647**, `base.apk` SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`다. 최종 REA bundle은 PC 캐시 `~/.cache/hey-tesla/rea/fira-id-v61-20261026-113957/tesla-4.61.6-fira-id-rea-evidence-final.json`에 보존했다. 124개 record에는 이전 세션의 중복 근거가 포함되므로 신규 Evidence124개라는 뜻이 아니다. 공식 앱·차량 실행 근거가 아닌 shipped-artifact 정적 분석이다.
+분석 대상은 같은 공식 Tesla **4.61.6-4647**, `base.apk` SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`다. 최종 REA bundle은 PC 캐시 `비공개 로컬 보관 경로`에 보존했다. 124개 record에는 이전 세션의 중복 근거가 포함되므로 신규 Evidence124개라는 뜻이 아니다. 공식 앱·차량 실행 근거가 아닌 shipped-artifact 정적 분석이다.
 
 ### 서로 다른 식별자
 
@@ -231,17 +685,7 @@ v61은 아래 식별자 해석 오류를 수정했다. 빌드·JVM428개·분석
 
 ### 공식 exact stop 경로와 원 DEX 보완
 
-REA event 분석에서 `ng0.b.C1943b`(원 `Lng0/b$b;`)는 `FiraSessionStop`, `ng0.b.c`(원 `Lng0/b$c;`)는 `FiraSessionStopped`다. `STOP_REASON_VEHICLE_FIRA_STOP_EVENT`와 ranging disconnected는 후자로, BLE disconnected는 전자로 전달된다. 따라서 차량 wire stop은 아래 원 DEX의 `0x0363` 분기에 연결된다.
-
-REA는 collector `Lpg0/f$c$a$b;->a(Lng0/b;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;`와 accessor `pg0.f.d` 본문을 unavailable/native·abstract로 잘못 반환했다. 이를 “본문 없음”이나 “REA로 collector 확인 완료”로 보고하지 않는다. parent가 APK 원 DEX를 직접 읽어 보존한 `collector-raw-dex-supplement.json`은 **REA Evidence record가 아닌 별도 원문 보완**이다.
-
-- 원본 `classes8.dex` SHA-256: `8449f743be4421063f2081fb7a4b6bdbb941e102730040cd53a67880c53899b3`.
-- collector **methodIndex52956, codeOffset5084388, 1006 code units, accessFlags0x11**. 분기 위치는 code item 기준 code-unit offset이다.
-- `0x0301`의 `b$b` 분기: event 목록 → `Number.intValue`(`0x031f`) → 같은 int 이동(`0x033e`) → `d(map,id)`(`0x034e`). `0x0363`의 `b$c` 분기도 `intValue`(`0x0382`) → 같은 int(`0x03a0`) → `d(map,id)`(`0x03b2`)이며 정리 뒤 원 event 목록을 `og0.i.b(List)`에 전달한다.
-- accessor **methodIndex52979, codeOffset5087848**은 `invoke-direct method@52991`로 `Lpg0/f;->p(ConcurrentHashMap,int,Continuation)`를 동일 인자·무변환 호출한다. resolved target은 supplement에 보존돼 있다.
-- 별도 REA `pg0.f.p`는 `map.get(id)` → 해당 job의 `cancelAndJoin` → `map.remove(id)`다. key가 없으면 해당 job 정리 없이 반환한다. 전체 종료나 bit/peer 매핑을 수행한다는 근거가 아니다.
-
-`b$c → og0.i.b → og0.d.b → og0.k.a → u1.e.a → u1.W0 → ag0.n.u → oc0.e.G`는 원 목록을 전달한다. 마지막 `G`에서만 `vd0.t.b.a(int)`의 exact enum 변환·null 제외(`mapNotNull` 의미)를 수행하고 `z1`을 구성한다. **모든 ID가 enum으로 표현 불가능해도 공식 코드는 빈 `z1`을 생성한다.** 이것은 빈 메시지의 차량 수락이나 실제 TX 완료까지 관측했다는 뜻은 아니다.
+정적 비교에서는 차량 측 중지 이벤트와 BLE 연결 종료가 구분되며, 중지 응답은 인식 가능한 별도 식별자 표현에 의존했다. 원본 코드와 분석 산출물은 공개 대상이 아니다. 빈 응답의 차량 수락이나 실제 전송 완료는 확인하지 못했다.
 
 ### Hey Tesla의 보수 종료 정책 — 공식 동등성과 구분
 
@@ -275,7 +719,7 @@ notification 수는 완성 frame 수가 아니다. 서비스 경로는 기존 �
 
 ### 공식 앱과 자체 수신 경계
 
-대상은 같은 Tesla4.61.6-4647, APK SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`다. REA 정적 근거67개를 `~/.cache/hey-tesla/rea/rx-v62-20261027-080822/tesla-4.61.6-rx-rea-evidence.json`에 보존했다. 공식 앱·차량 런타임을 관측한 것은 아니다.
+대상은 같은 Tesla4.61.6-4647, APK SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`다. REA 정적 근거67개를 `비공개 로컬 보관 경로`에 보존했다. 공식 앱·차량 런타임을 관측한 것은 아니다.
 
 |경계|공식 APK에서 확인한 것|자체 적용|
 |---|---|---|
@@ -357,7 +801,7 @@ protobuf의 `clock_time`·`expires_at` fixed32는 **LE32**, metadata의 counter�
 
 stop collector의 원 DEX 보완 범위·한계는 위 v61 절을 따른다. decompiler 누락을 native/abstract 동작으로 간주하거나 collector 전체 동시성을 복원한 것으로 확대하지 않는다.
 
-이번 재감사의 추가 정적 근거는 `~/.cache/hey-tesla/rea/tesla-4.61.6-contract-v63-20261027-independent-peer.json`에103 records·2,822,174바이트로 별도 보존했다. 이전 v61/v54 bundle과 원 DEX supplement는 보존한다. bundle의 unknown0은 도구 원장에 등록된 unknown 수이지 이 문서의 미확인이 해소됐다는 뜻이 아니다.
+이번 재감사의 추가 정적 근거는 `비공개 로컬 보관 경로`에103 records·2,822,174바이트로 별도 보존했다. 이전 v61/v54 bundle과 원 DEX supplement는 보존한다. bundle의 unknown0은 도구 원장에 등록된 unknown 수이지 이 문서의 미확인이 해소됐다는 뜻이 아니다.
 
 ### 독립 실행 판정과 남은 차이
 
@@ -391,7 +835,7 @@ schema27의 새 필드는 `uwbRxBodyBytes`, `uwbRxBodyStatus`, `uwbRxBodyFields`
 
 ### 근거와 실차 인과의 한계
 
-같은 Tesla **4.61.6-4647**, `base.apk` SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`의 private VCSEC 정적 계약을 대조했다. REA bundle은 `/Users/simgyubin/.cache/hey-tesla/rea/tesla-4.61.6-device-info-v65-20261028.json`에262 records로 보존했다. 이는 공식 APK의 정적 근거이며 공식 앱 실행·OEM RF 동작·차량 수락 증거가 아니다. 아래 wire 상세는 이 절을 정본으로 삼고 다른 문서는 소유권·안전 요구사항만 연결한다.
+같은 Tesla **4.61.6-4647**, `base.apk` SHA-256 `63adb6bb0556a44ea83996c719e2dfdcdbda4b33b8250bf46f6e5ee853c3d083`의 private VCSEC 정적 계약을 대조했다. REA bundle은 `비공개 로컬 보관 경로`에262 records로 보존했다. 이는 공식 APK의 정적 근거이며 공식 앱 실행·OEM RF 동작·차량 수락 증거가 아니다. 아래 wire 상세는 이 절을 정본으로 삼고 다른 문서는 소유권·안전 요구사항만 연결한다.
 
 v64 실차에서 native opened는17:07:54.901, peer started는5회였지만 **AOSP adapter의 전체 peer fan-out은 RF 왕복5회 성공을 뜻하지 않는다.** opened 이후 첫 stop은10.651초, 마지막 stop은13.010초 뒤였고 이후 앱 close와 `onClosed` 원 코드4(`SYSTEM_POLICY`)를 관측했다. 앱의 최초 거리60초 타이머가 이 종료를 일으킨 것은 아니다. 다만4는 backend의 원 사유를 축약했을 수 있어 전력·STS·채널 중 어느 하나를 원인으로 단정하지 않는다. field44 미처리는 확정된 프로토콜 누락이지만 **앱 거리 무수신의 RF root cause는 미확정**이며 이 보완의 실차 효과도 미검증이다.
 
@@ -414,7 +858,7 @@ proto3의0/false 기본값은 wire에서 생략한다. ONCHANGE의 배터리 per
 - seal·취소·OFF·owner/권한 상실·종료는 callback과 새 송신을 먼저 봉인하고 pending task/body를 제거·소거한다. source close는 배터리/절전 receiver와 thermal listener를 모두 해제하며 부분 등록 실패도 정리한다. 해제 실패를 정상 close로 숨기지 않고 기존 정리 불명·lease/예약·재입장 차단에 합산한다. late callback·이전 owner가 새 회차를 송신·복원하지 못한다.
 - **field3 authentication challenge는 별도 권한 경계**다. `NONE=0 / UNLOCK=1 / DRIVE=2` 요청을 단말 정보나 UWB 거리 승인으로 취급하지 않는다. 이번 변경은 UNLOCK/DRIVE 자동 grant도 임의 rejection도 추가하지 않고 미처리를 유지한다. 마이크·프렁크·잠금/주행 제어와 기존 키 권한을 확대하지 않는다.
 
-생산 근거는 [`TeslaUwbAppDeviceInfo.kt`](../app/src/main/java/com/heytesla/app/vehicle/protocol/TeslaUwbAppDeviceInfo.kt), [`AndroidTeslaUwbAppDeviceInfoSource.kt`](../app/src/main/java/com/heytesla/app/vehicle/uwb/AndroidTeslaUwbAppDeviceInfoSource.kt), [`TeslaBleProtocol.kt`](../app/src/main/java/com/heytesla/app/vehicle/protocol/TeslaBleProtocol.kt), [`TeslaBleKeySession.kt`](../app/src/main/java/com/heytesla/app/vehicle/key/TeslaBleKeySession.kt)다. 공개 VCSEC schema에 없는 private 계약을 공개 SDK 지원으로 설명하지 않는다.
+당시 생산 근거는 `vehicle/protocol/TeslaUwbAppDeviceInfo.kt`와 `vehicle/uwb/AndroidTeslaUwbAppDeviceInfoSource.kt`(v76 제품경로 제거), 당시 `TeslaBleProtocol.kt`와 `TeslaBleKeySession.kt`의 UWB 처리였다. 현재 공용 [`TeslaBleProtocol.kt`](../app/src/main/java/com/heytesla/app/vehicle/protocol/TeslaBleProtocol.kt)·[`TeslaBleKeySession.kt`](../app/src/main/java/com/heytesla/app/vehicle/key/TeslaBleKeySession.kt)를 과거 UWB 구현 원문으로 읽지 않는다. 공개 VCSEC schema에 없는 private 계약을 공개 SDK 지원으로 설명하지 않는다.
 
 ### source timestamp와 ingress receipt
 
@@ -422,7 +866,7 @@ proto3의0/false 기본값은 wire에서 생략한다. ONCHANGE의 배터리 per
 
 권한·활성 상태·owner 및 기한 검사는 기존처럼 **dispatch 시점**에 적용한다. queued/late 표본이 권한 상실·close·만료 뒤 현재 거리나 live peer를 부활시키지 못한다. 알림 TTL2초와 서비스 마지막 유효 receipt+10초 미수신 종료는 그대로이며 queue 대기 뒤 처리 시각으로 새2초/10초를 부여하지 않는다. 최초 유효거리60초·초기 협상/전체 기한·수동 측정60초/180초·wake lock 정책도 바꾸지 않는다. 기존 최초60초 창 안에서 지연된 최초 표본이 지난 진단값으로 기록될 수 있어도 현재 알림 freshness를 통과하지 않으며 이미 지난 receipt+10초 기한을 새로 연장하지 않는다.
 
-생산 근거는 [`TeslaUwbRanging.kt`](../app/src/main/java/com/heytesla/app/vehicle/uwb/TeslaUwbRanging.kt)다. v64 ingress1000ms·processing3000ms에서 receipt3000ms였던 재현은 v65 receipt1000ms로 교정됐다. 이는 callback freshness 결함 수정이지 무수신 RF 원인 해결 근거가 아니다.
+당시 생산 근거는 `vehicle/uwb/TeslaUwbRanging.kt`(v76 제품경로 제거)다. v64 ingress1000ms·processing3000ms에서 receipt3000ms였던 재현은 v65 receipt1000ms로 교정됐다. 이는 callback freshness 결함 수정이지 무수신 RF 원인 해결 근거가 아니다.
 
 ### 유지한 정책과 검증 경계
 
@@ -450,7 +894,7 @@ Infotainment는 별도 전제다. `ag0.j.c`는 modern domain3 요청에서 차�
 
 우리 v40은 지원 OS에서 autoConnect=true를 사용하고, 접근 읽기의 초기133에만 기존 handle을2초 뒤1회 재접속한다. Tesla의 장시간 재접속 전체를 복제하지 않고 원40초/광고10초·최종 close·이전 콜백 세대 봉인·SDK 거절/예외 차단을 유지한다. 성공 후 명령 재생·무제한 재시도·차량 제어는 추가하지 않는다. [현재 실행 계약](Native-Architecture.md#v40-tesla-연결-모드기존-gatt-재접속)을 따른다.
 
-133에서 `warnAboutBluetoothShouldCycle()`라는 경로는 있지만 도착 지점 `BLEService.n1()`은 해당 DEX에서 return-void뿐이었다. 자동 Bluetooth OFF/ON 구현이나133 해결 보장으로 해석하지 않는다. 추가 증거146건은 PC의 `~/.cache/hey-tesla/rea/tesla-4.61.6-gatt133-evidence-f2c6399f4ae049529f1a1b3680509f55.json`에 보존했으며 APK·디컴파일 원문은 저장소에 올리지 않는다. 핵심 근거는 callback `ev_ed4790be33d9de4bbca916a8dda3fad202a05ea4dbd7b1fa3f920e87154742f3`, delay `ev_8d7bca99f3cbbd9899bc294a8bc45875f20cd49500f6eb113739afdd816095cd`, reconnect lambda `ev_df19896c567a86a2de6475c47fe72947283f360c0ac9fece28f1a2c5d1426d01`이다. 정적 코드와 DEX 대조이며 실제 Tesla 앱을 실행·계측하지 않았다.
+133에서 `warnAboutBluetoothShouldCycle()`라는 경로는 있지만 도착 지점 `BLEService.n1()`은 해당 DEX에서 return-void뿐이었다. 자동 Bluetooth OFF/ON 구현이나133 해결 보장으로 해석하지 않는다. 추가 증거146건은 PC의 `비공개 로컬 보관 경로`에 보존했으며 APK·디컴파일 원문은 저장소에 올리지 않는다. 핵심 근거는 callback `ev_ed4790be33d9de4bbca916a8dda3fad202a05ea4dbd7b1fa3f920e87154742f3`, delay `ev_8d7bca99f3cbbd9899bc294a8bc45875f20cd49500f6eb113739afdd816095cd`, reconnect lambda `ev_df19896c567a86a2de6475c47fe72947283f360c0ac9fece28f1a2c5d1426d01`이다. 정적 코드와 DEX 대조이며 실제 Tesla 앱을 실행·계측하지 않았다.
 
 ## v39 연결 상태 기반 제한 복구
 
@@ -472,7 +916,7 @@ Tesla APK `u1.z/l`의 전송 실패→reset/disconnect·후속 정리 흐름을 
 
 - **실행한 조사:** REA6.5.0 / JADX headless0.7.1로 클래스44,261개 인벤토리 검색, 메서드 디컴파일·정적 참조 추적. Kotlin bridge·중복 블록 경고가 있는 경로는 smali와 Android SDK `apkanalyzer dex code`의 정확한 DEX 메서드를 대조했다. 디컴파일 표시명은 원본 소스명·원본 소스 라인이 아니며 이 APK에 한정한다.
 - **하지 않은 작업:** Tesla 앱 실행·계측·후킹, 사설 저장소/폰키/실제 STS·토큰 열람, 차량 명령, 우리 앱 코드·설정·권한 변경, 새 APK 설치. split 내부와 native 전체를 분석하거나 APK 서명을 검증한 것도 아니다.
-- **PC 보존:** APK는 `~/.cache/hey-tesla/rea/apk-smoke-6807734be6dd460c9a6245e17ed6dd8f/com.teslamotors.tesla/`, REA Evidence133건은 `~/.cache/hey-tesla/rea/tesla-4.61.6-uwb-evidence-20261016.json`에 있다. APK·디컴파일 원문·증거 bundle은 저장소/Wiki에 올리지 않는다. 아래 식별자는 이 bundle의 `evidence_id`다. `unknowns=0`은 등록된 unknown 레코드가 없다는 뜻이지 미확인 사항이 없다는 뜻이 아니다.
+- **PC 보존:** APK는 `비공개 로컬 보관 경로`, REA Evidence133건은 `비공개 로컬 보관 경로`에 있다. APK·디컴파일 원문·증거 bundle은 저장소/Wiki에 올리지 않는다. 아래 식별자는 이 bundle의 `evidence_id`다. `unknowns=0`은 등록된 unknown 레코드가 없다는 뜻이지 미확인 사항이 없다는 뜻이 아니다.
 
 ### BLE — AltBeacon·Nordic 사용 여부와 전송 구조
 
@@ -519,7 +963,7 @@ flowchart TD
 
 아래 표는 **REA 조사 당시 v37의 대조와 제안**이다. 이후 사용자 요청으로 Nordic만 제거한 실제 변경은 [v38 적용](#v38-직접-gatt-적용)에 구분한다.
 
-조사 당시 v37의 [`UwbSupportProbe.kt`](../app/src/main/java/com/heytesla/app/vehicle/uwb/UwbSupportProbe.kt)는 `RangingManager.registerCapabilitiesCallback`으로 **지원 정보만** 조회했고 `RANGING / UWB_RANGING`도 선언하지 않았다. 이 지원 조회는 그대로 유지하며, 이후 구현한 별도 실측 경로는 [v54 수동 진단](#v54-수동-tesla-uwb-거리-진단)에 구분한다. 과거 S23의 가용3/ENABLED·background 지원 보고는 Tesla 거리 측정 성공이 아니다.
+조사 당시 v37의 `vehicle/uwb/UwbSupportProbe.kt`(v76 제품경로 제거)는 `RangingManager.registerCapabilitiesCallback`으로 **지원 정보만** 조회했고 `RANGING / UWB_RANGING`도 선언하지 않았다. 당시 지원 조회와 이후 구현했던 별도 실측 경로는 [v54 수동 진단](#v54-수동-tesla-uwb-거리-진단)에 구분해 보존한다. v76에서는 두 실행 경로 모두 제거했다. 과거 S23의 가용3/ENABLED·background 지원 보고는 Tesla 거리 측정 성공이 아니다.
 
 현재 당면 문제는 [v37 실차 첫 쓰기 실패](Device-Validation.md#v37-실차-후속-분석)다. Nordic2.11.0의 [`internalWriteCharacteristic`](https://github.com/nordicsemi/Android-BLE-Library/blob/2.11.0/ble/src/main/java/no/nordicsemi/android/ble/BleManagerHandler.java#L1206-L1245)은 API33+ SDK 반환값이 SUCCESS인지 검사하고 SecurityException도 false로 처리한다. [`nextRequest`](https://github.com/nordicsemi/Android-BLE-Library/blob/2.11.0/ble/src/main/java/no/nordicsemi/android/ble/BleManagerHandler.java#L3942-L3958)는 연결 중 작업이 false이면 `REASON_NULL_ATTRIBUTE=-3`으로 축약한다. 따라서 **`-3`만으로 null characteristic·차량 인증 거부·native133 중 하나를 확정하지 않는다.**
 

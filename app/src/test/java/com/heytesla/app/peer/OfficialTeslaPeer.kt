@@ -1,6 +1,8 @@
 package com.heytesla.app.peer
 
 import com.google.protobuf.ByteString
+import com.tesla.generated.carserver.server.CarServer
+import com.tesla.generated.vcsec.Vcsec
 import com.tesla.generated.signatures.Signatures
 import com.tesla.generated.universalmessage.UniversalMessage
 import java.security.KeyPair
@@ -8,25 +10,23 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 
 /**
- * In-memory UWB + read-only LocationState vehicle-side oracle. No Android/BLE/RF, account,
- * storage, actuator or key-registration API. VIN is always seventeen synthetic ASCII zeroes.
+ * In-memory DRIVE/BODY and explicitly opted-in wake/front-trunk wire oracle. No Android/BLE/RF,
+ * account, storage or key-registration API. No physical actuator access. VIN is seventeen synthetic ASCII zeroes.
  * Public wire/auth contract (pinned, not a production helper):
  * https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/protocol/protocol.md
  * https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/internal/authentication/peer.go
- * Public protobuf bindings are permitted; private FiRa/device info use independent wire oracles.
  * BE16: REA ev_c7fab75b224a30060acd0d86e300795fb25f9b605918d29ac39d40e3ba06baff.
  * Request metadata: ev_8defd1cbe9950769ee031f4bed2da8cb9a3b07e53b8af47cc03805409c7f709b.
  * Response metadata/request-tag binding: ev_8a137491ec32200665848ec3def8a900a0c5dfd0666e40343bac0767f2331010.
- * Raw/wrapped distinction: ev_48092339a640e9a22646e27e350669033ca7721233f44010b8e79bd59ecfa1eb.
  * This models a static protocol contract, not an actual vehicle or official app runtime.
- * In particular, official decrypted-FiRa collector re-entry remains unproven.
  * Captures and arrays must not be logged; toString deliberately omits synthetic payloads.
  */
 internal class OfficialTeslaPeer(
     private val autoHandshake: Boolean = true,
     private val initialClockSeconds: Long = 100,
     private val initialCounter: Long = 0,
-    private val autoLocationHandshake: Boolean = autoHandshake,
+    private val allowFrunk: Boolean = false,
+    private val allowWake: Boolean = false,
 ) : AutoCloseable {
     sealed interface Event {
         class Handshake(val contextId: Long, val domain: Int, val framedReply: ByteArray?) : Event {
@@ -40,6 +40,8 @@ internal class OfficialTeslaPeer(
         }
     }
 
+    enum class RequestKind { DRIVE, BODY, WAKE, FRUNK }
+
     class CapturedRequest internal constructor(
         val id: Long,
         val domain: Int,
@@ -50,15 +52,12 @@ internal class OfficialTeslaPeer(
         val expiresAt: Long,
         val flags: Long,
         val plaintext: ByteArray,
-        val fira: FiraWire.ClientPayload?,
-        val deviceInfo: DeviceInfoWire.Response?,
-        val locationQuery: Boolean,
+        val kind: RequestKind,
     ) : AutoCloseable {
         override fun close() {
             route.fill(0); uuid.fill(0); requestHash.fill(0); plaintext.fill(0)
-            fira?.close(); deviceInfo?.close()
         }
-        override fun toString(): String = "PeerCapturedReadOnlyOrUwbRequest"
+        override fun toString(): String = "PeerCapturedRequest"
     }
 
     /** Values affect authenticated metadata. envelopeMutation runs AFTER authentication. */
@@ -116,7 +115,6 @@ internal class OfficialTeslaPeer(
     private val handshakes = LinkedHashMap<Long, HandshakeContext>()
     private val requests = LinkedHashMap<Long, RequestContext>()
     private val captures = ArrayList<CapturedRequest>()
-    private val offered = HashMap<Long, Int>()
     private var nextId = 1L
     private var closed = false
     val capturedRequests: List<CapturedRequest> get() = captures.toList()
@@ -179,7 +177,7 @@ internal class OfficialTeslaPeer(
             val context = HandshakeContext(nextId++, domain, message.fromDestination.routingAddress.toByteArray(),
                 message.uuid.toByteArray(), publicKey.copyOf(), OfficialPeerCrypto.sharedKey(state.keyPair.private, publicKey), state)
             handshakes[context.id] = context
-            val reply = if (autoHandshake && (domain != 3 || autoLocationHandshake)) sessionInfoResponse(context.id, nowMillis) else null
+            val reply = if (autoHandshake) sessionInfoResponse(context.id, nowMillis) else null
             return Event.Handshake(context.id, domain, reply)
         } finally { publicKey.fill(0) }
     }
@@ -197,8 +195,6 @@ internal class OfficialTeslaPeer(
         val nonce = auth.nonce.toByteArray()
         val tag = auth.tag.toByteArray()
         var plaintext: ByteArray? = null
-        var parsed: FiraWire.ClientPayload? = null
-        var deviceInfo: DeviceInfoWire.Response? = null
         try {
             reject(epoch.isNotEmpty() && !MessageDigest.isEqual(epoch, context.state.epoch), "REQUEST_EPOCH")
             reject(nonce.size != 12 || tag.size != 16, "REQUEST_NONCE_OR_TAG_LENGTH")
@@ -219,60 +215,40 @@ internal class OfficialTeslaPeer(
             val encrypted = message.protobufMessageAsBytes.toByteArray() + tag
             plaintext = try { OfficialPeerCrypto.aesGcm(false, context.key, nonce, metadata, encrypted) }
             finally { metadata.fill(0); encrypted.fill(0) }
-            if (domain == 3) {
-                // Exact nested allowlist: Action.vehicleAction(2) / getVehicleData(1) /
-                // getLocationState(7), each exclusive and the final message empty.
-                reject(!LocationWire.isExclusiveLocationRequest(plaintext), "ONLY_LOCATION_READ_ALLOWED")
-            } else {
-                parsed = try { FiraWire.decodeClientPayload(plaintext) }
-                catch (_: IllegalArgumentException) {
-                    deviceInfo = DeviceInfoWire.decodeResponse(plaintext)
-                    null
-                }
-                parsed?.let(::validateClientPayload)
-            }
+            val kind = classifyRequest(domain, plaintext)
             val id = nextId++
             val hash = OfficialPeerCrypto.requestHash(tag)
             val route = message.fromDestination.routingAddress.toByteArray()
             val uuid = message.uuid.toByteArray()
             requests[id] = RequestContext(context, route.copyOf(), uuid.copyOf(), hash.copyOf())
             val capture = CapturedRequest(id, domain, route, uuid, hash, counter, expires, flags,
-                plaintext, parsed, deviceInfo, locationQuery = domain == 3)
+                plaintext, kind)
             captures.add(capture)
             context.state.clientCounters[clientIdentity] = counter
             plaintext = null
-            parsed = null
-            deviceInfo = null
             return Event.ClientRequest(capture)
         } finally {
             epoch.fill(0); nonce.fill(0); tag.fill(0); plaintext?.fill(0)
-            parsed?.close(); deviceInfo?.close()
         }
     }
 
-    private fun validateClientPayload(payload: FiraWire.ClientPayload) {
-        when (payload) {
-            is FiraWire.ClientPayload.Capabilities -> Unit // Bit meanings are not inferred from the APK's empty n0.
-            is FiraWire.ClientPayload.Response -> {
-                reject(payload.sessions.isEmpty(), "FIRA_RESPONSE_EMPTY")
-                reject(payload.sessions.map { it.requestSessionId }.toSet().size != payload.sessions.size, "FIRA_RESPONSE_DUPLICATE_ID")
-                for (response in payload.sessions) {
-                    val mode = offered[response.requestSessionId] ?: throw PeerRejection("FIRA_RESPONSE_UNOFFERED_ID")
-                    reject((response.data == null) == (response.errorCode == null), "FIRA_RESPONSE_SUCCESS_ERROR_PRESENCE")
-                    val data = response.data ?: continue
-                    reject(payload.keyIdPresent, "FIRA_RESPONSE_UNEXPECTED_KEY_ID")
-                    reject(data.localAddress.size != 2, "FIRA_RESPONSE_LOCAL_ADDRESS")
-                    reject(data.channel != 5L && data.channel != 9L, "FIRA_RESPONSE_CHANNEL")
-                    reject(data.preamble !in 9L..12L, "FIRA_RESPONSE_PREAMBLE")
-                    reject(data.sts.size != if (mode == 1) 8 else 16, "FIRA_RESPONSE_STS_LENGTH")
-                    reject(data.responderAddresses.isNotEmpty(), "FIRA_RESPONSE_UNEXPECTED_RESPONDER_ADDRESSES")
-                    // Backend ID is uint32, NOT the request ID or stop enum; zero/equality are not forbidden here.
-                }
-            }
-            is FiraWire.ClientPayload.Stopped -> {
-                reject(payload.endpoints.distinct().size != payload.endpoints.size, "FIRA_STOPPED_DUPLICATE")
-                reject(payload.endpoints.any { it.toLong() !in offered }, "FIRA_STOPPED_UNOFFERED_ID")
-            }
+    private fun classifyRequest(domain: Int, bytes: ByteArray): RequestKind {
+        val drive = CarServer.Action.newBuilder().setVehicleAction(CarServer.VehicleAction.newBuilder()
+            .setGetVehicleData(CarServer.GetVehicleData.newBuilder()
+                .setGetDriveState(CarServer.GetDriveState.getDefaultInstance()))).build().toByteArray()
+        val body = Vcsec.UnsignedMessage.newBuilder().setInformationRequest(Vcsec.InformationRequest.newBuilder()
+            .setInformationRequestType(Vcsec.InformationRequestType.INFORMATION_REQUEST_TYPE_GET_STATUS))
+            .build().toByteArray()
+        val frunk = Vcsec.UnsignedMessage.newBuilder().setClosureMoveRequest(Vcsec.ClosureMoveRequest.newBuilder()
+            .setFrontTrunk(Vcsec.ClosureMoveType_E.CLOSURE_MOVE_TYPE_MOVE)).build().toByteArray()
+        val wake = Vcsec.UnsignedMessage.newBuilder()
+            .setRKEActionValue(30).build().toByteArray()
+        return when {
+            domain == 3 && bytes.contentEquals(drive) -> RequestKind.DRIVE
+            domain == 2 && bytes.contentEquals(body) -> RequestKind.BODY
+            domain == 2 && allowWake && bytes.contentEquals(wake) -> RequestKind.WAKE
+            domain == 2 && allowFrunk && bytes.contentEquals(frunk) -> RequestKind.FRUNK
+            else -> throw PeerRejection("CLIENT_COMMAND_NOT_ALLOWED")
         }
     }
 
@@ -330,31 +306,43 @@ internal class OfficialTeslaPeer(
                 options.envelopeMutation?.invoke(builder)
                 val result = frame(builder.build().toByteArray())
                 request.nextResponseCounter = maxOf(request.nextResponseCounter, counter + 1)
-                if (request.handshake.domain == 2) rememberVehiclePayload(plaintext)
                 return result
             } finally { ciphertext.fill(0); tag.fill(0) }
         } finally { nonce.fill(0); encrypted.fill(0) }
     }
 
-    fun rawFira(plaintext: ByteArray): ByteArray {
-        check(!closed) { "PEER_CLOSED" }
-        rememberVehiclePayload(plaintext)
-        return frame(plaintext)
+    /** Explicit BODY sleep state; UNKNOWN is not inferred to be AWAKE or ASLEEP. */
+    fun bodyStatusResponse(requestId: Long, sleepStatus: Int, open: Boolean = false,
+                           options: ResponseOptions = ResponseOptions()): ByteArray {
+        require(sleepStatus in 0..2)
+        check(captures.single { it.id == requestId }.kind == RequestKind.BODY)
+        val body = Vcsec.FromVCSECMessage.newBuilder().setVehicleStatus(Vcsec.VehicleStatus.newBuilder()
+            .setVehicleSleepStatusValue(sleepStatus)
+            .setClosureStatuses(Vcsec.ClosureStatuses.newBuilder().setFrontTrunkValue(if (open) 1 else 0)))
+            .build().toByteArray()
+        return try { encryptedResponse(requestId, body, options) } finally { body.fill(0) }
     }
 
-    fun wrappedFira(plaintext: ByteArray, domain: Int = 2, route: ByteArray = byteArrayOf(),
-                    requestUuid: ByteArray = byteArrayOf(), flags: Long = 0,
-                    operationStatus: Int = 0, fault: Long = 0,
-                    envelopeMutation: ((UniversalMessage.RoutableMessage.Builder) -> Unit)? = null): ByteArray {
-        check(!closed) { "PEER_CLOSED" }
-        val builder = responseEnvelope(domain, route, requestUuid)
-            .setProtobufMessageAsBytes(ByteString.copyFrom(plaintext)).setFlags(asUInt32(flags))
-            .setSignedMessageStatus(UniversalMessage.MessageStatus.newBuilder()
-                .setOperationStatusValue(operationStatus).setSignedMessageFaultValue(asUInt32(fault)))
-        envelopeMutation?.invoke(builder)
-        rememberVehiclePayload(plaintext)
-        return frame(builder.build().toByteArray())
+    /** A terminal encrypted RKE reply is an ACK, not evidence of physical waking or P. */
+    fun wakeResponse(requestId: Long, options: ResponseOptions = ResponseOptions()): ByteArray {
+        check(captures.single { it.id == requestId }.kind == RequestKind.WAKE)
+        return encryptedResponse(requestId, byteArrayOf(), options)
     }
+
+    /** Unauthenticated exact nominal OK permits only a separate DRIVE read, never authenticated ACK/P. */
+    fun nominalWakeResponse(requestId: Long,
+                            mutation: ((UniversalMessage.RoutableMessage.Builder) -> Unit)? = null): ByteArray {
+        check(captures.single { it.id == requestId }.kind == RequestKind.WAKE)
+        val request = checkNotNull(requests[requestId])
+        val response = responseEnvelope(request.handshake.domain, request.route, request.uuid)
+            .setSignedMessageStatus(UniversalMessage.MessageStatus.newBuilder().setOperationStatusValue(0))
+        mutation?.invoke(response)
+        return frame(response.build().toByteArray())
+    }
+
+    /** Missing an explicit status is unknown, not the nominal compatibility case. */
+    fun unconfirmedWakeResponse(requestId: Long): ByteArray =
+        nominalWakeResponse(requestId) { it.clearSignedMessageStatus() }
 
     /** Independent peer clock control; elapsed time must not be inferred from the consumer's clock. */
     fun setDomainClock(domain: Int, seconds: Long, nowMillis: Long) {
@@ -371,15 +359,6 @@ internal class OfficialTeslaPeer(
         return seconds
     }
 
-    private fun rememberVehiclePayload(plaintext: ByteArray) {
-        // Malformed/unknown payload generation is allowed for negative scenarios, without inventing sessions.
-        val payload = try { FiraWire.decodeVehiclePayload(plaintext) } catch (_: IllegalArgumentException) { return }
-        payload.use {
-            if (it is FiraWire.VehiclePayload.Request) for (session in it.sessions) {
-                offered[session.requestSessionId] = session.stsMode
-            }
-        }
-    }
 
     private fun responseEnvelope(domain: Int, route: ByteArray, uuid: ByteArray): UniversalMessage.RoutableMessage.Builder =
         UniversalMessage.RoutableMessage.newBuilder()
@@ -404,7 +383,6 @@ internal class OfficialTeslaPeer(
         requests.values.forEach { it.clear() }; requests.clear()
         handshakes.values.forEach { it.clear() }; handshakes.clear()
         domains.values.forEach { it.epoch.fill(0); it.clientCounters.clear() }; domains.clear()
-        offered.clear()
         syntheticVin.fill(0)
         // JCA private/provider objects cannot promise physical JVM-memory zeroization; references are dropped.
     }

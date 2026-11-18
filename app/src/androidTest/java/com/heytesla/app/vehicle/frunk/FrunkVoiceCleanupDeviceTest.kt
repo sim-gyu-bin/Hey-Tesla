@@ -148,6 +148,5 @@ class FrunkVoiceCleanupDeviceTest {
         assertTrue(runtime.diagnosticCleanupUncertain)
         assertNull(runtime.acquireSpeechDiagnostic {})
         assertNull(runtime.acquireTeslaKey())
-        assertFalse(runtime.acquireUwbSupport())
     }
 }

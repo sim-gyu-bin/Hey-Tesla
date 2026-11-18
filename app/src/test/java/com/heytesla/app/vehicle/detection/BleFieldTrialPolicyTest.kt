@@ -14,7 +14,7 @@ class BleFieldTrialPolicyTest {
             p.scanAvailabilityChanged(true)
             val attempt = checkNotNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
             p.finished(attempt, BleProbeState(status = BleProbeStatus.BLOCKED,
-                reason = "RANGING_PERMISSION_REQUIRED", localClosed = true), true)
+                reason = "PRODUCT_VOICE_CONSENT_REQUIRED", localClosed = true), true)
             time = 12_000
             if (timerRan) p.tick()
             // 10초 기한보다 앞선 실제 수신값: 전달이 늦었을 뿐 차량 이탈·재접근이 아니다.
@@ -29,7 +29,7 @@ class BleFieldTrialPolicyTest {
         }
     }
 
-    @Test fun serviceUwbRequiresFreshAdvertisementFromCurrentRunningScan() {
+    @Test fun serviceConnectionRequiresFreshAdvertisementFromCurrentRunningScan() {
         var time = 20_000L
         val p = BleFieldTrialPolicy({ time })
         assertNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
@@ -46,7 +46,7 @@ class BleFieldTrialPolicyTest {
         assertEquals(1L, p.candidateCount)
     }
 
-    @Test fun serviceUwbPauseAndResumeCannotBecomeDepartureOrRetry() {
+    @Test fun serviceConnectionPauseAndResumeCannotBecomeDepartureOrRetry() {
         var time = 1_000L
         val p = BleFieldTrialPolicy({ time })
         p.scanAvailabilityChanged(true)
@@ -77,7 +77,7 @@ class BleFieldTrialPolicyTest {
         assertEquals(2L, p.candidateCount)
     }
 
-    @Test fun serviceUwbOnlyObservedScanTimeCountsTowardDeparture() {
+    @Test fun serviceConnectionOnlyObservedScanTimeCountsTowardDeparture() {
         var time = 1_000L
         val p = BleFieldTrialPolicy({ time })
         p.scanAvailabilityChanged(true)
@@ -100,19 +100,19 @@ class BleFieldTrialPolicyTest {
         assertEquals(1L, p.attemptCount)
     }
 
-    @Test fun serviceInitialBudgetEndsUnlessCurrentOwnerEntersRanging() {
-        for (ranging in listOf(false, true)) {
+    @Test fun serviceInitialBudgetEndsUnlessCurrentOwnerEntersMonitoring() {
+        for (monitoring in listOf(false, true)) {
             var time = 1_000L
             val p = BleFieldTrialPolicy({ time })
             p.scanAvailabilityChanged(true)
             val attempt = checkNotNull(p.signal(BleEvidenceSignal.FILTERED_SCAN, time).startAttempt)
             p.scanAvailabilityChanged(false)
-            p.serviceRanging(attempt + 1)
+            p.serviceMonitoring(attempt + 1)
             assertEquals(181_000L, p.attemptDeadline)
-            if (ranging) p.serviceRanging(attempt)
+            if (monitoring) p.serviceMonitoring(attempt)
             time = 181_000
-            assertEquals(if (ranging) null else attempt, p.tick().cancelAttempt)
-            if (ranging) {
+            assertEquals(if (monitoring) null else attempt, p.tick().cancelAttempt)
+            if (monitoring) {
                 time += 3_600_000
                 assertNull(p.tick().cancelAttempt)
                 assertEquals(attempt, p.currentAttempt)

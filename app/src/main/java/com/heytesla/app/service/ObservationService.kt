@@ -1,10 +1,7 @@
 package com.heytesla.app
 
 import com.heytesla.app.diagnostics.BleCandidateDiagnosticsPublisher
-import com.heytesla.app.ui.teslaUwbSampleIsRecent
-import com.heytesla.app.ui.vehicleNavigationText
-import com.heytesla.app.ui.vehicleUwbCompactText
-import com.heytesla.app.ui.vehicleUwbNotificationText
+import com.heytesla.app.ui.vehicleServiceNotificationText
 import com.heytesla.app.vehicle.ble.BleProbeState
 import com.heytesla.app.vehicle.ble.BleProbeStatus
 import com.heytesla.app.vehicle.detection.BleEventEvidence
@@ -12,9 +9,9 @@ import com.heytesla.app.vehicle.detection.BleEvidenceKind
 import com.heytesla.app.vehicle.detection.BleEvidenceSignal
 import com.heytesla.app.vehicle.detection.BleFieldTrialPolicy
 import com.heytesla.app.vehicle.detection.BleSupplementalScanner
-import com.heytesla.app.vehicle.uwb.TeslaServiceUwbRequest
-import com.heytesla.app.vehicle.uwb.TeslaUwbProbeState
-import com.heytesla.app.vehicle.uwb.TeslaUwbStage
+import com.heytesla.app.vehicle.connection.TeslaServiceConnectionRequest
+import com.heytesla.app.vehicle.connection.TeslaConnectionState
+import com.heytesla.app.vehicle.connection.TeslaConnectionStage
 
 import android.app.KeyguardManager
 import android.app.Notification
@@ -30,7 +27,7 @@ import android.os.IBinder
 import android.os.Binder
 import android.os.PowerManager
 
-/** 현재 BLE 감지·서비스 UWB 소유자. bound-only이며 BeaconService만 FGS 알림을 소유한다. */
+/** 현재 BLE 감지·인증 연결 소유자. bound-only이며 BeaconService가 감지 FGS를 소유한다. */
 class ObservationService : Service() {
     private val runtime get() = (application as DiagnosticApp).runtime
     private var requestId: String? = null
@@ -38,8 +35,8 @@ class ObservationService : Service() {
     private var finishingField = false
     private var fieldPolicy: BleFieldTrialPolicy? = null
     private var scanner: BleSupplementalScanner? = null
-    private var serviceUwbRequest: TeslaServiceUwbRequest? = null
-    private var serviceUwbPauseConfirmed = false
+    private var serviceConnectionRequest: TeslaServiceConnectionRequest? = null
+    private var serviceConnectionPauseConfirmed = false
     private var lastNotificationToken: String? = null
     private var lastNotificationText: String? = null
     private var destroyed = false
@@ -54,37 +51,42 @@ class ObservationService : Service() {
     internal var observedAssociationId: Int? = null
         private set
 
-    internal fun ownsServiceUwb(request: TeslaServiceUwbRequest): Boolean =
-        !destroyed && serviceUwbRequest === request && request.owner === this &&
+    internal fun ownsServiceConnection(request: TeslaServiceConnectionRequest): Boolean =
+        !destroyed && serviceConnectionRequest === request && request.owner === this &&
             requestId == request.fieldToken &&
             fieldPolicy?.accepting == true && fieldPolicy?.present == true &&
             fieldPolicy?.currentAttempt == request.attempt && fieldPolicy?.candidateCount == request.candidate &&
             observedAssociationId == request.associationId
 
-    internal fun serviceUwbScanPaused(request: TeslaServiceUwbRequest): Boolean =
-        serviceUwbRequest === request && serviceUwbPauseConfirmed
+    internal fun serviceConnectionScanPaused(request: TeslaServiceConnectionRequest): Boolean =
+        serviceConnectionRequest === request && serviceConnectionPauseConfirmed
 
-    internal fun serviceUwbRanging(request: TeslaServiceUwbRequest) {
-        if (!ownsServiceUwb(request)) return
-        fieldPolicy?.serviceRanging(request.attempt)
+    internal fun serviceConnectionMonitoring(request: TeslaServiceConnectionRequest) {
+        if (!ownsServiceConnection(request)) return
+        fieldPolicy?.serviceMonitoring(request.attempt)
         schedulePolicy()
     }
 
-    internal fun uwbStateChanged() {
-        val request = serviceUwbRequest
-        val state = runtime.teslaUwbState.value
-        val sample = state.lastReceivedSample
-        if (request != null && ownsServiceUwb(request) && state.serviceOwned &&
-            state.stage == TeslaUwbStage.RANGING && sample != null &&
-            teslaUwbSampleIsRecent(state, sample, runtime.now()) &&
-            (wakeLockRenewedAt == null || sample.receivedAtElapsedMs - checkNotNull(wakeLockRenewedAt) >= 5_000L)
-        ) {
-            // 5초 갱신 간격 + 무수신 10초 + 정리 5초. 새 거리 없이는 OS 기한을 연장하지 않는다.
-            if (acquireWakeLock(20_000L)) wakeLockRenewedAt = sample.receivedAtElapsedMs
+    internal fun serviceParkRefreshed(request: TeslaServiceConnectionRequest, receivedAt: Long) {
+        if (!ownsServiceConnection(request) || receivedAt > runtime.now() || runtime.now() - receivedAt > 5_000L) return
+        if (wakeLockRenewedAt == null || receivedAt - checkNotNull(wakeLockRenewedAt) >= 5_000L) {
+            // 새 인증 P만 갱신한다. 임의 GATT 패킷·오래된 P·인식 결과는 수명 증거가 아니다.
+            if (acquireWakeLock(20_000L)) wakeLockRenewedAt = receivedAt
             else runtime.stopBleFieldTrial(if (wakeLockCleanupFailed) "LOCAL_CLOSE_FAILED_RESTART_REQUIRED"
                 else "BLE_FIELD_WAKE_LOCK_UNAVAILABLE")
         }
         updateNotification()
+    }
+
+    internal fun serviceFrunkStarting(request: TeslaServiceConnectionRequest, acceptedAt: Long): Boolean {
+        if (!ownsServiceConnection(request)) return false
+        val now = runtime.now()
+        val consentMs = com.heytesla.app.vehicle.frunk.TeslaFrunkPolicy.CONSENT_MS
+        if (acceptedAt < 0L || acceptedAt > now || now - acceptedAt >= consentMs) return false
+        val ready = acquireWakeLock(consentMs - (now - acceptedAt) + 5_000L)
+        if (!ready) runtime.stopBleFieldTrial(if (wakeLockCleanupFailed) "LOCAL_CLOSE_FAILED_RESTART_REQUIRED"
+            else "BLE_FIELD_WAKE_LOCK_UNAVAILABLE")
+        return ready
     }
     internal inner class LocalBinder : Binder() {
         fun start(intent: Intent) {
@@ -167,47 +169,16 @@ class ObservationService : Service() {
         startForeground(NOTIFICATION_ID, notification(token), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
     }
 
-    private fun notificationStatusText(): String {
-        val s = runtime.state.value
-        val uwbText = vehicleUwbNotificationText(runtime.teslaUwbState.value, runtime.now())
-        return when {
-            s.teslaKeyCleanupFailed || s.bleFieldTrialStopReason == "LOCAL_CLOSE_FAILED_RESTART_REQUIRED" ||
-                runtime.bleProbeState.value.status == BleProbeStatus.CLEANUP_FAILED -> "재시작 필요"
-            s.bleFieldTrialStopping || runtime.bleProbeState.value.status == BleProbeStatus.CLEANING_UP -> "정리 중"
-            uwbText != null -> uwbText
-            serviceUwbRequest != null -> "UWB 준비 중 · BLE 스캔 일시 중지"
-            s.bleFieldTrialWaitingForDeparture -> "측정 종료 · 이탈 후 다음 접근 대기"
-            s.bleFieldScanFailure != null -> "차량 감지 중지 · 스캔 오류"
-            s.bleFieldScanRecoveryAt != null -> "차량 감지 일시 중지 · OS 스캔 복구 대기"
-            !s.bleFieldScanRunning -> "차량 감지 시작 중"
-            s.present -> "차량 신호 확인 · UWB 준비 상태 확인"
-            else -> "차량 신호 대기 · 접근 시 UWB 측정"
-        }
-    }
-
-    private fun notificationText(): String {
-        val status = notificationStatusText()
-        val s = runtime.state.value
-        if (s.bleFieldTrialStopping ||
-            s.teslaKeyCleanupFailed || s.bleFieldTrialStopReason == "LOCAL_CLOSE_FAILED_RESTART_REQUIRED" ||
-            runtime.bleProbeState.value.status == BleProbeStatus.CLEANUP_FAILED ||
-            runtime.teslaUwbState.value.stage == TeslaUwbStage.CLEANUP_FAILED
-        ) return status
-        val uwb = vehicleUwbNotificationText(runtime.teslaUwbState.value, runtime.now()) ?: "UWB 실측 미수신"
-        val coordinate = vehicleNavigationText(runtime.vehicleNavigation.value)
-        return if (status == uwb) "$coordinate\n$uwb" else "$status\n$coordinate\n$uwb"
-    }
+    private fun notificationText(): String = vehicleServiceNotificationText(runtime.state.value)
 
     private fun notification(token: String, text: String = notificationText()): Notification {
-        val uwbStage = runtime.teslaUwbState.value.stage
-        val compact = if ('\n' !in text || uwbStage == TeslaUwbStage.FAILED ||
-            uwbStage == TeslaUwbStage.BLOCKED || uwbStage == TeslaUwbStage.TIMED_OUT
-        ) notificationStatusText() else vehicleNavigationText(runtime.vehicleNavigation.value) +
-            " · " + vehicleUwbCompactText(runtime.teslaUwbState.value, runtime.now())
+        val compact = text
         val stopIntent = Intent(this, ObservationService::class.java)
             .setAction(ACTION_STOP).setIdentifier(token).putExtra(REQUEST_ID, token)
         val stop = PendingIntent.getService(this, 2, stopIntent, PendingIntent.FLAG_IMMUTABLE)
-        val open = PendingIntent.getActivity(this, 3, Intent(this, MainActivity::class.java),
+        val open = PendingIntent.getActivity(this, 3, Intent(this, MainActivity::class.java)
+            .setAction(MainActivity.ACTION_SHOW_VOICE_RESULTS)
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_vehicle_notification)
@@ -216,7 +187,7 @@ class ObservationService : Service() {
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setPublicVersion(Notification.Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_vehicle_notification)
-                .setContentTitle("Hey Tesla 서비스").setContentText("차량 안내 서비스 실행 중")
+                .setContentTitle("Hey Tesla 서비스").setContentText("차량 연결 서비스 실행 중")
                 .setVisibility(Notification.VISIBILITY_PUBLIC).build())
             .setContentIntent(open).setOngoing(true)
             .setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
@@ -279,7 +250,7 @@ class ObservationService : Service() {
         decision.cancelAttempt?.let {
             if (policy.currentAttempt == it) {
                 val reason = if (runtime.now() >= (policy.attemptDeadline ?: Long.MAX_VALUE)) "DEADLINE_EXPIRED" else "DEPARTED"
-                cancelServiceUwbAttempt(it, reason)
+                cancelServiceConnectionAttempt(it, reason)
             }
         }
         decision.startAttempt?.let(::startAttempt)
@@ -295,24 +266,18 @@ class ObservationService : Service() {
             attemptFinished(attempt, BleProbeState(status = BleProbeStatus.CANCELED, reason = "FIELD_OWNER_NOT_ARMED"), false)
             return
         }
-        if (serviceUwbRequest?.attempt != attempt) {
-            finishUnstartedServiceUwb(attempt, "SCAN_DEVICE_UNAVAILABLE")
+        if (serviceConnectionRequest?.attempt != attempt) {
+            finishUnstartedServiceConnection(attempt, "SCAN_DEVICE_UNAVAILABLE")
             return
         }
-        if (!runtime.granted(android.Manifest.permission.RANGING)) {
-            finishUnstartedServiceUwb(attempt, "RANGING_PERMISSION_REQUIRED")
-            return
-        }
-        runtime.teslaUwbState.value = TeslaUwbProbeState(stage = TeslaUwbStage.PREPARING,
-            serviceOwned = true, rangingPermission = runtime.granted(android.Manifest.permission.RANGING))
-        runtime.event("TESLA_UWB_STARTED")
+        runtime.teslaConnectionState.value = TeslaConnectionState(stage = TeslaConnectionStage.PREPARING)
         val scan = scanner
-        serviceUwbPauseConfirmed = false
+        serviceConnectionPauseConfirmed = false
         if (scan != null) scan.pause {
-            if (serviceUwbRequest?.attempt == attempt) serviceUwbPauseConfirmed = true
+            if (serviceConnectionRequest?.attempt == attempt) serviceConnectionPauseConfirmed = true
             startGattAfterPause(attempt, policy, token)
         }
-        else finishUnstartedServiceUwb(attempt, "BLE_SCAN_FGS_NOT_RUNNING")
+        else finishUnstartedServiceConnection(attempt, "BLE_SCAN_FGS_NOT_RUNNING")
     }
 
     private fun startGattAfterPause(attempt: Long, policy: BleFieldTrialPolicy, token: String) {
@@ -320,11 +285,11 @@ class ObservationService : Service() {
             !runtime.ownsBleField(this, token) || runtime.state.value.bleFieldTrialStopping
         ) return
         if (runtime.now() >= (policy.attemptDeadline ?: Long.MAX_VALUE)) {
-            finishUnstartedServiceUwb(attempt, "DEADLINE_EXPIRED")
+            finishUnstartedServiceConnection(attempt, "DEADLINE_EXPIRED")
             return
         }
-        val request = serviceUwbRequest ?: return
-        runtime.serviceUwbOwnerReason(request)?.let { finishUnstartedServiceUwb(attempt, it); return }
+        val request = serviceConnectionRequest ?: return
+        runtime.serviceConnectionOwnerReason(request)?.let { finishUnstartedServiceConnection(attempt, it); return }
         syncFieldState(forceDiagnostics = true)
         val wakeReady = try {
             // acquire 예외에서도 같은 객체로 해제할 수 있도록 먼저 소유한다.
@@ -342,12 +307,12 @@ class ObservationService : Service() {
                 else "BLE_FIELD_WAKE_LOCK_UNAVAILABLE")
             return
         }
-        runtime.startServiceUwb(request) { state, retained ->
+        runtime.startServiceConnection(request) { state, retained ->
             if (fieldPolicy === policy && requestId == token) attemptFinished(attempt, state, retained)
         }
     }
 
-    private fun finishUnstartedServiceUwb(attempt: Long, reason: String, retained: Boolean = false) {
+    private fun finishUnstartedServiceConnection(attempt: Long, reason: String, retained: Boolean = false) {
         val policy = fieldPolicy ?: return
         if (policy.currentAttempt != attempt) return
         val status = when {
@@ -356,21 +321,20 @@ class ObservationService : Service() {
             !policy.accepting || reason == "DEPARTED" -> BleProbeStatus.CANCELED
             else -> BleProbeStatus.BLOCKED
         }
-        runtime.teslaUwbState.value = TeslaUwbProbeState(
+        runtime.teslaConnectionState.value = TeslaConnectionState(
             stage = when (status) {
-                BleProbeStatus.CLEANUP_FAILED -> TeslaUwbStage.CLEANUP_FAILED
-                BleProbeStatus.TIMED_OUT -> TeslaUwbStage.TIMED_OUT
-                BleProbeStatus.CANCELED -> TeslaUwbStage.CANCELED
-                else -> TeslaUwbStage.BLOCKED
-            }, serviceOwned = true, rangingPermission = runtime.granted(android.Manifest.permission.RANGING), reason = reason)
-        runtime.event(if (retained) "TESLA_UWB_CLEANUP_FAILED" else "TESLA_UWB_BLOCKED")
+                BleProbeStatus.CLEANUP_FAILED -> TeslaConnectionStage.FAILED
+                BleProbeStatus.CANCELED -> TeslaConnectionStage.STOPPED
+                else -> TeslaConnectionStage.BLOCKED
+            }, reason = reason)
+        runtime.event(if (retained) "TESLA_CONNECTION_CLEANUP_FAILED" else "TESLA_CONNECTION_BLOCKED")
         attemptFinished(attempt, BleProbeState(status = status, reason = reason, localClosed = !retained), retained)
     }
 
-    private fun cancelServiceUwbAttempt(attempt: Long, reason: String) {
+    private fun cancelServiceConnectionAttempt(attempt: Long, reason: String) {
         val token = requestId ?: return
-        if (runtime.serviceUwbInFlight(this, token, attempt)) runtime.cancelServiceUwb(this, token, attempt, reason)
-        else finishUnstartedServiceUwb(attempt, reason)
+        if (runtime.serviceConnectionInFlight(this, token, attempt)) runtime.cancelServiceConnection(this, token, attempt, reason)
+        else finishUnstartedServiceConnection(attempt, reason)
     }
     private fun startSupplementalScan() {
         val policy = fieldPolicy ?: return
@@ -395,7 +359,7 @@ class ObservationService : Service() {
                         val device = result.device
                         val deadline = policy.attemptDeadline
                         if (device != null && deadline != null && result.timestampNanos > 0) {
-                            serviceUwbRequest = TeslaServiceUwbRequest(this, token, policy.candidateCount,
+                            serviceConnectionRequest = TeslaServiceConnectionRequest(this, token, policy.candidateCount,
                                 decision.startAttempt, id, device, result.timestampNanos, deadline)
                         }
                     }
@@ -425,9 +389,9 @@ class ObservationService : Service() {
             onFailure = failure@ { reason, code ->
                 if (fieldPolicy !== policy || requestId != token || !runtime.ownsBleField(this, token)) return@failure
                 runtime.update { it.copy(bleFieldScanFailure = code, bleFieldScanRunning = false) }
-                val uwbPending = serviceUwbRequest
-                if (uwbPending != null && !runtime.serviceUwbInFlight(this, token, uwbPending.attempt)) {
-                    finishUnstartedServiceUwb(uwbPending.attempt, reason, code == BleSupplementalScanner.FAILURE_STOP)
+                val connectionPending = serviceConnectionRequest
+                if (connectionPending != null && !runtime.serviceConnectionInFlight(this, token, connectionPending.attempt)) {
+                    finishUnstartedServiceConnection(connectionPending.attempt, reason, code == BleSupplementalScanner.FAILURE_STOP)
                 }
                 runtime.stopBleFieldTrial(reason)
             },
@@ -470,9 +434,9 @@ class ObservationService : Service() {
         if (policy.currentAttempt != attempt) return
         val wakeReleased = releaseWakeLock()
         val retained = leaseRetained || !wakeReleased
-        serviceUwbRequest?.takeIf { it.attempt == attempt }?.clear()
-        if (!retained) serviceUwbRequest = null
-        serviceUwbPauseConfirmed = false
+        serviceConnectionRequest?.takeIf { it.attempt == attempt }?.clear()
+        if (!retained) serviceConnectionRequest = null
+        serviceConnectionPauseConfirmed = false
         // 현재 키 probe가 실제 lease를 반환한 뒤 들어온다. 실패한 close는 예약을 유지한 상태로 기록한다.
         runtime.recordBleTrial("BLE_FIELD_TRIAL_FINISHED", runtime.bleTrialSummary(attempt, state, retained))
         policy.finished(attempt, state, !retained)
@@ -526,7 +490,6 @@ class ObservationService : Service() {
                 runtime.observationRequestBlockedReason()?.let { fail(it, token); return }
                 scanner?.reconcile()
                 if (!runtime.ownsBleField(this@ObservationService, token) || runtime.state.value.bleFieldTrialStopping) return
-                runtime.coordinateReadinessTick(this@ObservationService, token)
                 updateNotification()
                 if (runtime.now() >= heartbeatAt) {
                     // 생존성 행은 이전 완료 회차의 증거를 재사용하지 않는다.
@@ -542,7 +505,6 @@ class ObservationService : Service() {
 
     internal fun stopBleField(reason: String) {
         fieldPolicy?.stop()
-        runtime.sealVehicleNavigation()
         candidateDiagnosticsPublisher?.stop()
         syncFieldState(forceDiagnostics = true)
         clearPolicyTimer()
@@ -556,7 +518,7 @@ class ObservationService : Service() {
         val attempt = fieldPolicy?.currentAttempt
         if (attempt == null) finishField()
         else if (runtime.state.value.teslaKeyCleanupFailed || fieldPolicy?.leaseRetained == true) finishField(cleanupFailed = true)
-        else cancelServiceUwbAttempt(attempt, reason)
+        else cancelServiceConnectionAttempt(attempt, reason)
     }
 
     private fun finishField(cleanupFailed: Boolean = false) {
@@ -570,18 +532,16 @@ class ObservationService : Service() {
         readinessTick?.let { runtime.handler.removeCallbacks(it) }
         readinessTick = null
         val wakeReleased = releaseWakeLock()
-        runtime.closeVehicleNavigation(this, token) { coordinatesClosed ->
-            finishFieldAfterCoordinates(policy, token, cleanupFailed || !wakeReleased || !coordinatesClosed)
-        }
+        finishFieldAfterResources(policy, token, cleanupFailed || !wakeReleased || runtime.diagnosticCleanupUncertain)
     }
 
-    private fun finishFieldAfterCoordinates(policy: BleFieldTrialPolicy?, token: String, cleanupFailed: Boolean) {
+    private fun finishFieldAfterResources(policy: BleFieldTrialPolicy?, token: String, cleanupFailed: Boolean) {
         if (fieldPolicy !== policy || requestId != token) return
         if (cleanupFailed) {
             runtime.update { it.copy(bleFieldTrialStopping = true,
                 bleFieldTrialStopReason = "LOCAL_CLOSE_FAILED_RESTART_REQUIRED") }
             updateNotification()
-            return // 실패한 UWB/GATT 정리는 scan lease·BeaconService FGS를 반환하지 않는다.
+            return // 오디오/GATT 정리 불명은 scan lease·BeaconService FGS를 반환하지 않는다.
         }
         val scan = scanner
         fun finish(scanStopped: Boolean) {

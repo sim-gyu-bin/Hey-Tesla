@@ -108,14 +108,15 @@ internal object TeslaApproachReadSummaryJson {
         "DOMAIN_MISMATCH", "ROUTE_MISMATCH", "REQUEST_UUID_MISMATCH", "ACK_WAITING",
         "SESSION_INFO_INVALID", "SESSION_INFO_AUTH_REJECTED", "SESSION_READY",
         "STATUS_VERIFIED", "STATUS_INCOMPLETE", "RESPONSE_REJECTED",
-        "RESPONSE_INVALID", "RESPONSE_WAITING",
+        "RESPONSE_INVALID", "RESPONSE_WAITING", "RESPONSE_BEFORE_START",
         "FIRA_REQUEST", "FIRA_STOP", "FIRA_UNRECOGNIZED", "FIRA_INVALID",
     )
     private val destinationKinds = setOf("DOMAIN", "ROUTING_ADDRESS", "UNSET", "UNKNOWN")
     private val payloadKinds = setOf("SESSION_INFO", "SESSION_INFO_REQUEST", "PROTOBUF_MESSAGE_AS_BYTES", "UNSET", "UNKNOWN")
     private val domainMismatchReasons = setOf("FROM_MISSING", "FROM_NOT_DOMAIN", "DOMAIN_DIFFERENT")
 
-    fun encode(summary: TeslaApproachReadSummary): String = buildString(2048) {
+    fun encode(summary: TeslaApproachReadSummary,
+        responseDisposition: String? = summary.responseDisposition): String = buildString(2048) {
         append("{\"candidate\":").append(summary.candidate?.takeIf { it > 0 })
         append(",\"attempt\":").append(summary.attempt?.takeIf { it > 0 })
         append(",\"stage\":").append(quoted(summary.stage.takeIf { it in stages }))
@@ -156,7 +157,7 @@ internal object TeslaApproachReadSummaryJson {
         append(",\"rxProtocolCount\":").append(summary.rxProtocolCount?.takeIf { it >= 0 })
         append(",\"lastRxElapsedMs\":").append(summary.lastRxElapsedMs?.takeIf { it >= 0 })
         append(",\"lastFrameElapsedMs\":").append(summary.lastFrameElapsedMs?.takeIf { it >= 0 })
-        append(",\"responseDisposition\":").append(quoted(summary.responseDisposition?.takeIf { it in responseDispositions }))
+        append(",\"responseDisposition\":").append(quoted(responseDisposition?.takeIf { it in responseDispositions }))
         append(",\"responseQuery\":").append(quoted(summary.responseQuery?.takeIf { it in queries }))
         append(",\"gattConnectionStatus\":").append(summary.gattConnectionStatus)
         append(",\"gattConnectionState\":").append(summary.gattConnectionState)

@@ -13,14 +13,12 @@ internal class AppActions(
     val associateVehicle: () -> Unit,
     val setVehicleServiceEnabled: (Boolean) -> Unit,
     val vehicleServiceBlockedReason: () -> String?,
-    val resumeVehicleNavigation: () -> Unit,
+    val setProductVoiceConsent: (Boolean) -> Unit,
     val refresh: () -> Unit,
     val startMicrophone: () -> Unit,
     val stopSession: () -> Unit,
     val querySupport: () -> Unit,
     val cancelSupport: () -> Unit,
-    val queryUwbSupport: () -> Unit,
-    val cancelUwbSupport: () -> Unit,
     /** 네 입력 모두 동일 STT→로컬 dry-run→입력 해제→오프라인 TTS 진단을 시작한다. 마이크 입력은 녹음·원문을 기본 저장한다. */
     val startTrial: (SpeechTrialMode) -> Unit,
     val finishCapture: () -> Unit,
@@ -32,10 +30,6 @@ internal class AppActions(
     val leaveDiagnostics: () -> Unit,
     /** 실차 동작을 허용하지 않는 계측 화면에는 이 capability를 제공하지 않는다. */
     val frunkVoice: FrunkVoiceActions? = null,
-    /** 수동 UWB 거리 진단 capability. 미제공 UI에는 실제 실행 버튼을 활성화하지 않는다. */
-    val startUwbRanging: (() -> Unit)? = null,
-    val cancelUwbRanging: (() -> Unit)? = null,
-    val uwbRangingBlockedReason: (() -> String?)? = null,
 )
 
 internal class FrunkVoiceActions(

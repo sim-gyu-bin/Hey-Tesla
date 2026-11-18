@@ -11,18 +11,17 @@ import com.heytesla.app.speech.SpeechTrialState
 import com.heytesla.app.vehicle.key.TeslaBleKeyStore
 import com.heytesla.app.vehicle.key.VehicleVinStatus
 import com.heytesla.app.vehicle.key.VehicleVinStore
-import com.heytesla.app.vehicle.navigation.VehicleNavigationPresentation
-import com.heytesla.app.vehicle.navigation.VehicleNavigationStatus
-import com.heytesla.app.vehicle.navigation.VehicleNavigationTracker
-import com.heytesla.app.vehicle.uwb.UwbProbeState
 
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
 import android.os.SystemClock
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
@@ -38,6 +37,7 @@ import java.util.UUID
 internal class VehicleVinUiTestHost(
     private val initiallyEnabledService: Boolean = false,
     isolatedVinStore: Boolean = false,
+    private val fontScale: Float? = null,
 ) {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val app = instrumentation.targetContext.applicationContext as DiagnosticApp
@@ -55,14 +55,11 @@ internal class VehicleVinUiTestHost(
         private set
     var associateCount = 0
         private set
-    var navigationResumeCount = 0
+    var consentChangeCount = 0
         private set
     var foreignBlocked: String? = null
     private val revision = MutableStateFlow(0)
     val state = MutableStateFlow(DiagnosticState())
-    private val navigation = MutableStateFlow(VehicleNavigationPresentation(VehicleNavigationStatus.OFF))
-    private var navigationTracker: VehicleNavigationTracker? = null
-    private var navigationTick: Runnable? = null
     private val supportState = MutableStateFlow(SpeechProbeState())
     private val supportProbe = SpeechSupportProbe(app, supportState) { event ->
         android.util.Log.i("VehicleVinUiTestHost", event)
@@ -90,35 +87,15 @@ internal class VehicleVinUiTestHost(
                         locationPermission = true, locationEnabled = true, associationCount = 0)
                 }
             }
-            scope.launch {
-                runtime.vehicleNavigation.collect { if (navigationTracker == null) navigation.value = it }
-            }
             installContent()
         }
         await { contentReady && runtime.state.value.vehicleVin.status != VehicleVinStatus.LOADING &&
+            !runtime.state.value.productVoiceResultsLoading &&
             state.value.vehicleVin == runtime.state.value.vehicleVin }
         instrumentation.waitForIdleSync()
         return activity
     }
 
-    /** Only real tracker projections enter the UI fixture; tests cannot set presentation DTOs. */
-    fun projectNavigation(tracker: VehicleNavigationTracker) {
-        check(android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
-        navigationTick?.let(runtime.handler::removeCallbacks)
-        navigationTracker = tracker
-        val tick = object : Runnable {
-            override fun run() {
-                if (navigationTracker !== tracker) return
-                val elapsedBefore = SystemClock.elapsedRealtime()
-                val epoch = System.currentTimeMillis()
-                val elapsedAfter = SystemClock.elapsedRealtime()
-                navigation.value = tracker.project(elapsedBefore, epoch, elapsedAfter)
-                runtime.handler.postDelayed(this, 1_000L)
-            }
-        }
-        navigationTick = tick
-        tick.run()
-    }
 
     fun invalidate() { revision.value += 1 }
 
@@ -134,10 +111,13 @@ internal class VehicleVinUiTestHost(
                 else runtime.setVehicleServiceEnabled(false)
             },
             vehicleServiceBlockedReason = { foreignBlocked ?: runtime.vehicleServiceBlockedReason() },
-            resumeVehicleNavigation = { navigationResumeCount++; runtime.resumeVehicleNavigation() },
+            setProductVoiceConsent = { consent ->
+                consentChangeCount++
+                runtime.setProductVoiceConsent(consent)
+            },
             refresh = { invalidate() }, startMicrophone = { forbidden() }, stopSession = { forbidden() },
-            querySupport = supportProbe::query, cancelSupport = { supportProbe.cancel() }, queryUwbSupport = { forbidden() },
-            cancelUwbSupport = { forbidden() }, startTrial = { forbidden() }, finishCapture = { forbidden() }, cancelTrial = { forbidden() },
+            querySupport = supportProbe::query, cancelSupport = { supportProbe.cancel() },
+            startTrial = { forbidden() }, finishCapture = { forbidden() }, cancelTrial = { forbidden() },
             startTeslaKey = { _, _ -> startCount++; forbidden() },
             cancelTeslaKey = { runtime.cancelTeslaKey() },
             teslaKeyBlockedReason = { foreignBlocked ?: runtime.teslaKeyBlockedReason() },
@@ -155,11 +135,12 @@ internal class VehicleVinUiTestHost(
             val ble by runtime.bleProbeState.collectAsState()
             val support by supportState.collectAsState()
             val marker by revision.collectAsState()
-            val uwbRanging by runtime.teslaUwbState.collectAsState()
-            val navigationPresentation by navigation.collectAsState()
+            val homeRequest by activity.voiceResultsHomeRequests.collectAsState()
             val actions = androidx.compose.runtime.remember(snapshot, key, ble, marker) { createActions() }
-            HeyTeslaApp(snapshot, support, SpeechTrialState(), ble, UwbProbeState(), key, actions,
-                uwbRanging = uwbRanging, navigation = navigationPresentation)
+            val density = LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale ?: density.fontScale)) {
+                HeyTeslaApp(snapshot, support, SpeechTrialState(), ble, key, actions, homeRequest)
+            }
             SideEffect { contentReady = true }
         }
     }
@@ -188,10 +169,6 @@ internal class VehicleVinUiTestHost(
             runtime.cancelTeslaKey("TEST_HOST_CLOSED")
             supportProbe.cancel()
             scope.cancel()
-            navigationTick?.let(runtime.handler::removeCallbacks)
-            navigationTick = null
-            navigationTracker?.clear()
-            navigationTracker = null
             activity.finish()
         }
     }

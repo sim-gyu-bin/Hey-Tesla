@@ -375,8 +375,14 @@ internal class SpeechRecognitionProbe(
     private suspend fun shadowTranscript(trial: Trial, pcm: ByteArray): ShadowTranscript? {
         fun stopped() = trial.canceled.get() || !runtime.activityVisible || runtime.now() >= trial.session.deadline
         if (stopped()) return null
-        val shadow = withContext(Dispatchers.Default) { SherpaShadowRecognizer.decode(app.assets, pcm, trial.size) }
-        return if (stopped()) null else shadow.judged(SpeechCommandPhrases.normalizedSentence)
+        val recognized = withContext(Dispatchers.Default) {
+            KoreanSpeechRecognizer.decode(app.assets, pcm, trial.size, ::stopped)
+        }
+        if (!recognized.cleanupConfirmed) {
+            trial.cleanupFailures.add("SHADOW_CLEANUP_FAILED")
+            trial.releaseUncertain.set(true)
+        }
+        return if (stopped()) null else recognized.shadowTranscript().judged(SpeechCommandPhrases.normalizedSentence)
     }
 
     /**
