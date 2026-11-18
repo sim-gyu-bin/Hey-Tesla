@@ -4,18 +4,1532 @@
 
 ## 문서 상태와 대상
 
-이 문서는 구현 전 검증 계획이다. 이전 검토 시점에는 앱, Gradle 프로젝트, 소스, APK가 없고 ADB 연결 기기도 0대였다. 이 기록은 당시 관찰이며 현재의 영구 상태를 단정하지 않는다. 아래 절차는 실행되지 않았으며, 표의 결과는 모두 **미실행/미확인**이다. Android/One UI/차량 펌웨어/음성 인식 엔진/모델 버전 및 실제 설정값도 실제 장비를 확인하기 전에는 미확인으로 기록한다.
+제품 검증 계획과 실제 실행 결과를 구분한다. 2026-09-22에 S23 Ultra에서 `0.1.0-probe` 수동 마이크, `0.2.0-probe` 지원 조회, `0.3.0-probe` 수동 STT·RAM PCM에 이어 **`0.4.0-probe` TTS 파일 무음 인식**을 실행했다. 고정 한국어 문장 일치 2회·무음 대조 NO_MATCH·취소·재실행·해제를 확인했다. 사용자 발화·스피커 재생 없이 실행했고 새 앱 마이크 사용은 관측되지 않았다. 신뢰도 `0.0`으로 명령 실행 합격은 아니다. **이 0.1~0.4 기록은 당시 Android 시스템 음성 인식기 경로이며 v0.50 PCM 파이프(segmented session) 경로의 인식 성능 근거가 아니다.** 실제 발화·음향·네트워크 차단·차량 association·접근·잠금·주머니는 별도다.
+
+현재 상태와 과거 검증을 구분한다. 버전·설치·저장 ON/OFF·전체 검증 수치는 아래 [현재 소스·설치·검증 상태](#현재-소스설치검증-상태)를 단일 정본으로 삼고, 각 버전의 당시 근거는 삭제하지 않고 보존한다.
 
 초기 대상은 개인 사용자 1인·1차 조합이다.
 
 |항목|대상|확인 상태|
 |---|---|---|
-|휴대전화|Galaxy S23 Ultra|실기기 설정·OS·One UI 버전 미확인|
+|휴대전화|Galaxy S23 Ultra|Android 16/API 36 확인, One UI 속성 `80500`; 설정 화면의 버전 표기는 미확인|
 |차량|Model Y 주니퍼 AWD Long Range|차량 펌웨어·옵션·동작 미확인|
-|앱|Android 네이티브: Kotlin, Compose, Coroutines/StateFlow, DataStore|설계 단계|
-|음성 경로 후보|사용자 기본 `VoiceInteractionService` + 실제 저전력 차량 접근 이벤트(CDM/CDS 등) + 필요한 구간의 microphone FGS/`AudioRecord`|설계 가설|
+|앱|Android 네이티브: Kotlin, Compose, Coroutines/StateFlow, DataStore|`com.heytesla.app`; 현재 소스·설치·저장 의도/실행·검증은 아래 단일 정본을 따른다. compile/min/target SDK36.|
+| 제품 음성(v78) | 사용자 기본 `VoiceInteractionService` + fresh 정확 BLE 광고·기존 앱 키 인증·명시 P + microphone FGS/`AudioRecord` → 기존 튜닝 sherpa 한국어 zipformer | 자동 제품 경로에 모델을 연결했다. 아래 격리 AVD 모델/정책 검증과 실제 Samsung 잠금·주머니·마이크·차량 명령 검증을 구분한다. |
+| 수동 Android STT(v0.50~) | 앱 `SpeechMicCapture` 16 kHz mono PCM → `AndroidPcmRecognizer` → Android 온디바이스 `SpeechRecognizer`(ko-KR, `EXTRA_AUDIO_SOURCE` + `EXTRA_SEGMENTED_SESSION`) | 수동 진단·별도 수동 프렁크는 유지한다. 제품 자동 음성의 엔진·fallback이 아니다. 과거 S23 n-best/점수·화면 근거는 아래 각 버전 기록이다. |
+| 기존 모델 평가(v0.52) | sherpa-onnx 1.13.8 오프라인 zipformer(`sherpa-onnx-zipformer-korean-2024-06-24`, `modified_beam_search`, 핫워드) | 당시 S23 replay: 실녹음10개 중 명령 후보4개(Android1개), PC와 같은4개, 무관 발화 미수용, 실패0. 합성 TTS3개는 Android3/3·sherpa0/3. 당시 로드1.1–1.5 s·인식0.13–0.55 s. v78은 같은 모델·튜닝을 제품에 연결하지만 과거 평가를 현재 실차 성공으로 승격하지 않는다. |
 
-`CDM`만으로 microphone FGS 예외가 성립한다고 보지 않는다. 기본 비서로 지정됐다고 DSP 또는 상시 호출어 감지가 가능하다고 보지도 않는다. 플랫폼 지원 여부와 제조사 동작은 실제 기기에서 각각 검증한다. 호출어 대기 시간을 90초로 둘 경우 이는 시험값일 뿐, 배터리·지연 시간의 측정값이 아니다.
+`CDM`만으로 microphone FGS 예외가 성립한다고 보지 않는다. 기본 비서로 지정됐다고 DSP 호출어 감지가 가능하다고 보지도 않는다. v76 제품은 사용자가 직접 선택한 기본 비서의 준비 상태와 별도 음성 동의를 요구하며, 연결·신선한 P가 유효한 동안 대기한다. 연결 전체의 90초 제한은 없고 발화·명령의 개별 기한은 유지한다. 플랫폼 허용·제조사 동작·배터리는 실제 기기 검증 대상이다.
+
+## 현재 소스·설치·검증 상태
+
+이 절이 **버전·설치 ON/OFF·검증 수치의 단일 정본**이다. 과거 결과는 아래 해당 버전의 당시 기록으로 보존한다. 현재 수치는 메인이 실제 실행한 검증·읽기 전용 기기 관측 기준이다.
+
+|구분|현재 전달된 사실과 한계|
+|---|---|
+|소스·생성 APK|**`0.86.0` / 86·일반 FieldLog schema39·전용 결과 schema2**. 별도 텍스트 저장 승인/토글 없이 자동 보관하며 홈 최근5개 원문·판정·시각·사유와 상태바의 원문 없는 실패 안내를 제공한다. 기존 모델·핫워드·정확 문법·차량 안전 조건은 유지한다.|
+|휴대폰 설치·실제 상태|사용자 요청으로 **`0.86.0` / 86**을 `install -r` 데이터 보존 설치하고 실제 패키지 버전을 확인했다. 비캐시 파일717개 유지·삭제0, 설정45개 지문 전부 동일하다. 변경2개는 설치 profile marker와 순환 로그다. 저장 감지 **OFF**·관찰/마이크 서비스 미실행이다. 기존 텍스트 동의 키는 읽거나 수정하지 않으며 별도 허용 없이 자동 보관한다. 폰 앱 명시 실행·서비스 토글·마이크·차량 명령은 조작하지 않았다.|
+|호스트 검증|**JVM789(42 suites)·독립 peer277 통과**, 실패/오류/건너뜀0. 생산 Writer의 자동 원문·null 원문 잘림 요약 파일과 일반 FieldJson 원문 미누출 smoke, 실제 CLI2행 exit0/issues0을 확인했다. Python 분석기는 변경하지 않았다. JBR lint 오류0·경고18, debug APK·release Kotlin 빌드 성공.|
+|이전 v78 모델 smoke|당시 폰 실측은 녹음 발화2.980초+모델 처리1.590초=4.570초로 기존10초 안에 ACCEPTED·단발 gate를 확인한 결과다. 새 실제 발화·삼성 마이크·차량 명령은 재실행하지 않았다.|
+|Android 검증 범위|격리 API36 x86_64 AVD에서 저장소/schema1·2/정렬/복원8·제품 runtime8·실제 APK 모델1·프렁크 정리2, 실제 Compose UI9 통과. 홈 불일치 원문·빈 결과·잘림·큰 글자·최신5개 순서·알림 재진입을 확인했다. 실제 마이크/FGS/GATT/차량 RF는 실행하지 않았고 `FLAG_SECURE`를 유지했다.|
+|미검증·제품 범위|v84 실차 보존675행은 nonempty 문법 불일치4회 뒤 발화 잘림 종료·명령 전송0이었고 원문은 없었다. v86 실제 사용자 발화·잠금/주머니·서비스 알림 수명주기·실차 개방은 미검증이다. v85 추가 VIN 시험의 보안키 획득 실패는 관련 코드를 바꾸지 않았으며 이번에 재실행하지 않았다.|
+
+## 0.86.0 — 자동 결과 보관·홈 원문 확인·실패 알림
+
+별도 텍스트 저장 허용 과정과 관련 UI/action/preference 복원을 제거했다. 기존 preference 데이터는 지우지 않고 읽지 않는다. 현재 개발 확인용으로 정상 인식 원문과 종료 요약을 자동 보관하고, 앱 홈의 서비스 상태 바로 아래 최근5개 원문·판정·시각·고정 사유를 표시한다. 실패/잘림/봉인에는 원문 null과 실제 사유만 남겨 이전 발화 문장을 붙이지 않는다. 파일 쓰기 실패에도 현재 RAM 결과는 보이며 저장 건수와 이번 실행 일부 보관 실패를 구분한다.
+
+앱 재시작 시 최신 완료파일을 비동기 복원하되 방금 도착한 실시간 결과를 우선한다. 과거 마이크/차량 명령/현재 알림 상태는 복원하지 않는다. 상태바에는 원문 없이 불일치/빈 결과의 음성 재대기와 terminal 실패를 표시하고, 두 서비스 알림 탭은 기존 설정/진단에서 홈으로 이동한다. PCM·업로드·백업·자동 삭제·새 실행 허가는 없다. 정본은 [v86 통합 계약](Tesla-Integration.md#v86-자동-결과-보관홈-확인실패-알림)이다.
+
+### 실제 검증과 수정한 경계
+
+- JVM789/42 suites·독립 peer277 통과, 실패/오류/건너뜀0. 실제 생산 Store/Writer Java smoke는 opt-in 없이 원문 파일·잘림 null 원문/사유 파일을 생성하고 일반 FieldJson에 원문이 없음을 확인했다. 생성한 일반 행2개를 실제 CLI가 exit0/issues0으로 분석했다.
+- Android 저장소8개는 기존 schema1·새 schema2·재시작 복원·최신5개·손상/타입 coercion/경로/용량/항목 수/파일 불변을 통과했다. 최초 정렬2개 실패는 실제 파일 mtime가 정확한데 NIO metadata 정밀도가 소실되는 경계를 확인해 `Os.lstat().st_mtim` 초·나노초 직접 비교로 수정했다. 같은 millisecond 안의 파일 순서 회귀도 통과했고 기존 기대값을 바꾸지 않았다.
+- 제품 runtime8개는 자동 저장·동일 사건 상관·늦은 readiness 탈락의 SEALED/null 요약·실시간 우선 복원·쓰기 실패 시 RAM 유지·일반 로그/문자열 미누출을 통과했다. 검토에서 발견한 최종 readiness 탈락 기록 누락과 이전 pending SAVED가 새 QUEUE_FULL 안내를 지우는 경계도 수정·회귀 확인했다. 실제 APK 모델의 RAM 무음2stream/재사용/full-close1개·프렁크 정리2개도 통과했다.
+- 실제 Compose UI9개는 불일치/빈 결과/인식 전 잘림·큰 글자/긴 문장·재진입·최신5개 순서·알림으로 기존 진단→홈 이동·무자동 실행을 통과했다. 초기 SystemUI ANR 창과 mobilecli UiAutomation 점유를 해제했고, 스크롤 수집이 중간 viewport를 건너뛰던 시험 드라이버는 ¼화면 겹침 드래그/idle로 수정했다. 기대5개·순서·6번째 미노출 범위는 유지했다. `FLAG_SECURE`를 유지했으며 픽셀 검증은 하지 않았다.
+- 최종 arm64-v8a APK는146,611,588 bytes, SHA-256 `023a6dd5a33d591956d2a971125a63dc648184b1080c8e90f1c73b3e37a3a1dd`이다. 버전86/0.86.0·ABI·모델 자산5개 SHA-256의 v85 동일을 확인하고 데이터 보존 설치했다. 격리 AVD는 종료했다.
+
+근거는 `비공개 로컬 보관 경로`의 `validation-install-summary.json`, `transcript-smoke-result.txt`, `private-results/`, `general-field-smoke.jsonl`, `general-field-analysis.json`, `android-runtime-store-final.txt`, `android-ui-verified.txt`다. 초기 실패 근거는 `android-runtime-store.txt`, `android-ui-first.txt`, `android-ui-after-systemui.txt`, `android-ui-final.txt`에 보존한다. 모든 새 원문 fixture는 합성 문장이며 실제 사용자 원문을 위키/저장소에 복사하지 않았다.
+
+설치된 v86은 별도 텍스트 설정 없이 **감지 ON → 실제 음성 대기 확인 후 발화 → 상태바 실패 확인 → 알림 탭/앱 홈 최근 결과 확인**으로 시험한다. 종료 후 감지 OFF·USB 연결 시 일반 순환 로그와 전용 결과 파일을 함께 읽는다. 설치·합성 UI 검증은 실제 발화/차량 개방 성공이 아니다.
+
+## 0.85.0 — 제품 인식 텍스트의 별도 동의 보관
+
+### 구현과 이전 보정의 구분
+
+개발자 진단에 **제품 음성 텍스트 저장**을 추가했다. 기본 OFF이며 감지 OFF·진행 회차 없음·화면 표시/잠금 해제에서 명시 승인하고 설정 저장 성공 후 활성화한다. 정상 WAIT와 실제 full-close 후 ACCEPTED의 텍스트만 정확 lease/service·현재 요청/readiness/동의에서 `noBackupFilesDir/product-voice-transcripts/<UUID>.json`에 보관한다. 일반 로그/schema39·최근 이벤트·화면 state에는 원문을 넣지 않고 PCM/WAV·업로드·자동 삭제도 추가하지 않는다.
+
+전용 파일은 수치 사건을 생성한 동일 `FieldRecord`의 process/trial·시각·앱 버전과 lease별 발화 순번·원문·수치 진단을 담는다. 실제 저장만 건수이며 queue 접수/실패와 구분한다. 끄기는 RAM/worker 세대부터 철회하고 기존 파일은 보존한다. 이미 시작한 파일 쓰기는 완료될 수 있으며 설정 저장 실패 시 이번 실행의 OFF와 다음 실행 전 재확인 필요를 안내한다. 저장은 마이크/차량 실행·기한·native 정리의 권한이 아니다. 상세는 [v85 텍스트 진단 정본](Tesla-Integration.md#v85-별도-동의-제품-음성-텍스트-진단)을 따른다.
+
+사용자가 기억한 보정은 개인 재학습이 아닌 sherpa 핫워드/디코더 튜닝이다. 제품의 `modified_beam_search`·paths16·score3.0과 “헤이 테슬라/프렁크 열어줘” 부스트를 유지했고 최종 APK 모델 자산5개 SHA-256은 v84와 모두 같다. 과거 Android n-best의 다른 정확 후보 채택과 현재 sherpa 단일 최종 결과 판정을 혼동하지 않는다. 유사 발음 치환·개인 모델 학습·문법 완화는 추가하지 않았다.
+
+### 실행 검증과 한계
+
+- JVM785/42 suites·독립 peer277 통과, 실패/오류/건너뜀0. host 실제 생산 Store/Writer smoke에서 기본 OFF 무파일·명시 ON 저장·철회 후 이전 queue 미부활·원문 전용 완료 파일·일반 FieldJson 원문 미누출·redacted 문자열을 확인했다. private 파일과 일반 행의 process/trial/wall/elapsed/appVersion을 실제 대조했고 일반 행의 CLI는 exit0/issues0이었다.
+- 격리 Android에서 제품 원문/runtime8개가 실제 전용 파일·동일 사건 상관·미동의/철회·오래된 owner/readiness·설정 false/예외·queue/용량/쓰기 실패와 안전 경계를 통과했다. 실제 APK 모델의 RAM 무음2stream/재사용/full-close1개와 프렁크 정리2개도 통과했다. 이 합성 fixture는 실제 마이크/FGS/GATT/차량을 사용하지 않는다.
+- 실제 Compose UI7개는 기본 OFF·안내 취소/뒤로·명시 승인·재진입·활성 상태의 철회·설정 직전 조건 재검사와 무자동시작을 통과했다. `FLAG_SECURE`를 유지했으며 픽셀 검증은 하지 않았다.
+- 추가 기존 VIN runtime17개 중16개 통과, `realSavedSnapshotsKeepBleFiltersAndBothAuthenticatedQueryTargetsFixed`는 `TeslaBleKeyStore.getOrCreate():62`의 고정 `TeslaBleKeyException`에서 실패했다. 해당 코드는 하드웨어 보안 키를 요구하며 이번 패치에서 변경하지 않았다. source·AVD `ranchu`·KeyStore 로그를 조사했지만 고정 오류 경계가 내부 원인을 감춰 정확한 원인은 미확정이다. 보안 조건 완화·키 교체·실패 숨김·동일 시험 재실행은 하지 않았다.
+- lint 오류0·경고20이며 동의 저장 성공 확인을 위한 동기 commit 경고를 포함한다. 최종 arm64-v8a APK는146,595,204 bytes, SHA-256 `d2b48461c2113fe43b884dbd2eaa6fbde4853f612e32a273b0c639b77d142234`다. 버전85/0.85.0·ABI·모델 자산 보존을 확인했고 격리 AVD는 종료했다. 이후 사용자 요청으로 폰에 데이터 보존 설치했으며 실제 패키지85/0.85.0·설정45개 보존·감지 OFF·텍스트 저장 OFF·관찰/마이크 서비스 미실행을 확인했다. 설치 근거는 같은 cache의 `install-summary.json`이다.
+
+근거는 `비공개 로컬 보관 경로`의 `validation-summary.json`, `transcript-smoke-result.txt`, `private-transcripts/`, `general-field-smoke.jsonl`, `general-field-analysis.json`, `android-runtime.txt`, `android-ui.txt`, `model-baseline-v84.json`이다. 모든 새 저장 fixture의 텍스트는 합성 문장이고 실제 사용자 원문을 저장소/위키에 복사하지 않았다.
+
+다음 시험은 설치된 v85에서 **설정 → 개발자 진단 → 제품 음성 텍스트 저장 → 명시 허용 → ON 확인**을 먼저 하고 감지를 켠다. 음성 대기에서 발화한 뒤 감지 OFF·USB 회수 시 일반 순환 로그와 전용 텍스트 파일을 함께 분석한다. 잘려 decode하지 않은 발화의 텍스트는 생기지 않으며 이번 v84 원문을 소급 복구할 수는 없다. 설치 확인은 실제 발화·실차 개방의 검증이 아니다.
+
+## 0.84.0 — 짧은 소음 억제·모델 재사용·음성 결과 진단
+
+### 실차 분석과 변경
+
+보존된 `field-v83-sb_uk1xb/`의632행은 서비스 시작3회(사용자 재시작2회), 모두 fresh P·LISTENING 도달을 보였다. 첫 회차는 P receipt stale5055ms로 인식 전 봉인됐고, 뒤 두 회차의 정상 인식8회는 비명령 재대기였다. 해당 RECOGNIZING→LISTENING 간격은861–2184ms였다. 연결 MONITORING/fresh P는 이8회 동안 유지됐으며 서비스 재시작과 비명령 재대기를 같은 사건으로 세지 않는다. 명령 인정·프렁크 요청·전송은0이다.
+
+기존 생산 버퍼 실행에서는20ms 유성 한 chunk와1초 무음만으로 발화가 COMPLETE가 됐다. 이는 짧은 소음도 인식 회차를 열 수 있는 코드 경로의 근거이지 해당 실차 발화가 실제 소음이었다는 증거는 아니다. v84는 연속120ms 유성·200ms pre-roll을 적용하고, 발화 시작은 첫 후보 시각으로 유지한다. 모델은 마이크를 열기 전 한 번 준비하고 비명령에서 stream만 해제해 재사용한다. decode 중 실제 마이크 해제·종료/명령 전 owner 전체 해제·정리 불명 예약 유지는 보존한다.
+
+schema39 진단은 빈 결과와 문법 불일치, 발화/유성/끝무음 바이트·짧은 후보 억제·처리 경과·재사용/해제를 구분한다. 원문·PCM은 저장하지 않는다. 자세한 실행 계약은 [v84 음성 정본](Tesla-Integration.md#v84-음성-발화-확인lease별-모델-준비비민감-진단)을 따른다.
+
+### 실행 검증과 산출물
+
+- 최초 JVM 실행은 wake peer의 음성 fixture에 새 모델 준비 단계가 빠져19개 실패했다. fresh P 뒤 준비 완료를 주입하도록 fixture를 이관했고 전체769개와 독립 peer277개가 통과했다. 생산 입장 조건을 완화하지 않았다. 분석기 테스트는 tools 디렉터리에서210개 통과했다.
+- cache Java smoke는 컴파일된 실제 VAD로20ms 소음 억제·120ms onset·1초 무음 endpoint·첫 후보 시각·PCM 소거를 확인했다. 같은 prepared owner에 주입 native 경계로 load1/stream2/release1을 실행했고, 생산 FieldJson의5행을 실제 JSON/사람용 CLI가 오류 없이 읽었다. 이 fixture에는 차량 RF·실제 마이크·실제 모델이 없다. 과거 실차632행은 미관측 `voiceOutcomes=null`을 유지했다.
+- 별도 AVD 실제 APK 모델에서는 RAM 무음2회를 모두 WAIT로 판정했다. 모델 load4063ms는 마이크 개방 전 준비 비용이며 stream decode176/149ms·stream cleanup1/0ms·최종 owner cleanup77ms였다. 이 수치는 격리 x86 AVD의 무음 실행이며 폰 인식률·실차 재대기 시간의 증거가 아니다. runtime 안전/정리와 합해5개, 실제 Compose UI4개를 통과했다. `FLAG_SECURE`를 유지했으며 픽셀 검증은 하지 않았다.
+- 최종 arm64-v8a APK는146,529,672 bytes, SHA-256 `d469678167264f8ec320673863128d337e3de5233a20b47b682ffb602aa67c30`이다. 버전84/0.84.0·ABI를 확인했고 격리 AVD는 종료했다. 이후 사용자 요청으로 폰에 데이터 보존 설치했으며 실제 패키지84/0.84.0·저장 감지 OFF·관찰/마이크 서비스 미실행·설정45개 지문 보존을 확인했다. 설치 근거는 같은 cache의 `install-summary.json`이다.
+
+검증 근거는 `비공개 로컬 보관 경로`의 `validation-summary.json`, `voice-smoke.jsonl`, `voice-smoke-result.txt`, `voice-smoke-analysis.json`, `voice-smoke-analysis.txt`, `historical-v83-analysis.json`, `android-native-safety.txt`, `android-native-metrics.txt`, `android-ui.txt`다.
+
+다음 실차는 설치된 v84에서 사용자가 감지를 ON으로 켜고 **음성 대기 표시에서** “헤이 테슬라 프렁크 열어줘”를 한 문장으로 발화한다. 인식 중에는 수집하지 않으므로 재대기 표시 후 다음 발화를 한다. USB 회수 시 PREPARED·억제 수·EMPTY/GRAMMAR_NO_MATCH·재사용·종료 해제와 fresh P를 함께 대조한다. 현재 수정·설치는 실차 해결 판정이 아니다.
+
+## 0.83.0 — wake 후 초기 INVALID의 제한적 새 DRIVE 조회
+
+### 실차 근거와 적용 범위
+
+`field-v82-t1omnq2i/v82-sanitized-summary.json`의 실차1회는 wake ACK 뒤5.199초에 domain3 인증,5.479초에 요청 상관·AEAD 검증 DRIVE를 완료했다. 새 진단은 `driveShiftState=INVALID`, `driveTimestampStatus=VALID`였고 명시 P 조건으로 중단했다. Timestamp VALID는 범위 정상·양수일 뿐 freshness 확인이 아니다. 차량의 Invalid 원인은 아직 미확정이다.
+
+- wake ACK 또는 엄격한 NOMINAL_ACK를 받은 같은 서비스 회차·같은 GATT에서, 최초 fresh P를 수용하기 전의 **실제 인증된 명시 INVALID + gear UNKNOWN**만 재조회 대상이다. 진단 callback 문자열과 무관한 RAM marker로 판단한다.
+- INVALID 처리 뒤2초 간격으로 **새 인증·새 conversation·새 요청 identity**의 READ_ONLY DRIVE를 추가 최대3회(최초 포함4회) 실행한다. 첫 wake 직후 HELLO의 동일 요청 재송신은 기존대로지만 후속 조회에는 재무장하지 않는다.
+- ACK 처리 시각부터25초와 원 global 기한의 min을 한 번 고정한다. 응답·source Timestamp·재조회로 연장하지 않는다. 예약·새 인증·RX·SDK201 및 SDK 발급 직전에도 시간/owner/OFF/권한/동의를 확인하며 원 protocol/write/global 기한이 먼저면 그 종료 원인을 보존한다.
+- 대기 중 P 성공 callback·마이크·명령은 없다. ABSENT/EMPTY/SNA/미지원/D/R/N·인증 오류·불량 시각의 명시 P는 즉시 종료한다. INVALID의 source 시각으로는 P를 수용하지 않으며 재조회 기한도 만들지 않는다.
+- 새 fresh P가 기존 receipt5초/source10초/future2초 검사를 통과하면 기존 모니터/음성으로 진행하고 초기 재조회 자격은 영구 해제한다. 후속 monitor·명령·outstanding monitor drain의 INVALID는 즉시 종료한다. wake·BODY·명령 재전송이나 새 GATT fallback은 없다.
+- schema38의 `TESLA_CONNECTION_DRIVE_RETRY`는 예약이 아닌 새 조회 시작 시도의 고정 사건이다. SDK 접수·조회 응답·P 성공을 뜻하지 않으며 사건 callback에서 취소돼도 새 TX는 차단한다. 과거 스키마의 같은 사건 이름은 분석기가 버린다.
+
+### 실행 검증과 산출물
+
+전체 JVM759·독립 peer277·분석기203이 통과했다. 추가 peer는 ACK/nominal·callback 없음·INVALID 시각 변형·새 identity·횟수·정확25초/원기한·후속10초·취소/동의/권한/owner/BT/시계 역행·SDK201·queue drain·과거 응답·성공 후 monitor/command 봉인을 검증한다. 읽기 전용 안전 검토에서도 병합 전 수정이 필요한 회귀를 발견하지 못했지만 실제 Android callback·차량 RF 검증은 아니다.
+
+캐시 smoke4개는 INVALID→2초 대기→새 인증→fresh P, 반복 INVALID 최초 포함4회 종료, 대기 중 취소, 고정 준비창 만료를 실제 생산 consumer로 실행했다. 대기 중 명령 거절·wake1회·프렁크 요청0을 확인했다. FieldJson162행을 실제 CLI로 읽어 새 조회 시도6건·인증 INVALID10건/P1건을 중복 없이 집계했다. 과거 실차750행의 INVALID1건은 유지하고 재조회 사건을 소급 생성하지 않았다.
+
+lint 오류0·경고18, debug APK 및 release Kotlin 빌드 성공. 최종 APK는 arm64-v8a만 포함하며146,464,132 bytes, SHA-256 `d8b2858bfebd7caf59c6bbb3630b77b5a3471355e1e854958f37644a4ba52bea`다. 근거는 `비공개 로컬 보관 경로`, `runtime-initial-retry.jsonl`, `runtime-initial-retry-analysis.json`, `historical-v82-analysis.json`, `phone-read-only-status.json`이다. 이후 사용자 요청으로 데이터 보존 설치했으며 `비공개 로컬 보관 경로`에 버전·설치 digest·보존·OFF/schema38 시작 관측을 보존했다. 실제 차량에서 Invalid 이후 P로 바뀌는지는 아직 모른다.
+
+다음 실차는 설치된 v83에서 사용자가 감지를 ON으로 켜고 기존 접근 절차를 사용한다. USB 로그에서 INVALID→새 조회 시도→새 인증→P 또는 횟수/기한 종료를 구분한다. 이번 설치 검증에서는 감지를 ON으로 켜거나 실차 명령을 시험하지 않았다.
+
+## 0.82.0 — 인증 DRIVE 기어·Timestamp 진단
+
+### v81 실차와 공식 앱 대조 근거
+
+`field-v81-l_ku9p0x/` 보존 로그의 11월3일17:06 실차1회는 wake ACK→HELLO 재송신2회→domain3 `SESSION_READY`→AEAD `VERIFIED`/`STATUS_VERIFIED`까지 진행했다. wake ACK 이후 인증은5.258초, DRIVE 수신은5.574초였다. 기어 UNKNOWN·`CONNECTION_EXPLICIT_P_REQUIRED`로 중단했고 음성/마이크 시작 사건과 프렁크 요청·전송은 없었다. 첫 DRIVE의 기어 준비 지연은 가설이며 원인 확정이 아니다.
+
+공식 Tesla4.62.3 APK의 REA 대조에서 DRIVE 요청·응답 wrapper·기어 oneof·Timestamp 태그가 현재 구현과 같고, 기어가 없거나 빈 메시지일 때 공식 decoder도 P를 보충하지 않음을 확인했다. 근거는 `비공개 로컬 보관 경로`이다. 과거 응답 원문을 보관하지 않아 이번 입력의 세부 형태는 복원할 수 없다.
+
+### 구현 범위와 안전 경계
+
+- schema37의 `connectionObservation.rxResponse.driveShiftState`는 `ABSENT / EMPTY / INVALID / P / R / N / D / SNA / UNRECOGNIZED`만 기록한다. 미지원 분류는 알려진 oneof가 없고 메시지의 직렬화 크기가0보다 큰 경우이며 원 필드 번호·내용은 기록하지 않는다.
+- `driveTimestampStatus`는 `ABSENT / INVALID / NON_POSITIVE / VALID`다. INVALID는 protobuf seconds/nanos 범위 오류, NON_POSITIVE는 정상 범위이나 epoch milliseconds가0 이하인 경우다. VALID는 양수·범위 정상일 뿐 source freshness·P·제어 허가가 아니다. 차량 절대 시각은 남기지 않는다.
+- 두 분류는 domain3·송수신 destination·현재 요청 상관 일치·암호 응답·AEAD 검증·`STATUS_VERIFIED/COMPLETE`를 모두 충족한 경우에만 기록한다. 매 RX 초기화하고 비인증/실패/다음 응답에는 전달하지 않는다. callback 없는 경로의 계산·진단용 본문 복사·재직렬화·반사는 없다.
+- serializer와 분석기도 같은 문맥·allowlist를 적용한다. schema1–36에는 필드를 추가하지 않으며 구로그의 UNKNOWN 세부 원인을 추정하지 않는다. 작업별 집계는 실제 새 protocol 소비만 세어 반복 snapshot을 중복 집계하지 않는다.
+- UNKNOWN→P fallback·새 DRIVE 재조회·wake 추가·기한 연장·키/VIN/설정/기록 초기화는 없다. 다음 실차에서는 기존 접근 절차 후 USB 로그를 회수해 두 분류와 fresh P 결과를 확인한다. 설치 전 v81 테스트를 반복해도 새 분류는 생기지 않는다.
+
+### 실제 실행 검증
+
+호스트 전체 JVM659·독립 peer179·Python202가 통과했다. 별도 캐시 smoke는9개 기어 분류×4개 Timestamp 분류의36조합을 실제 생산 consumer·독립 암호 상대편·FieldJson으로 실행했다. JSONL899행을 실제 CLI JSON/human 양쪽으로 읽었고 기어별4건·시각별9건만 집계돼 반복 snapshot 중복이 없었다. P/VALID 외 조합은 세션 중단을 확인했으며 smoke에서 프렁크 요청은0이었다. 실제 RF·마이크·Android UI 입력은 아니다.
+
+기존 실차 로그815행도 변경된 분석기로 오류 없이 처리했고 schema≤36에 새 분류를 소급 생성하지 않았다. lint 오류0·경고18, debug APK 및 release Kotlin 빌드 성공. APK는 arm64-v8a만 포함하며146,464,136 bytes, SHA-256 `c355170ef9039ef9b53fd441b402fd23fe91d37c2475eadf5308405514b04132`다.
+
+근거는 `비공개 로컬 보관 경로`의 `final-validation-summary.json`, `runtime-drive-diagnostics.jsonl`, `runtime-drive-analysis.json`, `runtime-drive-analysis.txt`, `historical-analysis.json`과 `app/build/test-results/testDebugUnitTest/`다. 캐시의 합성 smoke와 사용자 실차 로그는 별도 보존한다. 이후 사용자 요청으로 데이터 보존 설치했고 `비공개 로컬 보관 경로`에 버전·APK digest·보존 검증·OFF/schema37 시작 관측을 기록했다. v82의 실제 차량 DRIVE 진단 분류는 아직 관측하지 않았다.
+
+## 0.81.0 — wake 직후 domain3 세션 요청 재송신과 sleep 진단
+
+### v80 실차 실패 근거
+
+보존 경로: `비공개 로컬 보관 경로`. 인증된 BODY ASLEEP에서 단발 wake를 보내 명목 ACK를 받았다. 그 뒤 domain3 HELLO는1회만 송신됐고 약10초 동안 domain3 응답이0개여서 `TIMED_OUT`/`PROTOCOL_STAGE`로 끝났다. P 미확인·마이크 미시작·명령 미전송이다. wake ACK를 기상 증거로 보지 않으며, 차량이 실제로 아직 잠들어 있었는지는 확정하지 못했다.
+
+### 구현된 동작과 안전 경계
+
+- wake 정상 ACK 직후 첫 읽기 전용 DRIVE 조회에만 세션 대기 창25초를 적용하고, 응답이 없으면2.5초 간격으로 최대8회 **같은 route·같은 요청 식별자의 HELLO를 그대로 재송신**한다. 새 handshake를 시작하지 않으며 SESSION_INFO 검증 조건은 그대로다.
+- 등록·DRIVE/READ_ONLY 외 목적·15–30초 밖의 창은 `SESSION_RETRANSMIT_INVALID`로 거부한다. 그 밖의 DRIVE는 기존10초/15초 동작을 유지한다.
+- wake는 여전히 회차당1회다. 재송신 시점마다 HANDSHAKING·서비스 허용·owner·DRIVE 조건을 다시 확인하고, 세션 수립·OFF·owner 변경·기한 만료 중 하나라도 해당하면 보내지 않고 재예약도 멈춘다. 재송신마다 `TESLA_CONNECTION_SESSION_RETRANSMIT` 이벤트를 남긴다.
+- schema36부터 UUID 없는 domain2 broadcast의 VCSEC sleep enum(0..2)만 `DOMAIN_DIFFERENT` 관측에 진단으로 기록한다. 이 값은 P·기상·제어 판단에 쓰지 않는다.
+
+### 실행한 검증
+
+|구분|실제 결과와 한계|
+|---|---|
+|호스트|JVM658·독립 peer179(재송신 시나리오4개 포함)·Python193 통과, 실패/오류/건너뜀0. lint 오류0·경고18.|
+|실제 Android surface|격리 AVD에서 첫 실행은 cold boot SystemUI ANR 창 때문에 UI4개가 접근성 노드를 찾지 못해 실패했고 runtime 안전5개는 통과했다. ANR 창을 닫은 뒤 UI4개 통과, 130% 글자에서도 UI4개 통과했다. 실제 서비스·GATT·마이크는 시작하지 않았다.|
+|배포 산출물|arm64-v8a만 포함, APK146,447,748 bytes, SHA-256 `3aedaf28650f3fe10d92c5534f03a08bff023bac3ddc3e266d485071618694da`. x86 검증 빌드 뒤 재빌드한 결과도 같은 digest다. 모델 자산5개 SHA-256은 v80과 같다.|
+
+근거: `비공개 로컬 보관 경로`의 `android-first-run-anr.txt`, `android-ui-smoke.txt`, `android-ui-font130.txt`, `gradle-final-arm64.txt`. 최초 호스트/AVD 검증 뒤 데이터 보존 설치와 사용자 실차 테스트가 진행됐으며 후속 실차 분석은 위 v82 절에 기록한다.
+
+## 0.80.0 — 인증된 수면 상태의 단발 깨움 준비
+
+[v80 연동 정본](Tesla-Integration.md#v80-인증된-수면-상태의-단발-ble-깨움)을 따른다. 실제 설치된 공식 Tesla4.62.3-4697의 base APK digest와 REA 대상 digest가 일치한다. 공식의 domain3 전단 조건부 wake를 확인했지만 **v79 차량이 잠들어 있었다는 증거는 없다**. 사용자가 허용한 범위는 기존 키로 인증한 BODY의 명시 ASLEEP일 때만 접근 회차1회 깨우기다.
+
+### 구현된 동작과 안전 경계
+
+최초 서비스 연결은 같은 GATT에서 BODY → ASLEEP이면 RKE30 전용 wake → 새로운 domain3 인증·DRIVE 조회다. AWAKE·UNKNOWN에는 깨우지 않고 읽기 전용 DRIVE로 진행한다. BODY 원 ingress freshness5초·owner/OFF·권한/동의·원 기한을 암호화 및 실제 wake SDK 발급 직전에 재검사한다. SDK201 미접수는 같은 조각만 기존 제한으로 재발급하고 접수 뒤 timeout·거절로 재wake하지 않는다.
+
+정상 명목 ACK는 인증된 wake 성공과 구분하여 새 독립 DRIVE 읽기만 허용한다. 새 인증·fresh 명시 P 전에는 park/mic/프렁크를 허용하지 않는다. 그 밖의 불명·거절·기한은 중단하며 프렁크/수동 목적에 wake가 섞이면 실패닫는다. 모델·호출어·발화/정리·2초 P poll·단발 프렁크의 기존 제어 게이트는 유지한다.
+
+### 실행한 검증
+
+|구분|실제 결과와 한계|
+|---|---|
+|최종 호스트|앱/계측 APK·JVM·독립 peer·lint·release Kotlin의6작업 성공. JVM651/40 suites·독립 peer175·Python238 통과, 실패/오류/건너뜀0, lint 오류0·경고18.|
+|생산 준비 경로|독립 암호 상대편과 실제 session/owner/write pump를 실행했다. AWAKE/UNKNOWN 생략·ASLEEP 단발·새 DRIVE P·명목 ACK 독립 읽기·D/UNKNOWN/stale/AEAD 실패·owner/OFF·미래/만료 BODY·late 응답·목적 혼입·수신/송신 기한을 확인했다. 실제 마이크·RF 입력은 아니다.|
+|다중 조각·BUSY|실제 MTU23의 다중 조각 wake 완료, 두 번째 조각 전 OFF/receipt 만료 봉인, 두 번째 조각201의 동일 미접수 조각 재발급을 확인했다. accepted prefix/frame 재생성·두 번째 wake·P 이전 capture/ACTION은 없었다.|
+|실제 Android surface|격리 AVD의 UI5·runtime 안전5와130% 글자 준비 화면1개 통과. cold boot의 기존 SystemUI ANR 창은 먼저 해제했다. test-owned 상태/저장소만 사용했고 실제 서비스·GATT·마이크를 시작하지 않았다. `FLAG_SECURE` 유지로 픽셀 검증은 하지 않았다.|
+|관측 결함 실패 전후|KEY→FRUNK 정리가 서로 다른 제품 세션으로 갈리는 회귀는 수정 전11개 선택 실행에서 하위14 ERROR였고 수정 후 선택11·전체 Python이 통과했다. 프렁크 내부 protocol 분모/판정 누락은 선택 생산 peer가 컴파일 후 runtime 실패하는 것을 확인한 뒤 수정했다. 최종8개 프렁크 수신 경계도 전체 peer에 포함된다.|
+|실제 파일→CLI|실제 생산 프렁크 흐름의 관측을 `FieldJson`으로 출력했다. 두 회차 모두 notification/frame/protocol10/10/10, 첫 회차 FRUNK_ACKNOWLEDGED1·둘째 FRUNK_UNCONFIRMED1로 분리됐다. 반복 snapshot은 새 판정으로 세지 않고 CLI exit0·issues0이었다. 코드 allowlist 때문에 두 결과가 null로 소거되던 결함도 schema35+에서 수정했다.|
+|역사/모델 보존|실제 v79 로그의 새 분석기 CLI는 exit0·issues0, HANDSHAKING/PROTOCOL_STAGE 및11/11/11 관측을 유지했다. 모델 자산5개는 실제 설치 v79 APK와 SHA-256이 모두 같다. 구 schema의 새 분류 미지원·미관측 null을 보존한다.|
+|배포 산출물|arm64-v8a만 포함, APK146,860,112 bytes, SHA-256 `2568b1718200b2744ba9f1a95ac14c7d1473f56c0c7518e2391d22f36baa724b`. 임시 화면/파일 출력 메서드를 모두 제거한 뒤 최종 빌드했다. 사용자 폰에는 설치하지 않았다.|
+
+추가 판정 회귀의 최초 실행은 per-notification frame 값이 없는 fixture를0으로 기대하여2개 하위 실패가 있었다. 실제 데이터가 미관측이면 null이라는 기존 계약에 맞게 회귀 전제를 바로잡았으며 생산 분석기를0으로 채우도록 바꾸지 않았다.
+
+근거: `비공개 로컬 보관 경로`의 `rea-evidence.json`, `comparison-summary.json`, `gradle-final-arm64.txt`, `final-validation.json`, `android-ui-smoke.txt`, `android-safety-regressions.txt`, `android-ui-font130.txt`, `android-validation-summary.json`, `runtime-frunk-observation.jsonl`, `runtime-frunk-observation-analysis.json`, `model-asset-comparison-verified.json`. 최초 모델 비교 시도의 shell 출력은 digest가 아니어서 폐기 판정했고, 정규64자리 digest를 검증한 `-verified` 파일만 비교 근거로 사용한다.
+
+### v80 데이터 보존 설치
+
+사용자 요청으로 교체 설치했다. 도구가 기기의 Success/Failure 판정을 누락한 문제는 보고하고, 재설치 없이 실제 package80/0.80.0·base APK digest·최초 설치 시각 유지를 확인했다. 파일717→717개·누락0·변경2개이고 shared_prefs 전체 digest가 동일하다. 저장 OFF와 실제 ObservationService 미실행을 보존했으며 기본 비서는 `mBound=true/mService!=null`이다. 서비스 토글·마이크·차량 명령은 실행하지 않았다.
+
+근거: 이번 `비공개 로컬 보관 경로` 보존 디렉터리의 `installation-summary.json`, 전후 package·파일 digest·설치 후 service/voiceinteraction 관측이다. 사용자 실차 시험 전이며 기상·fresh P·음성·프렁크는 미검증이다.
+
+## 0.79.0 — 과거 성공 대조와 연결·음성 오류 분리
+
+[비교·수정 계약](Tesla-Integration.md#v79-성공-경로-대조실패-분리)을 따른다. **인증 문제 해결이나 실차 개방 성공 버전이 아니다.** v24 실차 DRIVE 검증·당시 UI P 관측과 v72/v75 domain3 sidecar 인증 성공을 인정하고, 성공 직후 v25 인접 소스(Git355f175)·현재 구현·protobuf9개를 대조했다. autoConnect·대상 출처·콜백/송신 소유권 등의 차이는 있으나 이번 대응 HELLO 무응답의 원인으로 확정하지 못했다.
+
+### v78 실차 실패 근거
+
+보존 경로: `비공개 로컬 보관 경로`.
+
+|회차|실제 관측|결과|
+|---|---|---|
+|15:49:32 첫 접근|연결·CCCD·최종 write callback0, 완성 frame/protocol11개: from 없음1·domain2 10|domain3 HANDSHAKING 약10초 뒤 PROTOCOL_STAGE 만료|
+|15:50:01 OFF→ON 재시도|연결·CCCD·write callback0, 완성 frame/protocol1개: domain2 1|동일 HANDSHAKING 기한 만료|
+
+두 회차 모두 제품 음성 IDLE·P 미확인·명령 미전송이다. 음성 모델 인식/보정 실패가 아니며 당시 공통 문구가 연결 실패도 음성 오류처럼 보이게 했다. 원시129행 CLI 분석은 exit0이다. 다른 요청의 domain2 fault·차량 sleep·공식 앱 충돌·키 미등록을 원인으로 단정하지 않는다.
+
+### 실제 수정·검증
+
+- 연결 실패와 음성 실패를 분리했다. 정상 정리 뒤 동일 종료 reason의 모델 오류는 유지하고, 이전 음성 오류가 새 연결 진행/새 연결 실패를 덮지 않도록 했다. cleanup·OFF·중지 우선순위, P·단발 명령·정리 게이트는 유지했다.
+- 최종 앱/계측 APK·JVM·독립 peer·lint·release Kotlin 빌드 성공. JVM546/37 suites·독립 peer103, 실패/오류/건너뜀0, lint 오류0·경고18.
+- 별도 cache Java smoke12조합은 실제 생산 session의 submit 반환→지연 chunk 소비→callback→RX drain을 실행했다. 정상 domain3가 있으면 암호화 DRIVE/P까지 진행하고, 없으면 기존 기한 만료·fresh P/actuator0이었다. Android SDK adapter·차량 RF는 실행하지 않았다.
+- 실제 격리 Compose 화면 smoke는 기본/130% 글자 모두 통과했다. 첫 시도는 에뮬레이터 SystemUI ANR 창에 가렸고, 이를 해제한 다음에는 임시 fixture의 시작 플래그가 오류 표시보다 우선했다. 생산 코드를 시험에 맞추지 않고 fixture의 시작/중지 플래그를 명시한 뒤 연결 오류·종료 모델 오류·새 인증 진행·새 연결 실패·cleanup 우선·OFF를 확인했다. `FLAG_SECURE` 유지·픽셀 검증 미완료다.
+- 임시 화면 메서드·전용 import를 제거하고 배포 ABI를 arm64-v8a만으로 최종 빌드했다. APK146,414,984 bytes, SHA-256 `fa0ce0d4c372a1c75a18f8a9bb43116c3508cdd96a2b6678840fb23eee0b304c`. 폰에는 설치하지 않았고 키·VIN·설정·로그·사용자 데이터를 조작하지 않았다.
+
+근거: `비공개 로컬 보관 경로`의 `comparison-summary.json`, `historical-proto-comparison.json`, `wire-smoke.txt`, `host-regression-summary.json`, `android-ui-smoke-final.txt`, `android-ui-smoke-font130.txt`, `android-validation-summary.json`, `gradle-final-arm64.txt`, `final-validation.json`. 임시 smoke·호스트 성공을 실제 차량 응답·삼성 마이크·개방 성공으로 승격하지 않는다.
+
+### v79 데이터 보존 설치
+
+사용자 요청으로 교체 설치했다. 도구 결과의 Success/Failure 판정 누락은 보고하고, 재설치하지 않은 채 실제 package79/0.79.0·기기 base APK SHA-256 일치·최초 설치 시각 유지로 설치를 확인했다. 파일717→717개·누락0·변경2개, shared_prefs 전체 digest 동일이다. 자동 복원 후 실제 connectedDevice FGS·스캔 true·비서 bound·제품 동의 true, 연결/음성 IDLE·명령 미전송을 확인했다. 서비스 토글·음성·차량 동작은 실행하지 않았다.
+
+근거: `비공개 로컬 보관 경로` 아래 이번 `install-v79-` 보존 디렉터리의 `installation-summary.json`, 전후 package·파일 digest·설치 후 service/voiceinteraction 관측이다. 설치는 차량 인증·fresh P·실차 개방 검증이 아니다.
+
+## 0.78.0 — 기존 튜닝 모델의 제품 연결
+
+[구현 계약](Tesla-Integration.md#v78-검증-모델-연결)에 따라 진단 전용이었던 기존 sherpa 모델을 자동 제품 경로에도 연결했다. `KoreanSpeechRecognizer`는 실제 PCM 접수·decode 완료·native 두 자원 해제를 결과로 전달하고 `ProductVoiceSession`은 이를 한 번만 소비한다. 모델 오류·취소·늦은 결과·정리 불명은 명령을 허용하지 않는다. 기존 호출어/명령·모델 튜닝·fresh P·발화10초/handoff5초/명령40초를 바꾸지 않았다.
+
+|검증|실제 결과·한계|
+|---|---|
+|JVM·독립 상대편|37 suites·539개, 실패/오류/건너뜀0. 모델 누락·native 생성/decode/각 release 실패·OFF/owner/P/권한 상실·늦은 결과·중복 완료·부분 PCM·무점수·취소 우선·기한을 검증했다. 독립 상대편103 PASS는 실제 생산 연결/명령 소비자에 합성 인식 결과를 전달한 실행이며 RF·실제 STT 검증은 아니다.|
+|실제 모델·제품 버퍼|기존 로컬 검증 녹음1건을 그대로 읽어 실제 `ProductUtteranceBuffer`에 넣었다. 발화 구간2,980 ms, 소비 PCM101,760 bytes, 최종 모델 로드7,374 ms·decode1,288 ms·구간 포함 총11,818 ms, cleanup=true다. 실측 시계의 제품 소비자는 `FRUNK_VOICE_EXPIRED`·gate 없음이었다. 같은 실제 모델 결과를 별도의 합성 정책 시각으로 소비하면 `ACCEPTED`·점수 null·단발 gate였고 STOP·정확10초 경계에는 차단됐다. 합성 시각의 수락을 성능 성공으로 세지 않는다. 실제 마이크·BLE·차량 명령은 호출하지 않았다.|
+|최초 모델 계측 실패|무음13,620 ms·검증 발화12,271 ms에서 고정 `WAIT`/`ACCEPTED` 기대2개가 실패했다. 에뮬레이터 성능을 고정한 시험 전제를 제거하고 모델 판정과 실제 기한 차단을 분리했다. 생산 timeout·모델·튜닝은 그대로다. 영구 무음 회귀는 실제 모델 결과의 제품 명령 미발급을 합성 정책 시각으로 검사하며 성능 기준을 대신하지 않는다.|
+|Android 안전·화면|`ProductVoiceRuntimeDeviceTest`2개·`FrunkVoiceCleanupDeviceTest`2개·`TeslaConnectionRxObservationDeviceTest`1개 통과. 기존 UI4개와 임시 모델 오류/정리 우선 화면1개도 통과했다. 첫 UI 실행5개는 에뮬레이터 SystemUI ANR 대화상자에 막혔고 이를 닫은 뒤 기존4개가 통과했다. 임시 smoke의 홈/설정 정리 문구 혼동도 각 실제 화면에 맞게 고쳤으며 생산 UI를 시험에 맞춰 바꾸지 않았다. `FLAG_SECURE`를 유지했고 픽셀 검증은 하지 않았다.|
+|분석기·로그|Python227개 통과. 모델 누락·로드 실패·decode 실패의 고정 제품 사유와 비교진단 native 정리 실패 토큰만 허용목록에 추가했다. 제품 PCM·인식 원문·개인 녹음 식별자를 일반 로그에 추가하지 않았다. 이번 모델 관측도 고정 입력 종류·판정·시간·정리 여부만 보존했다.|
+|최종 빌드·자산|임시 녹음/UI smoke method 제거·arm64 복구 후 APK/계측 APK·lint·release Kotlin 빌드 성공. 최종 APK146,414,984 bytes, SHA-256 `3b53adfe8fb9910de3cd54fdbcfba62133ee070f55add7615c8b5237c4514153`, ABI는 `arm64-v8a`만이다. 모델 자산5개는 v77 APK와 크기·SHA-256 모두 같다. lint 오류0·경고18.|
+
+근거: `비공개 로컬 보관 경로`의 `gradle-x86-verification.txt`, `gradle-final-arm64.txt`, `host-regression-summary.json`, `android-validation-summary.json`, `android-model-and-ui-observations.txt`, `android-ui-model-final.txt`, `final-apk-summary.json`. 기존 로컬 녹음은 읽기 전용으로 사용했고 소스/모델 asset에 복사하지 않았다. 검증 AVD만 종료했으며 사용자 폰의 키·VIN·설정·로그·서비스는 조작하지 않았다.
+
+**v78은 모델 연결 수정이지 BLE 연결 문제 해결이나 실차 개방 검증 완료가 아니다.** 위 호스트 작업 당시에는 폰에 설치하지 않았고, 이후 사용자 요청으로 아래 설치·폰 검증을 진행했다.
+
+### v78 데이터 보존 설치·폰 모델 검증
+
+근거: `비공개 로컬 보관 경로`의 설치 전후 package·파일 digest·설정/로그 보존본, `phone-product-model-smoke.txt`, `phone-model-observations.txt`, `after-instrumentation-exit-info.txt`, `post-install-analysis.json`.
+
+- 검증된 arm64 APK를 `adb install -r`로 설치했다. 실제 package0.78.0/78·설치 APK SHA-256·최초 설치 시각 유지로 확인했으며 도구의 설치 verdict 누락을 성공 근거로 사용하지 않았다.
+- 기존 폰 녹음1건을 읽기 전용으로 사용했다. 제품 버퍼의 PCM101,760 bytes·발화 구간2,980 ms에 실제 모델 로드1,386 ms·decode169 ms·정리를 포함하여 총4,570 ms였다. 실측 시계로 명령 인정·점수 null·단발 gate를 확인했고, 중지/10초 경계는 gate 없음이었다. 무음은 모델 로드1,125 ms·decode58 ms·총1,212 ms, 합성 정책 시각의 제품 판정 `WAIT`·gate 없음이었다. 새 마이크·TTS·차량 명령은 호출하지 않았다.
+- 계측 직후 파일717→717개, 누락/추가0·동일714개였다. 당시 변경3개는 설치 profile·활성 로그·Android의 `ActivityThread.IDS` 기록이다. 기존 로그5개는 모두 prefix를 보존했고 설정45개 중44개가 동일하며 달라진 것은 위 Android 기록뿐이었다. 서비스 ON·제품 동의·키/VIN 관련 파일·기존 녹음은 보존했다. AndroidKeyStore 개인키 원문은 조회하지 않았다.
+- 계측 자체는 통과했지만 OS 종료 이력은 `reason=10(USER REQUESTED)`, `subreason=21(FORCE STOP)`, `due to start instr`/`due to finished inst`였다. 앱의 사용자 종료 존중 정책이 자동복원을 차단했으며 정상 Activity 실행으로 우회되지 않았다. 저장 ON과 실제 서비스 중지를 구분하고 임의 토글·복원 정책 완화는 하지 않았다.
+- 임시 폰 smoke method를 제거하고 계측 APK를 다시 빌드·데이터 보존 교체했다. 설치 후 새 로그19행의 실제 분석기 CLI는 exit0·issues0이다. 이 과정은 생산 UI·통신·모델·기한을 추가 수정하지 않았다.
+- 이후 사용자가 명시적으로 OFF→ON 복구를 승인했다. 실제 UI에서 OFF 저장·ON 저장과 connectedDevice FGS/스캔 복구를 확인했다. 계측 뒤 남아 있던 기본 비서 `mService=null`은 같은 v78 APK의 데이터 보존 재설치·정상 실행 후 `mBound=true/mService!=null`·`ASSISTANT_READY`로 복구됐다. 비서 선택·음성 동의·권한은 변경하지 않았다.
+- 최종 파일717→717개, 누락/추가0이며 변경3개는 설치 profile·활성 로그·승인된 OFF→ON의 activation 설정뿐이다. 현재 서비스 ON·스캔 실행·연결/제품 음성 IDLE·microphone 서비스 없음이다. 최종 새 로그41행은 CLI exit0·issues0이고 차량 연결 시작·제품 명령 인정·프렁크 요청 이벤트는 없었다. 최종 근거는 같은 디렉터리의 `final-installation-summary.json`, `final-restored-services.txt`, `final-restored-voiceinteraction.txt`, `final-restored-analysis.json`이다.
+
+## 0.77.0 — DRIVE 비교와 연결 관측 누락 수정
+
+[REA 비교·수정 계약](Tesla-Integration.md#v77-drive-인증-비교관측-보존)을 따른다. 공식 Tesla4.62.3-4697의 domain3 요청·SessionInfo HMAC·route lookup·응답 decoder·세션 cache를 실제 REA로 조사했지만 **통신 실패 원인을 확정하지 못했다**. 인증 완화·timeout 연장·retry·wake 추가나 공식 설정 무조건 복사는 하지 않았다.
+
+### 수정 근거가 된 v76 실차
+
+- 보존 경로: `비공개 로컬 보관 경로`. 전체684행 중 schema33 v76은94행이며 연결 시도1회다.
+- 12:00:39.964 연결 시작 → 40.190 구독 확인 → 40.306 `AUTHENTICATING` → 50.456 `DEADLINE_EXPIRED` → 50.506 로컬 종료. 연결·service/TX/RX·구독 확인 true, notification6개, GATT status0이었다. notification은 완성 frame·인증 응답 개수와 다르다.
+- fresh P·제품 음성 시작·인식·명령·프렁크 송신은 관측되지 않았다. 기본 비서·권한·동의 설정 문제로 확인된 것은 아니다.
+- GATT 관측 이벤트26행의 이름은 저장됐지만 세부 `gatt`가 누락됐다. `AUTHENTICATING`는 HELLO와 DRIVE 조회를 포괄하므로 인증 키 거절·차량 asleep·공식 앱 충돌을 확정하지 않는다. 새 분석기로 기존 로그를 재처리해도 상세는 `null`, `connectionOperations=[]`이며 누락을 성공/실패로 만들어내지 않는다.
+
+### 실행한 검증과 한계
+
+|검증|실제 결과|
+|---|---|
+|수정 전후 회귀|신규 분석기 계약 회귀의 미지원 실패를 먼저 확인했다. 리뷰에서 찾은 snapshot counter 중복 판정은 선택 회귀2개·하위 실패9건으로 재현한 뒤 수정했고 최종 Python227개가 통과했다. CLI 회귀의 dict repr 오인 파싱도 수정했다.|
+|앱 빌드·JVM|JBR21 `:app:assembleDebug`, `:app:assembleDebugAndroidTest`, `:app:testDebugUnitTest`, `:app:runVehiclePeerSimulator`, `:app:lintDebug`, `:app:compileReleaseKotlin` 성공. 36 suites·525 tests, 실패/오류/건너뜀0. schema 행 크기에 결합된 기존 rotation 회귀의 고정1600 상한은 codec 인코딩 길이에 연동하여 원래 파일 보존 검증을 유지했다.|
+|생산 소비자·독립 상대편|103 시나리오 PASS. 같은 GATT의 fresh P·단발 ACTION·BODY와 인증 변조·이전 응답·OFF/취소/정리 불명 차단을 실행했다. `rf=false syntheticFinalText=true actualStt=false actualMicrophone=false`다.|
+|실제 Android 로그 왕복|임시 smoke1개 통과. 실제 Runtime/sink가 쓴 schema34 로그6행을 회수하여 CLI exit0·malformed/unsupported/issues0을 확인했다. 합성 notification6/frame2/protocol2가 분리되고 UUID 불일치1·SESSION_READY1만 집계되며 종료행의 복제 결과는 추가되지 않았다. background 호출 시점 관측 보존·다른 이벤트 null·프렁크 이벤트0을 확인했다.|
+|기존 Android 안전|`ProductVoiceRuntimeDeviceTest`2개, `FrunkVoiceCleanupDeviceTest`2개, `TeslaConnectionRxObservationDeviceTest`1개 통과. 독립 저장소·합성 lease/입력만 사용했으며 생산 키/VIN/설정·사용자 폰·차량을 조작하지 않았다.|
+|lint·APK|오류0·경고18. debug APK 146,398,596 bytes, SHA-256 `8f357b20d4dccfdb28f1c7c53ea2e83ad110f555f92c9748d32fc5601a0cbe7d`. 에뮬레이터 package에서 versionCode77/versionName0.77.0을 확인했다. 설치 도구 verdict 누락은 보고하고 package로 별도 확인했다.|
+|읽기 전용 리뷰|runtime의 이벤트 캡처·허용항목·시간/회차 경계·null/0/false·PII 제외·counter 신규성 검토. 과거 snapshot의 counter를 무시하는 신규 분석기 결함을 수정한 뒤 해당 반례 해소를 재검토했다. 정적 리뷰가 실제 차량 성공을 뜻하지 않는다.|
+
+근거는 `비공개 로컬 보관 경로`에 보존한다. `comparison-summary.json`, `rea-evidence.json`, `counter-regression-before.txt`, `python-regressions-final.txt`, `android-runtime-smoke.txt`, `android-safety-regressions.txt`, `runtime-observation-smoke.jsonl`, `runtime-observation-analysis.json`으로 비교·실패 재현·실행 증거를 구분한다.
+
+**이번 변경은 로그 누락과 분석 오판 수정이지 연결 문제 해결이 아니다.** 다음 실차 확인에서 v77의 내부 단계·실제 write/RX/auth·기한 원인을 함께 봐야 한다. 키/VIN 재등록·초기화·반복 발화를 해결책으로 요구하지 않는다.
+
+### v77 휴대폰 데이터 보존 설치
+
+근거는 `비공개 로컬 보관 경로`과 전후 파일 digest·로그/설정 tar·서비스/비서/package 관측이다.
+
+- 검증된 APK로 v76→v77 교체 설치했다. 설치 도구가 Success/Failure verdict를 생략한 문제는 보고했으며 재설치하지 않고 실제 package와 기기 base APK digest로 확인했다.
+- 점검한 저장 파일717→717개, 누락/추가0·동일715개다. 변경2개는 설치 profile 기록과 활성 로그뿐이다. 키/VIN 관련 저장 파일·설정45개는 동일하고 기존 로그5개는 전부 원문 prefix가 유지됐다. 전후 로그·설정을 PC 캐시에 보존했으며 AndroidKeyStore 개인키 원문은 조회하지 않았다.
+- 기존 업데이트 복원 경로가 저장 ON을 유지해 ObservationService·BeaconService와 connectedDevice FGS·스캔을 복구했다. 기본 비서 Hey Tesla bound·음성 동의·관련 권한은 유지됐다. 이전 실행 미종료 표식은 설치 교체 이력이며 이전 차량/음성 회차를 재생한 증거가 아니다.
+- 설치 후 실제 schema34 로그12행을 회수해 CLI exit0·malformed/unsupported/issues0을 확인했다. 연결/제품 음성 IDLE이고 마이크 서비스는 없었다. 이번 설치가 인증·fresh P·실제 STT·프렁크 성공을 검증한 것은 아니다.
+
+
+## 0.76.0 — 연결 기반 음성 프렁크
+
+[현재 제품 계약](Tesla-Integration.md#v76-연결-기반-음성-프렁크)에 따라 기존 키·VIN·차량 등록·설정·로그와 과거 REA 근거를 보존했다. 삭제 범위는 사용자 승인된 UWB·좌표 제품 실행/전용 진단/전용 회귀와 빈 패키지다. 공유 GATT·암호·프렁크·보안 회귀는 `vehicle/connection`으로 이관했고, 과거 위치 로그 모델은 `logging/legacy`에서 읽는다.
+
+|실제로 실행한 검증|결과·한계|
+|---|---|
+|앱 Gradle|JBR21의 `:app:assembleDebug`, `:app:assembleDebugAndroidTest`, `:app:testDebugUnitTest`, `:app:runVehiclePeerSimulator`, `:app:lintDebug`, `:app:compileReleaseKotlin` 성공. 삭제 경계에서 남아 있던 공용 `HashMap`·`UUID` import 누락을 빌드로 발견해 복구한 후 통과했다.|
+|JVM|36 suites·519 tests, failures/errors/skipped0. 장시간 대기·음성 절단·정리 불명·취소/늦은 결과·fresh P·단발 명령·화면 상태 우선순위를 포함한다.|
+|독립 생산 경로 smoke|103 시나리오 PASS. `deviceAccess=false rf=false syntheticFinalText=true actualStt=false actualMicrophone=false`. 동일 handle 유지·명령용 새 P·단발 actuator, D/R/N/UNKNOWN·source/receipt 만료·변조·이전 응답·OFF·정리 불명 차단을 실행했다.|
+|로그 분석기|`python3 -B -m unittest discover -s tools -p 'test_*.py'` 214개 통과. schema1..32 역사 해석과 schema33 제품 단계·동의·고정 사유·실제 프렁크 전이 집계를 검증했다. 제품 PCM/인식 원문은 기록하지 않는다.|
+|lint·APK|오류0·경고18. 146,398,596 bytes, SHA-256 `68436ee0ff67c8df8854134b7e572c8e8f52ffedd4078e99e757a6f433329351`. 새 동의 설정의 동기 commit/권장 KTX 경고는 저장 결과 확인 경계를 위해 유지했다.|
+|Android 런타임 안전|`ProductVoiceRuntimeDeviceTest`, `FrunkVoiceCleanupDeviceTest`, `TeslaConnectionRxObservationDeviceTest` **5개 통과**. 동의 철회 저장 실패/예외·늦은 발화 결과 차단, BLE 선종료 뒤 exact audio lease 유지, 정리 불명과 수신 조각/병합 경계를 검증했다. 격리 상태·합성 lease를 사용했으며 실제 마이크/차량 명령은 실행하지 않았다.|
+|Android 실제 UI|`VehicleServiceUiDeviceTest` **4개 통과**. 복원/재진입으로 감지 시작 금지, 복원 실패·권한 부족에서도 OFF 저장, 기존 ON/동의 창 닫기로 새 동의 부여 금지, 명시적 동의와 철회 UI를 실제 Compose 상호작용으로 확인했다.|
+|실제 저장 로그 → CLI|에뮬레이터의 schema33 로그33행을 읽기 전용 회수해 실제 분석기 CLI를 실행했다. exit0·malformed/unsupported/issues0. 서비스 OFF·미동의 상태이므로 제품 세션/명령 이벤트는0이며 연결 성공의 근거가 아니다.|
+|APK 정적 REA|빌드 APK의 package/version/SDK와 manifest를 확인했다. `RANGING`, `ACCESS_BACKGROUND_LOCATION`, `FOREGROUND_SERVICE_LOCATION` 권한이 없으며 버전76/0.76.0·위 SHA-256과 일치했다. 정적 검사이며 서명·실차 성공 검증은 아니다.|
+|읽기 전용 안전 리뷰|동의 철회 저장 실패 시 실행이 남는 결함, BLE 선종료 후 오디오 정리 대기를 시작 전 요청으로 오판하는 결함을 발견해 수정했다. 저장 전에 RAM 철회·동기 봉인, exact audio lease를 in-flight에 포함한다. 재검토에서 해당 경계와 차량 백엔드의 추가 차단 결함을 발견하지 못했지만 정적 검토가 실제 기기 합격을 뜻하지 않는다.|
+
+별도 검증 AVD와 호스트 산출물은 `비공개 로컬 보관 경로`에 둔다. 이후 사용자 요청으로 같은 SHA-256 APK를 휴대폰에 데이터 보존 설치했으며 결과는 `phone-install-v76.json`에 개인정보 없이 보존했다.
+
+초기 AVD 시스템 ANR/계측 attach 실패는 검증 AVD를 데이터 보존 재시작하고 자원을 늘린 뒤 해소했다. 이후 UI 계측을 방해한 모바일 관측 도구의 UiAutomation 점유를 같은 에뮬레이터에서 해제한 후 4개를 다시 실행해 통과했다. 이 초기 도구/AVD 실패를 앱 기능 실패나 통과로 계산하지 않는다. `validation-v76.json`, `emulator-runtime.jsonl`, `emulator-analysis.json`에 검증 범위와 결과를 보존했다.
+
+설치 후 초기 설정에서는 사용자가 직접 **기본 비서 Hey Tesla 선택·마이크 권한·음성 프렁크 동의**를 확인해야 한다. 이전 서비스 ON은 새 동의가 아니며 화면 진입·동의 허용만으로 지난 접근을 재시작하지 않는다. 음성은 화자 인증이 아니므로 주변 사람·재생음 위험을 고지한다. D 등 주행 상태는 BLE 조회로 확인하므로 즉시 감지를 보장하지 않는다. 서비스 OFF/동의 철회는 언제든 봉인하되 전송된 명령의 물리 철회를 보장하지 않는다.
+
+### v76 휴대폰 설치 후 첫 실차 확인
+
+- 현재 설정 화면을 열어 두었다. 사용자가 `기본 비서`에서 Hey Tesla를 직접 선택하고 `음성 프렁크 사용 안내`를 읽어 동의한다. 기존 서비스 ON은 유지돼 있으며 새 동의가 자동 부여되지 않았다. 키/VIN 재등록·초기화는 하지 않는다.
+- 차량 P·주변 안전을 확인한 상태에서 USB를 분리하고 폰을 잠근 뒤 접근한다. 프렁크 주변을 비우고 “헤이 테슬라 프렁크 열어줘”를 한 번 말한다. 이번 첫 확인에는 주행/D 전환 시험을 넣지 않는다.
+- 실제 래치/후드 상태를 확인한다. 반응이 없으면 반복 발화·재시작 대신 시각과 앱/알림의 연결·음성 상태 또는 오류를 기록한다. 요청 전송/ACK만으로 실제 개방 성공으로 기록하지 않는다.
+- 확인 후 서비스 OFF와 마이크 중지를 확인하고 USB를 다시 연결한다. 단계/차단 사유 로그로 분석하며 제품 인식 원문·녹음은 저장하지 않는다. 실제 Samsung 잠금 마이크·STT·개방 성공은 이 시험 전까지 미검증이다.
+
+## 0.75.0 — 수신 우선과 요청 context 보존
+
+호스트 근거는 `비공개 로컬 보관 경로`과 같은 디렉터리의 전후 실행 출력·REA 비교 자료다. [공식 앱 비교와 수정 계약](Tesla-Integration.md#v75-이미-수신한-fira와-새-송신의-순서)을 따른다. 최초 수정·검증 단계는 사용자 USB 분리 안내를 반영해 **설치·기기 접근 없이 호스트에서만 수행**했으며, 이후 요청받은 설치·기본 실행 확인은 아래 별도로 기록한다.
+
+|실제로 실행한 검증|결과·한계|
+|---|---|
+|수정 전 재현|외부 독립 peer가 생산 consumer에 current 암호 FiRa만 주면 응답/합성 native 시작1회, metadata 요청과 묶으면 `PREVIOUS/ROUTE_MISMATCH`·시작0이었다. 새 회귀5개를 미수정 소스에서 실제 실행해 **실패4·통과1**을 확인했다. `queue-order-before.txt`, `queued-regressions-before.txt`.|
+|수정 후 같은 실행|같은 외부 smoke에서 묶인 암호 FiRa가 **CURRENT/VERIFIED·응답1·합성 native 시작1**로 바뀌었다. 새 회귀5개 모두 통과: 정상 current 수락, tag/ciphertext 변조 거부, 실제 previous context 계속 거부, STOP 처리·close 요청이 새 metadata TX보다 선행, 인증+metadata7개 수신의 기존 총9송신 용량 유지.|
+|앱 Gradle·JVM|JBR21에서 `:app:assembleDebug`, `:app:assembleDebugAndroidTest`, `:app:testDebugUnitTest`, `:app:runVehiclePeerSimulator`, `:app:lintDebug`, `:app:compileReleaseKotlin` 및 외부 `:app:runReaIngressOrderSmoke` **SUCCESS·2분28초**. **41 suites·722 tests**, failures/errors/skipped0. 계측 APK 생성은 기기 계측 실행이 아니다.|
+|독립 실행·리뷰|**204 시나리오 PASS**, `deviceAccess=false`, `rf=false`. 기존 OFF·owner/권한 상실·STOP·분할 TX·동일 ID 교체·좌표 sidecar·기한 회귀를 포함한다. 읽기 전용 리뷰에서 지정 순서·용량·암호·종료 변경의 병합 차단 결함 미발견. 실제 SDK/RF는 합성 경계다.|
+|lint·생성 APK|앱 lint 오류0·경고16. metadata 및 REA 정적 manifest 모두 **0.75.0/75**, 146,677,129 bytes, SHA-256 `7aaa4765bb6f1b272e8967056fd038955bc31386e64769d6edf4d19516b12cd7`. 정적 APK 검사는 서명·실행 검증이 아니다.|
+|호스트 검증 단계에서 실행하지 않은 항목|당시 설치·앱 실행/강제 종료·서비스 ON/OFF·권한 변경·기기 계측·화면/알림 픽셀·실차·Python 및 root/vendor lint는 실행하지 않았다. 이후 사용자 요청 설치·로그 분석 범위는 아래와 같다.|
+
+**실제 처리 결함을 수정했지만 거리 문제는 아직 미해결이다.** v74 실차에 같은 notification 조합이 있었는지는 확인되지 않았다. 공식 DRIVE 응답 선행이나 병행 실행을 원인으로 확정하지 않았고 자동 DRIVE·마이크·프렁크를 추가하지 않았다. 이전 context 수락·timeout 연장·retry로 재현을 통과시킨 것도 아니다.
+
+### v75 데이터 보존 설치와 ON 복원
+
+근거는 `비공개 로컬 보관 경로`과 전후 파일 digest·로그 tar·활성화 설정·서비스/알림 덤프다.
+
+- Galaxy S23 Ultra에 v74→**0.75.0/75**로 교체 설치했다. 실제 package와 기기 base APK가 검증 APK의 SHA-256과 일치하고 최초 설치 시각은 유지됐다. 설치 도구의 Success/Failure verdict 누락은 보고했으며 재설치하지 않고 package·hash로 결과를 별도 확인했다.
+- 앱 저장 파일 **717→717·누락/추가0·동일715개**다. 변경2개는 설치 profile 기록과 현재 로그뿐이다. 현재 로그의 기존 바이트는 prefix로 유지됐고 회수 시점17행이 추가됐다. 다른 순환 로그4개와 활성화 XML·기존 키/VIN/설정 관련 저장 파일은 동일하며, 전후 로그5개 모두 PC 캐시에 보존했다. AndroidKeyStore 내부 개인키 원문은 조회하지 않았다.
+- 저장 ON을 유지했고 앱의 기존 업데이트 복원 경로에서 감지 대기로 복귀했다. ObservationService·BeaconService FGS·활성 알림1개와 런처 `Status: ok`·프로세스 생존·현재 프로세스 crash 기록0을 확인했다. 실제 홈 접근성 계층에서 **서비스 ON·차량 신호 대기·UWB 실측 미수신**, 재시작 필요 문구 없음을 확인했다.
+- 새 v75 로그17행의 실제 분석기는 exit0·malformed/unsupported0·issues0이다. 설치 교체에 따른 이전 실행 미종료 관측과 저장 ON 복원은 정상 거리 수신 증거가 아니다. 직접 서비스 토글·권한 변경·별도 force-stop·차량 명령은 실행하지 않았다. 픽셀·기기 계측·실차 거리 검증은 미실행이다.
+
+## 0.74.0 — 초기 UWB 실패의 종료 처리
+
+호스트 검증 근거는 `비공개 로컬 보관 경로`과 `jvm-results.json`이다. [수정 계약](Tesla-Integration.md#v74-열기-실패-terminal과-정리-완료)을 따른다. 이후 사용자 요청으로 아래 데이터 보존 설치·OFF 확인을 수행했다.
+
+|실제로 실행한 검증|결과·한계|
+|---|---|
+|앱 Gradle6작업|JBR21에서 `:app:assembleDebug`, `:app:assembleDebugAndroidTest`, `:app:testDebugUnitTest`, `:app:runVehiclePeerSimulator`, `:app:lintDebug`, `:app:compileReleaseKotlin` **SUCCESS·3분17초**. 계측 APK 생성은 기기 계측 실행이 아니다.|
+|JVM 회귀|41 suites·**717 tests**, failures/errors/skipped0. native lifecycle44개를 포함하며 opening terminal, 재진입 completion 순서, 소유 바이트 소거, 예외·기한 실패 봉인, 취소·교체 소유권을 검증했다.|
+|독립 실행 smoke|**199 시나리오 PASS**, `deviceAccess=false`, `rf=false`. 새6개는 열기 실패 단독, 5peer STOPPED→열기 실패, terminal 없는5초 timeout, 취소/OFF/권한 상실, 같은 ID 구세대 종료, 명시 stop을 실제 생산 consumer에서 실행한다. 열기 실패는 거리 성공이나 가짜 CLOSED로 바뀌지 않는다.|
+|리뷰·lint|읽기 전용 리뷰에서 지정 수정 범위의 병합 차단 결함 미발견. 앱 lint 오류0·경고16. 기존 경고를 이번 변경으로 해결했다고 표시하지 않는다.|
+|생성 APK|metadata와 REA 정적 manifest 요약 모두 **0.74.0/74**, 146,677,133 bytes, SHA-256 `b20eddba47d4c2179633ce12c4b9760202a864022ebfebe40e807bf6e7f8112f`. 정적 요약은 APK 실행·서명 검증이 아니다.|
+|호스트 검증에서 실행하지 않은 항목|당시 설치·앱 강제 종료·서비스 ON/OFF·권한 변경·기기 계측·화면/알림·실차·Python 및 root/vendor lint는 실행하지 않았다. 이후 설치·기본 상태 확인 범위는 아래와 같다.|
+
+### 데이터 보존 설치와 OFF 확인
+
+근거는 `비공개 로컬 보관 경로`과 같은 디렉터리의 설치 전후 digest·설정·서비스 덤프·앱 로그다.
+
+- Galaxy S23 Ultra에 교체 설치했다. package는 **0.74.0/74**, 기기 base APK와 검증 APK의 SHA-256이 일치하며 최초 설치 시각은 유지됐다.
+- 앱 저장 파일717개 중715개 해시가 동일하고 누락·추가0이다. 변경2개는 설치 profile 기록과 현재 로그이며, 현재 로그의 기존 내용은 그대로 앞부분에 남고4행만 추가됐다. 다른 순환 로그4개와 키·VIN·설정 관련 저장 파일은 동일하다. AndroidKeyStore 내부 키 원문은 조회하지 않았다.
+- 저장 `enabled=false` XML은 동일하다. 앱 런처 실행 `Status: ok`, 실제 MainActivity와 홈 접근성 계층의 **서비스 OFF**를 확인했고 재시작 필요 문구는 없었다. 설치 직후와 앱 실행 후 모두 앱 서비스 덤프는 `(nothing)`, 활성 알림은0이다. notification archive의 과거 알림1개는 현재 알림과 구분했다.
+- 서비스 토글·별도 force-stop·권한 변경·새 차량/UWB 세션·차량 명령은 실행하지 않았다. **앱 교체로 기존 잔류가 제거된 관측이며, v74의 실제 UWB 실패 뒤 정상 정리 검증은 아니다.** 픽셀 검증·기기 계측·실차 거리 수신은 미실행이다.
+
+### v74 실차 — 인증 이후 FiRa 미관측
+
+읽기 전용 보존본은 `비공개 로컬 보관 경로`다. `v74-only.jsonl`123행 중 설치/초기8행을 제외한 회차115행, 기록된 시도1회다. 기존 분석기 실행 exit0·malformed/unsupported0·issues0이며 로그 완전성을 증명하지는 않는다.
+
+- 15:08:04.450 시작→05.870 HMAC 인증→06.081 초기 field40 송신 완료, capabilities도 송신 완료했다. notification11·완성frame10·protocol10 중 AEAD 검증된 빈 본문2개를 받았으나 **유효 FiRa 요청/응답·native·거리 관측은0**이다.
+- 15:08:35.897 `INITIAL_NEGOTIATION/DEADLINE_EXPIRED`→.904 로컬 정리→.930 스캔 재개다. `localClosed=true`, `leaseRetained=false`이며 remote unsubscribe/disconnect 확인과는 구분한다. 전체 회차31,361ms, 협상 약30초 만료다.
+- 저장 ON·ObservationService·BeaconService FGS·활성 알림1개를 확인했다. 사용자 OFF 전이는 기록되지 않았으며 이번 결과는 **회차 정리 후 ON 대기 복귀**다. native까지 가지 않아 v74 `onOpenFailed` 수정 경로의 실차 실행 근거는 없다.
+- 공식 Tesla는 같은 구간 FiRa 요청15:08:05.367·native ACTIVE05.472였다. 실제 논리 ID를 기존 hash 알고리즘으로 OS metric에 유일 연결했고 package 귀속·설정 응답status0·diagnostics=false·notification DISABLE을 확인했다. 15:09:03 BLE 연결 해제로 종료했으며 report0으로 RF 실패를 판정하지 않는다. 동시 실행의 인과·차량 업데이트 완료 여부는 미확인이다.
+- 별도 좌표 경로는 `PHONE_LOCATION_FIRST_VALID`, `HEADING_UNRELIABLE`, `LOCATION_FIX_TIME_MISSING`과 source 정리 성공을 기록했다. GPS fix 시각 누락과 원시 좌표 필드 부재를 동일하게 해석하지 않는다.
+
+### 수정 근거가 된 v73 실차
+
+읽기 전용 보존본은 `비공개 로컬 보관 경로`다. `after-diagnostics.jsonl`173행의 실제 분석기는 exit0·파싱/지원 스키마 오류0·issues0이며 기록 완전성까지 증명하지 않는다.
+
+- 13:21:15 인증 뒤 FiRa 요청/응답 각2회, native 시작 시도1회. 13:21:16.718 STARTING→.782~.790 대상5개 STOPPED→.791 정리 대기→13:21:21.812 `NATIVE_CLOSE_TIMEOUT`→.832 재시작 필요. OPENED/PEER_STARTED/유효 거리0이다.
+- 분석기의 `mRangingSessionList`는 우리 태그 UNMATCHED였지만, 별도 `mOpenedSessionMap`190개를 같은 태그 알고리즘으로 대조해 **우리 세션1개를 정확히 연결**했다. 13:21:16.756 `initStatus=2`는 AOSP Android16 기준 GENERAL_FAILURE이며 start/ranging/valid/activeDuration 모두0이다. UCI status와 동일 enum이 아니고 원 실패 코드를 역산할 수 없다.
+- 저장 `enabled=false`와 ObservationService·BeaconService FGS 잔류를 확인했다. 로그 `state.enabled`는 저장 의도와 별개다. navigation source/foreground 정리는 성공했고 UWB 정리 실패가 상위 예약 반환을 막았다. 정확한 사용자 OFF 클릭 시각·횟수는 기록되지 않는다.
+- 승인받아 켰던 RSSI·CIR 전역 진단은 보존된 공식 Tesla/GMS UCI33개에 `[1]`/`[5]`로 실제 주입됐으나 응답은 모두 status3·상세 TLV 없음이었다. 우리 초기 main 구간은 순환돼 직접 원인 귀속은 불가하다. 사용자 승인 후 13:36:42 진단 해제 명령 exit0, UWB enabled를 확인했지만 새 세션의 원복 설정·실패 해소는 미검증이다.
+- 보존 DEX·AOSP 종료 계약과 앱 결함을 확인했지만, 이번 실차의 `onOpenFailed` 원시 도착/reason은 미관측이다. 정적 결함과 이번 실행의 직접 인과, 최초 초기화 실패 및 기존 RX_TIMEOUT 원인을 구분한다.
+
+## 0.73.0 — 차량 좌표 시각 분류와 호스트 검증
+
+근거는 `비공개 로컬 보관 경로`과 같은 디렉터리의 생산 실행·분석기 출력이다. [수정 계약과 UWB 대조](Tesla-Integration.md#v73-좌표-시각-분류와-v72-uwb-대조)를 따른다.
+
+|실제로 실행한 검증|결과·한계|
+|---|---|
+|수정 전 생산 경로|JShell에서 GPS 시각0·fix/state 모순이 실제 만료와 같은 STALE/기한 만료로 표시되고, nanos 범위를 벗어난 Timestamp가 좌표 객체로 수락됨을 재현했다. `location-before-console.txt`. 실차 입력을 복원한 것이 아니다.|
+|앱 Gradle6작업|JBR21의 `:app:assembleDebug`, `:app:assembleDebugAndroidTest`, `:app:testDebugUnitTest`, `:app:runVehiclePeerSimulator`, `:app:lintDebug`, `:app:compileReleaseKotlin` SUCCESS·5분13초. 계측 APK 생성은 기기 계측 실행이 아니다.|
+|JVM·독립 peer·Python|41 suites·708 tests, failures/errors/skipped0. 독립 peer193 PASS, Python210 PASS. 잘못된 Timestamp 거부와 authenticated sidecar→tracker 분류·primary UWB 생존을 포함한다. SDK 경계는 합성이며 RF 수신 검증이 아니다.|
+|수정 후 생산 smoke|parser→tracker→수집 정책→presentation→FieldJson9개 입력을 JShell에서 실행했다. 정상·timestamp 부재는 좌표 안내 가능, 실제 만료와 시각 무효는 별도 상태·수집 중지·숫자/화살표 없음, malformed Timestamp는 parser 거부. 생산 JSONL9행의 실제 CLI exit0·issues0. `location-after-console.txt`, `production-location-smoke.jsonl`, `production-location-analysis.json`.|
+|과거 실제 로그|최종 분석기로 v72 새155행과 보존 dumpsys를 처리해 exit0·issues0, **수정 전 보고서와 전체 동일**함을 확인했다. 과거 STALE/EXPIRED를 새 시각 무효로 소급 분류하지 않았다.|
+|리뷰·lint·표면 한계|읽기 전용 검토에서 지정 범위의 패치 유래 결함 미발견. 앱 lint 오류0·경고16. 호스트 검증 단계에서는 기기 접근·설치를 하지 않았으며 이후 사용자 요청 설치는 아래에 구분한다. root/vendor lint·Compose/알림 픽셀·실차·서비스 토글은 수행하지 않았다.|
+|생성 APK|metadata **0.73.0/73**, 146,677,133 bytes, SHA-256 `295c63187a6137026037d10c5e4dd382f7f4c038f4c7666adf7ff5bfa8cc3227`. 이후 설치된 base APK도 같은 hash다.|
+
+**UWB 거리 문제는 미해결이다.** 이번 변경은 좌표 시각의 잘못된 수락·표시 교정이며, 거리 성공 확인만을 위해 다시 차량에 다녀오도록 요청하지 않는다.
+
+### v73 데이터 보존 설치와 ON 복원
+
+사용자의 USB 연결에 따라 데이터 보존 설치했다. 근거는 `비공개 로컬 보관 경로`과 전후 파일 digest·로그 tar·실제 설치 후 분석 결과다.
+
+- package·설정 화면 모두 **0.73.0/73**, firstInstall `2026-09-22 13:58:05` 유지, lastUpdate `2026-10-30 10:55:35`. 설치 도구의 verdict 누락은 보고하고 실제 package와 설치 APK hash로 별도 확인했다.
+- files/no_backup/shared_prefs **717→717·누락0**, 로그 외 변경은 `files/profileInstalled`뿐이다. 생산 활성화 XML은 바이트 동일·ON이다. 기존 로그5개는 설치 전에 모두 PC tar로 보존했다. 앱의 정상 순환으로 기기에는 기존 내용4개가 남고 가장 오래된1개는 PC 보존본에 남는다.
+- 저장 ON·실행 서비스2개를 전후 확인했고, 앱의 기존 업데이트 복원 경로가 실행됐다. 직접 ON/OFF·권한·차량 명령을 조작하지 않았다. 홈에서 서비스 ON·차량 신호 대기·UWB 미수신, 설정에서 버전을 접근성 계층으로 확인한 뒤 홈으로 돌아왔다.
+- launch `Status: ok`, 앱 프로세스 생존, 현재 프로세스 crash buffer0행을 확인했다. 새 schema32 로그16행의 실제 분석기 exit0·issues0이며 설치 후 기본 실행/복원 근거다. 장시간 안정성·센서·실차 거리·새 시각 무효 분기의 기기 실행은 검증하지 않았다.
+
+## 0.72.0 — 하위 RX_TIMEOUT과 시스템 종료 실차 분석
+
+읽기 전용 보존본은 `비공개 로컬 보관 경로`다. `analysis-summary.json`, `v72-analysis.json`, `sanitized-native-results.json`과 실제 시험 window의 main/system logcat·dumpsys를 대조했다. 전체2184행, v72 159행에서 설치 baseline4행을 제외한 새155행이며 기록된 UWB 시도는1회다.
+
+|실제 관측(KST)|해석·한계|
+|---|---|
+|09:34:55.734 시작→59.566 인증→09:35:00.163 FiRa 요청→01.102 응답 TX→01.189 OPENED→01.191~.198 대상5개 시작|BLE 인증·협상·native 시작이며 거리 성공이 아니다. 앱 태그→Android 논리 세션 ID→native token의 명시 연결을 확인했다.|
+|native60 reports·대상별282개 결과|모두 ranging status33(`RX_TIMEOUT`)·distance65535(무효 sentinel). 60회 왕복·성공 송신 또는 655.35m로 해석하지 않는다. 앱 유효/무효 callback0/0과 하위 분모는 다르다.|
+|01.207~.210 대상별10000ms 오류 타이머 시작→11.208~11.644 만료→11.644 마지막 대상 종료 요청|OS 타이머 발동을 실제 로그에서 확인했다. `SYSTEM_POLICY`만으로 추정한 결론이 아니다. RX_TIMEOUT의 근본 원인은 별도로 미확정이다.|
+|13.982~.985 OS closed→13.991 앱 endpoint 정리→14.001 앱 CLOSED|OS 종료가 앱 정리보다 앞섰다. 앱 첫 거리60초 만료가 아니며 stopped callback의 closeRequested=false도 이를 뒷받침한다.|
+|좌표01.802 STATUS_VERIFIED→01.803 fix 존재→01.808 STALE→01.813 SOURCE_STOPPED|원 GPS/state 시각은 보존하지 않아 실제 오래된 fix·시각 불명·시각 모순을 구별할 수 없다. 폰 위치 valid·heading unreliable은 별도 관측이다.|
+
+공식 병행 세션과 실제 UCI 설정 차이는 [대조 정본](Tesla-Integration.md#v73-좌표-시각-분류와-v72-uwb-대조)에 둔다. 공식 notification0의 report0을 성공·실패로 판정하지 않으며, 차량의 해당 OOB 세션 수락과 frame/slot 단위 RF 경과는 현재 자료에 없다.
+
+## 0.72.0 — native 관측과 호스트 검증
+
+근거 cache는 `비공개 로컬 보관 경로`이며 최종 실행 결과는 **`validation-v72.json`**에 보존했다. 분석·공식 APK와 보존 시스템 DEX 대조·구현 불변은 [통합 정본](Tesla-Integration.md#v72-native-세션-관측과-os-대조)을 따른다.
+
+|실제로 실행한 검증|결과·한계|
+|---|---|
+|앱 Gradle6작업|JBR21에서 `:app:assembleDebug`, `:app:assembleDebugAndroidTest`, `:app:testDebugUnitTest`, `:app:runVehiclePeerSimulator`, `:app:lintDebug`, `:app:compileReleaseKotlin` SUCCESS·2분59초. 계측 APK 생성은 기기 계측 실행이 아니다.|
+|JVM·독립 peer|41 suites·**704 tests**, failures/errors/skipped0/0/0. 독립 peer **191 PASS**. native 세대·local peer index·중복·close 요청 선후·STARTING 취소·봉인 뒤 CLOSED 보존을 검증했다. 서로 다른 실행 분모이며 합산 성공률로 만들지 않는다.|
+|Python·리뷰 경계 회귀|전체 `tools/test_*.py` **207 PASS**. 리뷰에서 동일 태그의 다른 operation·종료 뒤 재시작이 합쳐지는 분석기 결함을 찾아 operation/관측 수명주기별로 분리하고4개 회귀를 추가했다. 정적 재검토 뒤 전체 Python과 JSON/text 실제 CLI를 재실행했다. 전체 state 복사·고정 문구만 비교하던 검사는 제거하고 각도 결측·GATT status/accepted/완료 독립성·민감값 제거 검증은 유지했다.|
+|실제 consumer·생산 serializer smoke|5개 peer 정지 뒤 close 요청1회, `onClosed(4)`까지 기다려 `NO_DISTANCE_RECEIVED`·거리0·closeRequested=true를 관측했다. 생산 FieldJson9행을 분석해 PEER_STOPPED5·CLOSED1로 집계했고 최종 실패 snapshot을 별도 CLOSED로 세지 않았다. `production-native-smoke-final.jsonl`·최종 `production-analyzer-verified.json`·`production-native-text-verified.txt`.|
+|OS 대조 smoke|합성 metric을 `mRangingSessionList`로 전달해 **UNIQUE_TAG_MATCH**, issues0을 확인했다. metric의 rangingCount61은 스크립트 입력값이며 실차 RF 측정값이 아니다. 초기 throwaway 입력의 UUID 형식 오류는 분석기가 거부했고 유효 UUID로 교정해 재실행했다.|
+|기존 실차 로그 CLI|v71 보존173행과 실제 `dumpsys-uwb.txt`를 최종 분석기로 읽어 exit0·malformed0/unsupported0/issues0, OS metric128개·태그 매칭0을 확인했다. 과거 로그의 새 native 관측은 미관측이며 소급 연결하지 않았다. 최종 `v71-analyzer-verified.json`.|
+|앱 lint·검증 경계|앱 lint **오류0·경고16**. root/vendor lint는 이번에 실행하지 않았으며 저장소 전체 lint 통과로 표현하지 않는다. USB·기기 조작·실차·화면 smoke는 수행하지 않았다.|
+|생성 APK|`app/build/outputs/apk/debug/app-debug.apk` **146,677,129 bytes**, SHA-256 `94c79a3e7d5a100ef13e46c2ce5d2f01cc2debe124164e23a554a2b024277392`. metadata와 APK 내부 manifest 모두 **0.72.0/72**다. 호스트 검증 당시 미설치였으며 이후 설치 근거는 아래에 구분한다.|
+
+이번 버전은 원인 판별에 빠졌던 정보를 보완한다. Android의10초 연속 오류 경로는 이번 시간 순서와 부합하지만 발동 자체를 관측하지 못했으며, 근거 없이 timeout·RF 설정을 바꾸지 않았다. 설치·기본 실행 확인을 거리 실패 해결이나 다음 실차 단계 합격으로 확대하지 않는다.
+
+### v72 데이터 보존 설치와 OFF 유지
+
+사용자의 USB 연결·설치 요청에 따라 `adb install -r`로 설치했다. 근거 cache는 `비공개 로컬 보관 경로`의 `install-v72-summary.json`·전후 파일 digest·순환 로그 tar·`device-v72-install-analyzer.json`이다. 설치 도구의 Success/Failure verdict 누락은 보고했고 package 관측과 실제 설치 APK hash·앱 실행으로 별도 확인했다.
+
+|실제 기기 관측|결과·한계|
+|---|---|
+|데이터·로그|files/no_backup/shared_prefs **717→717**, missing0·same715·changed2. 변경은 `files/profileInstalled`와 활성 `events-v2.jsonl`뿐이다. 저장 활성화 XML은 바이트 동일·enabled=false이고 필드 로그5개는 모두 기존 전체 prefix가 일치한다. 삭제·초기화·서비스 토글·권한 변경을 하지 않았다.|
+|실행·서비스|launch `Status: ok`, 새 앱 프로세스 생존을 확인했다. 설치 전후 저장 OFF·실행 서비스0개다. 현재 프로세스의 bounded crash buffer는0행이며 장시간 안정성 검증이 아니다.|
+|실제 schema31 기록|새4행 `PROCESS_START_OFF`·`PROCESS_EXIT_OBSERVED`·`UI_RESUMED`·`UI_PAUSED`, appVersion0.72.0. CLI exit0·malformed0/unsupported0/issues0. 차량·UWB 시작은 없었고 native 관측 검증은 아니다.|
+|화면 확인 한계|화면 조회에는 다른 앱이 표시됐고 후속 포커스는 런처였다. 다른 앱을 조작하지 않았으며 홈/설정 버전의 접근성·픽셀 검증은 완료하지 못했다. ON·FGS 복원·기기 계측·실차는 수행하지 않았다.|
+
+## 0.71.0 — native 시작 뒤 무거리 실차 분석
+
+읽기 전용 보존본은 `비공개 로컬 보관 경로`다. 로그 tar **4,193,280 bytes**, SHA-256 `5448be296ee66cec6a55ad1b32d236e99989c9d5de3c194bf2db1a7197bc3c6b`. 전체2,198행이며 v71은173행 중 설치 baseline18행을 제외한 새155행이다. 기록에서 구분되는 실차 시도는1회이며 STARTED2행을2회로 세지 않는다.
+
+|10월29일 실제 관측(KST)|해석·한계|
+|---|---|
+|16:31:50.449 시작 →54.892 인증 →55.063 field40 TX →55.190 field58 TX|BLE 인증과 송신이며 RF·거리 성공은 아니다.|
+|58.589 FiRa 요청5대상 →58.993 응답 TX →59.072 native 열림 →59.074~.089 대상5개 시작|유효/무효 거리 표본 **0/0**. 0m나 유효 각도 수신이 아니다.|
+|16:32:09.523 첫 대상 정지 →10.078·10.851·11.433·11.886 추가 정지|시작 후 약10~13초의 순차 정지다. 기존 로그에 endpoint-local peer 번호가 없어 어느 대상인지 식별하지 못한다.|
+|12.168 로컬 endpoint 정리 →12.434 native closed reason4 →12.948 stopped TX →12.963 실패 →12.978 로컬 종료|`SYSTEM_POLICY`·`NO_DISTANCE_RECEIVED`, deadlineCause=null이다. 첫 거리60초 만료가 아니며 outbound stopped를 차량 STOP 수신으로 해석하지 않는다. localClosed=true·leaseRetained=false다.|
+|RX notification/frame/protocol **21/21/21**|AEAD 검증5·빈 본문5, 복호 실패 미관측. FiRa 요청1회이며 두 번째 요청·차량 STOP은 미관측이다.|
+|폰 위치 valid·heading unreliable, 차량 좌표 HELLO 뒤 `LOCATION_TIMEOUT`|승인·query·차량 fix 미수신이다. 폰 센서 수신을 차량 위치/유효 나침반 성공으로 확대하지 않는다.|
+
+OS metric에는 공식 앱16:31:58.669의 active55,641ms·report0과 android16:31:59.050의 active12,804ms·report61/valid0·parallel1이 있다. 그러나 당시 앱 로그에는 세션 상관 태그가 없어 **android 항목을 우리 세션으로 직접 확정하지 않는다**. 공식 정적 경로의 data notification DISABLE 설정 때문에 공식 report0도 무거리 실패의 증거로 쓰지 않는다. 병행은 충돌 원인 입증이 아니다.
+
+보존 system/main logcat은 각각16:33:29.737/16:39:45.445 이후라 실제 시험 window를 포함하지 않았다. 닫힌 세션 Params는 객체 참조 문자열뿐이며 구체 RF 설정을 복원하지 못한다. 사용자 시험 오류·절전 단일 원인·RF 설정 불일치를 확정할 근거는 없다.
+
+## 0.70.0 — 초기 FiRa 요청 미수신 실차 분석
+
+읽기 전용 보존본은 `비공개 로컬 보관 경로`다. 로그5개 tar **3,683,328 bytes**, SHA-256 `cb6742e2936ea914ecb10e5489fd83c1799ed703eab3edbc12e75acab70289a9`이며 전체2,023행·issues0이다. v70은94행 중 설치 smoke20행을 제외한 새74행으로 분석했고 기록에서 확인되는 시도는1회다. 로그만으로 실제 방문 횟수나 기록 밖 차량 송신을 단정하지 않는다.
+
+|10월29일 실제 관측(KST)|해석·한계|
+|---|---|
+|14:56:25.621 UWB 시작 →26.540 GATT 연결 →26.651 구독 →26.885 인증|BLE 연결·구독·인증은 RF·거리 성공이 아니다.|
+|27.098 초기 field40 전체 TX,27.227 field58 전체 TX|차량 수락이나 다음 FiRa 요청 보장은 아니다.|
+|RX notification/frame/protocol **3/3/3**|SessionInfo1개와 AEAD 검증된 빈 본문 응답2개다. decoder 실패·불완전 판정은 없고 첫 FiRa 요청은 미관측이다.|
+|57.014 `DEADLINE_EXPIRED` cleanup,57.056 local close|인증+30.129초는 기존 초기협상30초·watchdog250ms와 일치한다. 첫 거리60초 단계에 도달하지 않았고 전체180초 만료도 아니다. 원인 enum 자체는 당시 로그에 없다.|
+|native 열림 false·peer0·유효/무효 거리0/0|0m가 아니라 미수신이다. v70 재요청 교체 분기는 실행되지 않아 그 효과를 판정하지 않는다.|
+|27.339 좌표 HELLO TX →41.931 `LOCATION_TIMEOUT`|handshake 승인·query·차량 fix 없음. 폰 위치 valid와 `HEADING_UNRELIABLE`은 차량 좌표·유효 나침반 성공이 아니다. source 정리는 성공했다.|
+|localClosed true·leaseRetained false|로컬 정리 관측이며 원격 unsubscribe/disconnect 확인은 false다.|
+
+bounded system log10,000행은15:00:22 이후로 시험 시각을 포함하지 않았다. 별도 필터 관측의 공식 폰키 알림 동시 실행은 공식 앱 UWB 점유·충돌 증명이 아니다. 사용자 시험 오류·복호 실패·유효 요청 파서 손실·RF 실패·차량 전체 미송신도 이번 근거로 확정하지 않는다.
+
+## 0.71.0 — 기한 관측과 회귀 검증
+
+근거 cache는 `비공개 로컬 보관 경로`의 `validation-v71.json`·`production-consumer-ui-final.json`·`v70-schema30-analyzer.json`이다. REA 초기 경로 재대조와 구현 불변은 [통합 정본](Tesla-Integration.md#v71-기한-만료-원인-관측)을 따른다.
+
+|실제로 실행한 검증|결과·한계|
+|---|---|
+|앱 Gradle6작업|JBR21.0.10에서 `:app:assembleDebug`, `:app:assembleDebugAndroidTest`, `:app:testDebugUnitTest`, `:app:runVehiclePeerSimulator`, `:app:lintDebug`, `:app:compileReleaseKotlin` SUCCESS·최종2분12초. 계측 APK 생성은 기기 계측 실행이 아니다.|
+|JVM·독립 peer·Python|41 suites·**698 tests**, failures/errors/skipped0/0/0. 독립 peer **190 PASS**(기한/빈 응답 회귀25개 추가), Python **195 PASS**. 서로 다른 실행 분모이며 합산 성공률로 만들지 않는다.|
+|실제 consumer smoke|빈 암호 응답2개 뒤 raw/wrapped/encrypted 각 response1/native1/notsealed. 최초 협상 기한에서 reason은 기존 `DEADLINE_EXPIRED`, cause는 `INITIAL_NEGOTIATION`, sealed=true/native0. 호스트 SDK 경계 실행이며 실제 RF가 아니다.|
+|생산 presentation smoke|원인4종 표시·legacy null 일반 표시·수동 소유 알림 제외·정리 실패 우선·현재 거리 미생성을 실행했다. 기기 Compose 레이아웃·픽셀·큰 글꼴·TalkBack은 미검증이다.|
+|과거 실제 로그 CLI|새 분석기로 v70 94행을 읽어 malformed0/unsupported0/issues0, 모든 과거 deadlineCause=null을 확인했다. 기존 원문은 변경하지 않았고 새 enum을 소급 추정하지 않는다.|
+|앱 lint·검증 경계|앱 lint **오류0·경고16**. 최초 JDK17 실행은 lint의 `List.removeLast` 오류로 중단해 문서화된 JBR21로 교정했다. 별도 root `lintDebug`는 변경하지 않은 `altbeacon` 모듈에서 오류50·경고73을 보고했다. vendor를 수정·억제하지 않았으며 저장소 전체 lint 통과로 표현하지 않는다.|
+|회귀 중 발견·교정|owner 종료의 관측 callback 재진입이 기한 원인을 뒤늦게 붙이는 새 회귀1개가 실패했다. owner 종료 시작을 관측 전에 표시하도록 수정한 뒤 기존 기대값 그대로 전체698개가 통과했다.|
+|생성·기기 APK|`app/build/outputs/apk/debug/app-debug.apk`와 설치된 base APK 모두 **147,576,185 bytes**, SHA-256 `1e0b47cade7d712ae302d5cf1ea8d169ef0087873d0bffab43084ec2708fe7ba`로 일치한다. metadata·기기 package·설정 화면에서0.71.0/71을 확인했다.|
+
+이번 변경은 진단 분리이며 첫 FiRa 요청을 유도하는 통신 수정이 아니다. 거리 성공 확인만을 위해 다시 차량에 다녀오도록 요청하지 않는다. 설치 후 별도로 실차 수집을 진행하기로 하면 기존 서비스 ON·새 접근1회에서 만료 원인과 FiRa/native/거리 수신을 분리하고, 음성·프렁크·DRIVE 허가 시험은 섞지 않는다.
+
+### v71 데이터 보존 설치와 실제 기기 smoke
+
+사용자가 **71번 데이터 보존 설치**를 선택한 뒤 `adb install -r` 경로로 업데이트했다. `install-v71-summary.json`·`device-v71-install-smoke.jsonl`·`device-v71-install-analyzer.json`에 근거를 보존한다. 설치 도구 결과에 Success/Failure verdict가 누락되어 도구 문제를 보고했고, 후속 package 조회·설치 APK 바이트 대조·실제 launch로 별도 확인했다.
+
+|기기 관측|결과·한계|
+|---|---|
+|기존 데이터|files/no_backup/shared_prefs **717→717**, missing0/same715/changed2. 변경2개는 `files/profileInstalled`와 활성 순환 로그뿐이다. 활성화 XML은 바이트 동일·enabled=true, 보존 필드 로그5개는 모두 기존 전체 prefix가 일치한다.|
+|실제 앱·설정|launch `Status: ok`, 접근성 홈 서비스 ON·차량 등록 유지, 설정 **0.71.0 (빌드71)**·권한 모두 허용됨을 확인했다. 실제 좌표/거리 미수신을 성공값으로 채우지 않았다.|
+|실제 서비스|`ObservationService`와 AltBeacon `BeaconService`2개, FGS id102·types`0x18`. 저장 ON과 실행을 각각 확인했으며 토글·권한·공식 Tesla 앱을 조작하지 않았다.|
+|새 schema30 기기 로그|18행 CLI exit0·malformed0/unsupported0/issues0. VIN_LOADING 복원 차단 뒤 서비스 실행·FOREGROUND_ARMED=true/collecting=false·WAITING_FOR_VEHICLE_LOCATION을 관측했다. UWB 시작0이며 RF·차량 송신 시험은 아니다.|
+|UI 확인 한계|홈·설정은 접근성/런타임으로 확인했다. 진단 탭 전환의 ref/화면 불일치로 새 만료 분기의 실제 기기 표시 검증은 완료하지 못했다. 캡처는 앱 보호 본문의 픽셀 근거가 아니며 `FLAG_SECURE`를 유지했다. 계측 APK 설치·기기 계측·큰 글꼴·TalkBack·실차는 수행하지 않았다.|
+
+
+## 0.69.0 — 10월29일 실차 FiRa 재요청 실패
+
+근거 cache는 `비공개 로컬 보관 경로`의 `analysis-summary.json`·`active-fira-consumer-smoke.json`이다. 읽기 전용으로 회수한5개 로그 tar는 **3,971,584 bytes**, SHA-256 `c558ba9dcc27e87afa0ccec50c0e3b8459cba370af3093b31a8709133238121d`다. 전체 **2,231행**, v69 **180행**, analyzer issues0이며 기존 설치 smoke20행과 실차를 분리했다. 원문·PII를 문서나 저장소에 복제하지 않는다.
+
+|실제 실차 관측(KST)|해석·한계|
+|---|---|
+|10월29일13:42:50.427 → 13:43:04.731, attempt1·관측 경과14,197ms|실차1회다. `STARTED`2행을2회로 세지 않으며 이벤트 범위와 관측 경과는 다른 분모다.|
+|13:42:52.196 인증,52.305 초기 field40 전체 TX|인증·초기 metadata 전송 관측이지 거리·차량 권한·물리 완료가 아니다.|
+|13:42:56.093 첫 FiRa request,56.309 response,56.982 native open·peer5|유효/무효 거리 **0/0**, last=null이다. 미수신은0m가 아니다. 첫 요청 이후 약7초 무거리의 RF 원인·차량 재요청 이유는 불명이다.|
+|13:43:04.053 두 번째 request →04.072 `NEGOTIATION_ALREADY_ACTIVE` cleanup →04.698 closed reason1|후속 요청을 단발 guard가 실패로 종료한 로컬 결함이다. 두 요청의 ID·payload 동일/변경 여부는 기록되지 않아 알 수 없다.|
+|RX notification/frame/protocol **18/18/18**, 선행 RX Ignored0|이번 시험에서 v69 선행 경계 branch는 발생하지 않았다. 이전 수정의 실차 효과를 이 회차로 확정하지 않는다.|
+|13:42:52.574 location HELLO 뒤 응답/fix 없음,13:43:04.068 `SESSION_CLOSED`|15초 위치 timeout 원인으로 종료한 것이 아니다. 폰 GPS valid·heading unreliable는 차량 fix가 아니다.|
+|bounded system log10,000행 시작13:44:27|실차 시험 window를 포함하지 않으므로 RF 하위 원인 보완 근거가 아니다.|
+
+공식 재요청 계약·REA 본문 누락과 동일 원 DEX 보완의 한계·안전 불변은 [v70 통합 정본](Tesla-Integration.md#v70-fira-재요청-교체유지-정본)에만 상세히 기록한다. 아래 과거 v69 설치 직후의 “실차 미검증”은 **당시 사실**이며 이 후속 실패 관측으로 대체하거나 삭제하지 않는다.
+
+## 0.70.0 — FiRa 재요청 교체·유지와 호스트 검증
+
+### 실제 production consumer 수정 전후
+
+근거 cache는 `비공개 로컬 보관 경로`이며 최종 actual consumer 결과는 **`active-fira-consumer-after.json`**이다. 실제 production consumer/session/write pump와 독립 AES peer·SDK 경계 스크립트를 JShell에서 실행했다. consumer 복제 mock·차량 packet 복원·BLE/UWB RF 시험이 아니다. elapsed1000의 첫5peer 뒤 elapsed8000에 후속 요청을 전달했다.
+
+|실제 호스트 관측|수정 전 → 최종 수정 후|
+|---|---|
+|동일5peer, request ID1→1|수정 전 sealed=true·`NEGOTIATION_ALREADY_ACTIVE`·responses1·nativeCloses1 → **sealed=false·peers5·distances0·responses2·oldNativeCloses1**. 같은 ID를 교체한 로컬 관측이다.|
+|동일5peer, request ID1→2|수정 전 sealed=true·`NEGOTIATION_ALREADY_ACTIVE`·responses1·nativeCloses1 → **sealed=false·peers10·distances0·responses2·oldNativeCloses0**. 기존 ID를 유지하며 새 ID를 추가한 관측이다.|
+|같은 ID 교체의 close 지연|지연 중 **response1/native1/sealed=false**, 실제 `onClosed` 뒤에만 **response2/native2/distances0**. close 요청 반환을 실제 종료로 대신하지 않았다.|
+
+재요청 자체·response TX·backend peer 시작은 유효 거리/방향·차량 수락·RF 성공·물리 완료가 아니다. v70 실차는 아직 미검증이며 이전 실차의 RF 무거리·domain3 무응답 원인 해결을 주장하지 않는다.
+
+### 최종 v70 호스트 검증
+
+아래는 부모가 최종 수정·리뷰 교정을 모두 반영한 뒤 실행해 전달한 근거다. 같은 fix-v70 cache의 **`validation-install-summary.json`**에 최종 호스트·설치 결과를 보존했다. 문서 작업자는 빌드·테스트·lint·기기 작업을 재실행하지 않았다.
+
+|항목|최종 v70 근거와 해석 경계|
+|---|---|
+|전체 Gradle|`assembleDebug`·`assembleDebugAndroidTest`·`testDebugUnitTest`·`runVehiclePeerSimulator`·`lintDebug`·`compileReleaseKotlin` **전부 SUCCESS·3분26초**. 계측 APK 생성은 기기 계측 실행이 아니다.|
+|JVM XML|**41 suites·669 tests**, failures/errors/skipped **0/0/0**.|
+|독립 peer·Python·lint|독립 peer **165 PASS**(재요청 신규24시나리오), Python **191 PASS**, lint **0 errors·16 warnings**.|
+|최종 생성 APK·기기 base APK|둘 다 **146,853,245 bytes**, SHA-256 **`f9af3a6a17c08bf87628b6041762b55bfcadacfd444338ece88d1e159ce062a5`**로 일치한다. 설치·일치 확인은 차량 수락·RF·거리 성공이 아니다.|
+|리뷰 교정|capability 지원 축소/확대 뒤 구 builder를 쓰던 경로를 기존+pending plan 호환 검사 후 latest builder로 교정하고 실제 peer2회귀를 반영했다. 누락된 기존 `ProtocolTest` caller의 plan 소유권을 이관했으며 owner fixture에서 발생하지 않는 `onStop` 단정을 제거했다. 최종 전체 검증은 이 교정 뒤 통과했다.|
+
+### v70 데이터 보존 설치와 실제 기기 smoke
+
+|항목|최종 설치·실제 관측과 한계|
+|---|---|
+|실제 package·설치 시각|**0.70.0/70**, firstInstall **2026-09-22 13:58:05** 유지, lastUpdate **2026-10-29 14:29:56**. 생성/기기 base APK 일치는 위 hash·크기를 따른다.|
+|데이터 보존|files/no_backup/shared_prefs **717→717**, missing0/same715/changed2(`files/profileInstalled`, 활성 `events-v2.jsonl`). 저장 ON activation XML은 바이트 동일·enabled=true이며 보존 로그5개 모두 기존 전체 prefix가 일치한다. 삭제·초기화 없이 업데이트했다.|
+|실제 앱·UI|launch 정상, 홈 서비스 **ON**·차량 등록 유지, 설정 **0.70.0 (빌드70)**·권한 모두 허용·차량 좌표 미제공·UWB 실측 미수신. 실제 접근성 UI·runtime 근거이며 `FLAG_SECURE`를 유지했다. 픽셀 기반 시각 검증은 아니다.|
+|실제 서비스|`ObservationService` / AltBeacon `BeaconService` **2개**, FGS id102·types`0x18`. 저장 ON·서비스 실행·armed idle을 RF 측정·상시 GPS 수집으로 해석하지 않는다.|
+|실제 v70 기기 로그·CLI|**20행**, CLI exit0·analyzed20/malformed0/unsupported0/issues0. `VIN_LOADING` 복원 차단2회 뒤 `BLE_FIELD_RUNNING` enabled=true/autoMic=false, `FOREGROUND_ARMED` armed=true/collecting=false, `WAITING_FOR_VEHICLE_LOCATION`을 관측했다. 저장 ON 복원·idle 준비 확인이지 차량/UWB TX·유효 위치·거리 시험이 아니다.|
+|남은 한계|**v70 실차 미검증**. 첫 FiRa 뒤 무거리 RF 원인·차량 재요청 이유·domain3 무응답은 미확정이며 자동 음성/프렁크 통합은 미구현이다. 계측 APK만 생성했고 기기 계측은 실행하지 않았다. 큰 글꼴·TalkBack·보안 본문 픽셀 검증도 미실행이다.|
+
+같은 cache에 `device-v70-install-smoke.jsonl`·`device-v70-install-analyzer.json`과 식별정보를 제거한 홈·설정 접근성 cache를 보존했다. 원자료·PII를 문서나 저장소에 복제하지 않으며 과거 설치 직후 OFF/ON·미검증 기록을 현재 상태로 복사하거나 삭제하지 않는다.
+
+
+### 다음 실차 확인
+
+서비스 ON·충분한 이탈 뒤 **새 접근1회**에서 첫 FiRa 응답·후속 요청·같은 ID 교체/다른 ID 유지·실제 close와 새 TX/start·유효 거리 수신을 분리해 비교한다. 로그에 남지 않은 요청 ID/payload를 추정하거나 새 raw 자료를 추가하지 않는다. 원 첫 거리 기한을 재요청으로 연장하지 않으며 위치 sidecar·거리/방향·종료 정리도 별도로 확인한다. 음성·프렁크·field3 권한 시험을 섞지 않는다.
+
+## 0.68.0 — 10월29일 실차 선행 RX 실패
+
+근거 cache는 `비공개 로컬 보관 경로`다. 회수 전체 로그는 **2,243행**, 그중 **v68은89행**이다. 로그의 후보·광고 수로 사용자 방문 횟수나 기록되지 않은 payload 종류를 추정하지 않는다.
+
+|관측|사실과 해석 경계|
+|---|---|
+|접근·연결·구독|10월29일 **09:55:46** 후보, **09:55:50.831** connected status0, **09:55:53.571** CCCD 성공. 연결·구독은 인증·RF 시작이 아니다.|
+|원 ingress와 conversation 시작|첫 RX ingress **2518150015 < SUBSCRIBED event elapsed2518150021**이며 이후 `session.start`다. owner queue의 나중 처리 시각으로 ingress를 덮지 않는다.|
+|로컬 종료|**09:55:53.778 `RESPONSE_INVALID`**, input/envelope 관측 null·AEAD `NOT_ATTEMPTED`. **53.803 `UWB_PROTOCOL_RESPONSE_INVALID`**, **53.826** 회차 종료. 선행 RX를 **parse 전 수신 시각 검사에서 거부해** 로컬 종료한 근거이지 차량 인증 거절·RF 실패 응답 복원이 아니다.|
+|회차·수신·정리|회차 **6,994ms**, notify/frame/protocol **1/1/1**, `closed=true`·`lease=false`. 정리 관측을 거리·차량 제어 성공으로 승격하지 않는다.|
+|미진행 단계|HMAC·field40·field58·FiRa·native open·거리 모두0. 최초 payload가 어떤 종류였는지는 미확정이다.|
+|좌표 sidecar·폰 source|sidecar `OPERATION_ENDED_BEFORE_START`. phone GPS valid·heading unreliable였으며 폰 fix는 차량 좌표·UWB 거리·화살표 성공이 아니다.|
+|후속 감지·저장 상태|후보1·광고567·suppression566, **09:57:09 candidate expired**, **10:01:33 heartbeat ON**. 사용자 이탈/재방문 횟수나 현재 차량 위치를 뜻하지 않는다.|
+
+동일 공식 APK의 조기 notify 처리·raw VCSEC/envelope 분리·request bus 정적 근거와 한계는 [v69 REA 정본](Tesla-Integration.md#공식-rea공개-근거와-한계)에 둔다. v68은 HMAC 전 종료됐으므로 초기 metadata 보완의 차량 수락·FiRa/RF 효과를 이번 회차에서 평가할 수 없다.
+
+## 0.69.0 — 선행 RX 경계 수정과 실제 consumer smoke
+
+### 구현과 보존 경계
+
+- [v69 수신 계약](Tesla-Integration.md#수신-판정과-관측-계약)에 따라 기존 비활성·크기·시각·전체/응답 기한 거부 뒤 `0 <= receivedAt < conversation.startedAt`만 parse 전 `TeslaBleStep.Ignored`로 제외한다. ingress는 보존하고 수신 관측 reset·판정·관측 기록만 private helper로 분리한다.
+- `TeslaBleRxStep.IGNORED` / `RESPONSE_BEFORE_START`는 schema29의 기존 필드 enum 확장이다. 새 값은29+만 허용하고1..28 해석·raw/새 시각/PII 미추가·기존 protocol 분모를 유지한다.
+- primary·sidecar·frunk는 인증·metadata·FiRa·좌표·성공·새 BODY fallback·actuator로 승격하지 않는다. phase·기한·request identity·counter/replay·HMAC/AEAD·domain/route/UUID와 RF 설정·retry·passive-auth DRIVE·field3·마이크/자동 프렁크 경계는 불변이다.
+
+### 부모가 완료한 actual smoke
+
+같은 **production consumer/session/write pump + 독립 AES peer**를 JShell에서 실행한 근거다. consumer를 복제한 mock·실차 packet 복원·BLE/UWB RF 시험이 아니다. 기준 시작 시각1000에 대해 ingress999와1000을 비교했다.
+
+|입력·경로|실제 관측|
+|---|---|
+|수정 전 ingress999|`sealed=true`, stop `UWB_PROTOCOL_RESPONSE_INVALID`, metadata0, dispositions `[RESPONSE_INVALID]`.|
+|수정 전 정상 시각1000|`sealed=false`, metadata1, `[ROUTE_MISMATCH,SESSION_READY]`.|
+|수정 후 ingress999 뒤 정상 입력|`sealed=false`, stop null, metadata1, `[RESPONSE_BEFORE_START,SESSION_READY]`. 제외 입력 자체가 metadata를 만든 것이 아니라 후속 정상 인증 입력이 기존 경로로 진행했다.|
+|수정 후 정상 시각1000|기존 정상 경로가 유지됐다. 시작 경계와 같은 시각을 선행 RX로 제외하지 않는다.|
+|실제 제외 관측→FieldRecord/FieldJson→Python CLI|동일 snapshot을 반복한 **2행**에서 parse/unsupported/issues0, `IGNORED` / `RESPONSE_BEFORE_START`와 ingress999 보존. protocol 새 수신 분모는 첫 행만 true·거리0이며 반복 snapshot은 새 protocol/거리 수신이 아니다.|
+
+근거 cache는 `비공개 로컬 보관 경로`다. `queued-prestart-consumer-after.json`·`ingress-consumer.jsonl`·`ingress-consumer-analyzer.json`을 보존했다. 이 smoke는 선행 RX로 로컬 세션을 봉인하지 않고 후속 정상 입력을 처리하는 **수정 근거**이며 차량 수락·FiRa·native RF·거리/방향 성공, v66/v67 근본 원인 해결이나 v69 기기 설치의 근거가 아니다.
+
+### 최종 검증·데이터 보존 설치
+
+아래는 **v69 설치 직후 당시** 부모가 최종 소스에 대해 실제 실행해 전달한 결과다. 문서 작업자는 빌드·테스트·기기 작업을 재실행하지 않았다. 근거는 같은 fix-v69 cache의 `validation-install-summary.json`이며 이전 v68 수치·hash를 새 결과로 재사용하지 않는다. 이후 실차 재요청 실패와 현재 v70 호스트 결과는 위 별도 절을 따른다.
+
+|항목|최종 v69 근거와 해석 경계|
+|---|---|
+|Gradle·JVM|`assembleDebug`·`assembleDebugAndroidTest`·`testDebugUnitTest`·`runVehiclePeerSimulator`·`lintDebug`·`compileReleaseKotlin` 모두 성공, **4분23초**. XML **41 suites·641 tests**, failures/errors/skipped0.|
+|독립 상대편·Python·lint|독립 peer **141 PASS**(신규20), Python 전체 **191 PASS**, lint **0 errors·16 warnings**. 호스트 통과는 실제 RF/거리·차량 수락의 근거가 아니다.|
+|리뷰·실제 serializer 교정|리뷰에서 읽기 요약의 schema28에 schema29 새 disposition이 노출되는1건을 찾아 부모가 수정했다. 실제 serializer의 `SCHEMA28_LEAK=true → false`를 확인했고 기존1..28 회귀를 포함한다. 복사 객체를 생성하지 않고 serializer에 disposition만 전달한다.|
+|생성 APK·기기 base APK|둘 다 **147,030,545 bytes**, SHA-256 **`221aaaa5618a9d9194a1db9c9197aa191d79f7c43cad7f0db3b2e7e7c15bc7b4`**로 일치. 계측 APK는 생성했지만 **기기 계측은 실행하지 않았다**.|
+|데이터 보존 설치|`-r` 설치 뒤 실제 package **0.69.0/69**. firstInstall **2026-09-22 13:58:05** 유지, lastUpdate **2026-10-29 10:47:48**. files/no_backup/shared_prefs **717→717**, missing0/same715/changed2(`files/profileInstalled`, 활성 `events-v2.jsonl`). activation XML은 바이트 동일·enabled=true, 보존 로그5개 모두 기존 전체 prefix가 일치한다.|
+|실제 앱·UI·서비스|launch 정상, 홈 서비스 **ON**·차량 등록 유지, 설정 **0.69.0 (빌드69)**·권한 모두 허용·차량 좌표 미제공·UWB 실측 미수신. `ObservationService` / AltBeacon `BeaconService` **2개**, FGS id102·types`0x18`. 토글·권한 변경 없음. `FLAG_SECURE`를 유지한 접근성 계층 확인이며 픽셀 검증은 아니다.|
+|실제 v69 기기 로그·CLI|**20행**을 실제 CLI로 분석해 exit0·parse/unsupported/issues0. 복원 `VIN_LOADING` 차단2회 뒤 `BLE_FIELD_RUNNING`·enabled=true·autoMic=false, `FOREGROUND_ARMED` armed=true/collecting=false, `WAITING_FOR_VEHICLE_LOCATION`을 관측했다. **저장 ON 복원·idle 준비 관측**이지 자동 UWB/TX·유효 위치·거리 시험이 아니다.|
+|당시 남은 한계|**설치 직후 당시 v69 실차 미검증**이었다. 이후10월29일 후속 FiRa 요청의 로컬 종료·거리 미수신을 위 별도 실차 절에서 관측했다. v66 RF 무거리·v67 FiRa/domain3 무응답 근본 원인은 미확정이며 이 설치 기록은 차량 좌표·유효 거리/방향·native RF 성공·자동 음성/프렁크 연결을 입증하지 않는다. 큰 글꼴·TalkBack·보안 본문 픽셀 검증도 포함하지 않는다.|
+
+실제 기기 로그와 분석 결과는 같은 cache의 `device-v69-install-smoke.jsonl`·`device-v69-install-analyzer.json`에 보존했다. 저장 ON 복원을 보장된 실차 자동 연결·24시간 GPS 수집이나 자동 마이크 실행으로 설명하지 않는다.
+
+### 다음 실차 확인
+
+**서비스 ON 확인 → 차량에서 충분히 이탈 → 새 접근1회 → 알림을60초 이내 관찰 → USB 로그 회수** 순서로 확인한다. 초기 field40 전체 frame 완료·FiRa·native/RF·domain3 HELLO/query/차량 좌표·거리/방향을 별도 단계로 비교하고 음성·프렁크·field3 권한 시험은 섞지 않는다. 설치·호스트 통과는 이 실차 결과를 대신하지 않는다.
+
+
+## 0.68.0 — 초기 단말정보 보완과 검증 경계
+
+### 소스 변경 범위
+
+- [v68 통합 정본](Tesla-Integration.md#v68-초기-실제-단말정보-전송-정본)은 기존 키 HMAC 검증 성공 UWB operation에서 기존 실제 `source.snapshot(false)`의 field40을 field58 앞에 한 번 추가한다. 초기 battery/thermal 조회·구독은 없고 명시 field44 GET_MODEL/ONCHANGE는 유지한다.
+- 전체 field40 frame의 모든 조각 성공 callback 완료만 `TESLA_UWB_INITIAL_DEVICE_INFO_SENT`로 남긴다. schema28·기존 해석·single pump·AEAD·route/UUID·counter/replay·owner/OFF/권한·협상30초·sidecar15초·첫 거리60초는 불변이다. 모델/버전 hash·metadata raw값을 로그에 추가하지 않는다.
+- 공식 onWhitelist 연결 약1초 뒤와 우리 HMAC 검증 직후라는 보안/시점 차이를 명시하며 초기 metadata 보완과 차량 수락·RF 원인 해결을 구분한다. field19 재송신·field1 반복 트리거·passive-auth DRIVE·field3 grant/rejection·legacy GET_STATUS 초기화는 추가하지 않는다.
+
+### 수정 전 실제 소비자 재현
+
+부모가 **수정 전** JShell에서 실제 production consumer·session/crypto와 independent peer를 사용했다. 소비자를 복제한 mock이나 RF/실차 packet 복원 시험이 아니다.
+
+|수정 전 입력·관측|해석|
+|---|---|
+|정상 HMAC 뒤 field44 없이 deviceInfo0·capabilities1, wire order `[FIRA_CAPABILITIES]`, primary sealed=false|기존 v67 초기 경로는 자발적 field40 없이 field58만 보냈다. field40이 차량 FiRa 필수조건이라는 입증은 아니다.|
+|정상 domain3 HELLO의 source만 domain2로 바꾼 입력 뒤 query0|단순 header 우회 필요성 가설의 합성 음성대조다. 실차 signed mismatch 복원이 아니다.|
+|이후 정상 domain3 원본 입력 뒤 query1·primary sealed=false|domain3 원본은 기존 consumer 경로로 진행했다. 이를 차량 domain3 응답·좌표 수신 성공으로 표시하지 않는다.|
+
+### 수정 후 검증과 설치 상태
+
+아래는 **부모가 v68 설치 직후 실행·전달한 당시 근거**다. 이후 실차 실패·저장 ON과 현재 소스/설치는 위 단일 정본을 따른다. 문서 작업에서 빌드·테스트·기기 접근을 재실행하지 않았으며 v67의 과거 수치/hash를 재사용하지 않는다.
+
+|항목|v68 실제 근거와 해석 경계|
+|---|---|
+|최종 Gradle·JVM|`assembleDebug`·`assembleDebugAndroidTest`·`testDebugUnitTest`·`runVehiclePeerSimulator`·`lintDebug`·`compileReleaseKotlin` 모두 성공, **5분52초**. XML39 suites·**608 tests**, failures/errors/skipped0.|
+|독립 상대편·Python·lint·리뷰|standalone **121 PASS**(신규 초기 metadata18케이스 포함), Python 전체 **187 PASS**, lint0 errors/16 warnings. 읽기 전용 리뷰에서 이번 패치 도입 finding 없음.|
+|실제 consumer+독립 AES peer 전후|field44 없이 수정 전 deviceInfo0/capabilities1·`[FIRA_CAPABILITIES]` → 수정 후 deviceInfo1/capabilities1·`[DEVICE_INFO,FIRA_CAPABILITIES]`, primary sealed=false. 새 harness의 `deviceInfos(afterRequest=0)` API에 스크립트를 맞춘 뒤 수정 후 실행 근거를 보존했다. 합성 호스트 송신 검증이며 RF/차량 수락이 아니다.|
+|production 완료 이벤트→실제 분석 CLI|`TESLA_UWB_INITIAL_DEVICE_INFO_SENT` → FieldRecord/FieldJson → 실제 Python CLI 합성1행에서 parse/unsupported/issues0. distance count0·newDistance=false·newProtocol=false다. 전송 사건을 새 거리/프로토콜 수신으로 세지 않는다.|
+|생성 APK·기기 base APK|둘 다 SHA-256 `e3aa6013db12709a8a073f125e81d69585b0e6a20b8914381b3024296be35b38`, **146,644,365 bytes** 일치. 앱·계측 APK 생성 성공이지만 기기에는 앱 APK만 설치했고 **기기 계측은 미실행**이다.|
+|데이터 보존 설치|USB 재연결 후 `-r` 설치 완료, 실제 package **0.68.0/68**. firstInstall `2026-09-22 13:58:05` 유지, lastUpdate `2026-10-29 08:52:33`. files/no_backup/shared_prefs **717→717**, missing0/same715/changed2(`files/profileInstalled`, 활성 `events-v2.jsonl`). activation XML은 바이트 동일·enabled=false 보존.|
+|실제 앱·UI·서비스|launch Status=ok, 홈 서비스 OFF·등록 VIN 유지(원문 미기록), 설정 **0.68.0 (빌드68)**·권한 모두 허용·좌표 서비스 OFF, 실행 serviceRecord0. 토글/권한 변경 없음. 접근성 UI 확인이며 `FLAG_SECURE`를 해제하지 않았고 픽셀 검증은 아니다.|
+|실제 OFF 기기 로그|`device-v68-install-smoke.jsonl` **3행**은 `PROCESS_START_OFF` / `PROCESS_EXIT_OBSERVED` / `UI_RESUMED`뿐이고 자동 UWB·초기 metadata·키 TX 이벤트가 없다. 실제 Python CLI exit0·parse/unsupported/issues0. **OFF 안전 경계의 제한된 확인**이지 새 송신 경로 기기/실차 검증이 아니다.|
+|실차 개선·남은 한계|**설치 직후에는 v68 실차 미검증**이었다. 이후10월29일 실차는 위 선행 RX 실패 기록과 같이 HMAC 전 종료됐고 FiRa·좌표·거리 개선은 확인되지 않았다. root cause 미확정과 실제 source cleanup 실패 주입·잠금/OEM RF·큰 글꼴/TalkBack/보안 본문 픽셀 검증 미포함은 유지한다.|
+
+근거 cache는 `비공개 로컬 보관 경로`다. `initial-metadata-before.json`·`initial-metadata-after.json`·`initial-metadata-consumer.jsonl`은 호스트 전후/이벤트 근거, `device-v68-install-smoke.jsonl`은 실제 OFF 기기 로그, 부모가 작성한 `validation-install-summary.json`(**1,473 bytes**)은 최종 검증/설치 요약이다. `rea-evidence.json`과 별도 원 DEX 보조 `ag0-j-c.smali`·`pg0-f-collector.smali`의 출처 구분은 [v68 정본](Tesla-Integration.md#공식-연결-경로와-정확-근거)을 따른다.
+
+### 다음 실차 확인 절차
+
+당시 안내는 **서비스 ON → 차량에서 충분히 이탈 뒤 접근 → 알림 관찰 → USB 로그 회수**였다. 그 후속 관측은 위10월29일 v68 실차 실패다. v69의 추가 실차 완료·승인을 뜻하지 않으며 후속 검증에서도 초기 field40 전체 frame 완료·FiRa·native/RF·domain3 HELLO/query/차량 좌표·거리/방향을 분리한다. 호스트 성공·설치를 실차 성공 보장으로 쓰거나 field3 권한·마이크·프렁크 시험을 섞지 않는다.
+
+## 0.67.0 — 10월28일 최신 실차1회 분석
+
+- **당시 대상과 종료 상태:** `0.67.0`/67로10월28일 **17:12:31~17:13:03** 실차1회다. 실차 종료 뒤 **17:13:32 알림 OFF**였고 이후 v68 설치 직후에도 저장 OFF·실행 서비스0을 보존했다. 아래 v67 설치 직후 ON과 이후 v68 실차 저장 ON은 서로 다른 시점이며 현재 상태는 위 단일 정본을 따른다.
+- **UWB 경로:** 감지·기존 앱 키 HMAC·field58 송신 완료는 확인됐으나 **FiRa 요청0·native open0·거리0**이고 협상30초 `DEADLINE_EXPIRED`로 끝났다. field58 완료는 차량 수락·RF 시작이 아니며 field44 요청도 관측되지 않았다. 초기 field40 부재를 무거리의 확정 원인으로 삼지 않는다.
+- **좌표 sidecar:** domain3 HELLO 전체 frame TX는 **17:12:33.469**, 응답0 뒤 **17:12:48.190 `LOCATION_TIMEOUT`**이며 cleanup 성공이 관측됐다. phone source의 GPS는 유효했고 heading은 unreliable였다. 폰 fix 성공은 차량 좌표·화살표·UWB 거리 성공이 아니다. 차량 위치 query/응답 성공이나 domain3 무응답의 근본 원인은 확인하지 못했다.
+- **signed mismatch2건:** domain2/protobuf·signedStatus 없음·primary route/UUID UNMATCHED·AEAD 미시도다. domain3 HELLO의 늦은 응답으로 단정할 수 없고 주소/UUID·AEAD 검사를 완화하지 않는다. 공식의 route 기반 request lookup과 우리의 더 엄격한 정책은 [v68 정본](Tesla-Integration.md#공식-연결-경로와-정확-근거)에 구분한다.
+- **중지 시점:** 알림 OFF는 실패 뒤 약29초다. 사용자 OFF가 먼저 협상을 끊었다고 설명하지 않는다. 자동 재시도·기한 연장·새 권한 승인·차량 제어를 해결책으로 추가하지 않는다.
+- **근거와 한계:** 당시 cache는 `비공개 로컬 보관 경로`이다. 파싱 **2,154행·오류0**이지만 loss/로그 완전성은 미확정이다. 기록되지 않은 field1 내부값으로 whitelist·authorization·차량 상태를 추정하지 않는다. field19 재송신·passive-auth DRIVE·legacy 초기화 차이는 이번 실차 원인으로 확정하지 않는다. 문서 작업에서 분석·기기 시험을 재실행하지 않았다.
+
+## 0.67.0 — metadata 주소 처리·위치 관측 검증과 설치
+
+아래는 **v67 설치 직후의 역사적 검증·ON 관측**이다. 이후 실차1회와 알림 OFF도 당시 이력이며 현재 소스·설치·저장 의도/실행 상태는 위 단일 정본을 따른다.
+
+### 소스 변경과 승인 경계
+
+- [v67 통합 정본](Tesla-Integration.md#v67-metadata-주소-처리위치-관측-정본)에 따라 unsigned field44만 to 없음/DOMAIN0·2의 좁은 allowlist를 적용하고 명시 route/UUID 불일치는 semantic decode 전에 제외한다. 이는 synthetic 안전 정책이며 실차 목적 domain 복원이 아니다. signed 응답의 상관관계·AEAD·replay와 기존 FiRa/stop 처리는 유지한다.
+- schema28 optional top-level `navigationObservation` / `VEHICLE_NAVIGATION_OBSERVATION`으로 sidecar 응답·authEvidence·최종 reason·HELLO/QUERY의 실제 frame TX·phone source/FGS cleanup·presentation status 전이를 비민감 typed 관측으로 잇는다. 기존1..27 해석·분모는 유지하며 raw GPS/heading·절대 GPS 시각·주소·키·ID·token은 기록하지 않는다.
+- field3 자동 grant/rejection은 미승인·미추가다. wake·cloud·키 등록·프렁크·마이크·RF 설정·기한·재시도·권한 동작은 바꾸지 않는다.
+
+### v67 실제 검증·설치 상태
+
+|항목|당시 근거|
+|---|---|
+|빌드·JVM·독립 상대편·lint|`assembleDebug`·`assembleDebugAndroidTest`·`testDebugUnitTest`·`runVehiclePeerSimulator`·`lintDebug`·`compileReleaseKotlin` 전체 **BUILD SUCCESSFUL**,4분58초. XML집계39 suites·590 tests 실패/오류/skip0, standalone103 PASS, lint 오류0·경고16.|
+|Python 도구|전체186 PASS. schema28에서도 schema27 본문4키를 보존하도록 조건 `==27`을 `>=27`로 교정하고27/28 동일 관측 회귀 포함. 아래 v66의582/97/176을 새 결과로 재사용하지 않았다.|
+|실제 소비자 수정 전/후|동일 JShell 입력·독립 peer·실제 session/crypto에서 DOMAIN0/2 GET_MODEL 암호 응답이 각각0→1. wrong-route+malformed44의 sealed/stops는 true/1→false/0. 실차 packet 복원·RF 시험이 아니다.|
+|위치 소비자→FieldRecord/FieldJson→Python CLI|합성8행 모두 parse/unsupported/issues0. `SIDECAR_STARTED → HANDSHAKE_TX_COMPLETE → SIDECAR_RX(SESSION_READY) → HANDSHAKE_ACCEPTED → QUERY_TX_COMPLETE → SIDECAR_RX(STATUS_INCOMPLETE) → RESULT/TERMINAL(LOCATION_STATE_MISSING)`. primary sealed=false. 합성 실패 분류 smoke이지 차량 응답·좌표 성공이 아니다.|
+|생성 APK·기기 base APK|양쪽 SHA-256 `a1fcebd72438ea85b9062ae1022b10c3bfd39df81168c8055eb824bba6da722b`,146,644,361 bytes 일치.|
+|데이터 보존 설치|S23 v67 `-r` 설치 후 package `0.67.0`/67. firstInstall `2026-09-22 13:58:05` 유지, lastUpdate `2026-10-28 16:18:04`. files/no_backup/shared_prefs717파일 중 누락0·동일715·변경2(profileInstalled, active `events-v2.jsonl`). activation XML은 바이트 동일·enabled=true.|
+|실제 UI·서비스|홈 ON·차량 신호 대기·차량 좌표 미제공·UWB 실측 미수신, 설정 `0.67.0 (빌드67)`·모두 허용 표시·서비스 알림 확인. BeaconService/ObservationService 존재, MicrophoneService 없음. 토글·권한 대신 변경 없음. 접근성 확인이며 보안 본문 픽셀 검증은 아니다.|
+|실제 schema28 기기 로그|v67 실제 로그16행을 실제 CLI로 분석해 exit0·parse/unsupported/issues0, navigation 관측4개. `ADMISSION`, status `STARTING`, `FOREGROUND_ARMED`(armed=true/collecting=false), status `WAITING_FOR_VEHICLE_LOCATION`이다. idle 센서 등록·fix 수신으로 포장하지 않는다.|
+|실차 metadata 수락·domain3 위치·UWB 거리/방향|**당시 설치 직후 미검증**이었다. 이후 v67 실차1회의 FiRa 요청/native open/거리0·domain3 HELLO 무응답은 위 최신 분석에 별도로 남긴다. 차량 좌표·유효 거리/방향 성공, 실제 source cleanup 실패 주입·잠금/OEM RF는 미검증이다.|
+
+당시 근거 캐시는 `비공개 로컬 보관 경로`의 `validation-install-summary.json`, `device-v67-install-smoke.jsonl`, `consumer-navigation-smoke.jsonl`, `before-consumer-smoke.json`이다. 부모가 실행·보고한 v67 검증/설치 근거이며 문서 작업에서 재실행하지 않았다. 당시 안내한 서비스 ON·이탈 뒤 접근·알림 관찰·USB 회수의 후속 결과는 위 v67 실차 분석이다. 당시 설치 ON을 현재로 복사하거나 추가 실차 승인으로 해석하지 않으며 field3 권한 응답·마이크·프렁크 시험은 섞지 않는다.
+
+## 0.66.0 — 10월28일 실차1회 분석
+
+- **당시 설치 대상:** 최신 정리본 v66, SHA-256 `25908df066db58bb3a8e13eb3035508fafbe6e7035970e606ab4559069457b87`. 당시 서비스 ON이었으며 이후 v67 설치 직후 ON·실차 후 알림 OFF, v68 설치 직후 OFF·실차 저장 ON은 각각의 역사다. 현재 상태는 위 단일 정본을 따른다.
+- **실측:** 15:22:49~15:23:09.498의1회에서 기존 키 인증·FiRa·backend 열림·peer5까지 진행했다. 유효/무효 거리0/0이고 native stop이 먼저, `closed` 사유4 뒤 앱 stop·`NO_DISTANCE_RECEIVED`다. 열림/peer 수는 거리 성공·차량 권한 승인이나 위치 성공이 아니다.
+- **수신17건:** field3 `31B / 3/2/29`3건은 내부 level/token/reason 미확정이다. route mismatch9건 중7건은 signature 존재·현재 route/UUID 불일치로 타 요청/세션 가능성이 있다. 나머지2건은 plaintext from-domain2/to-DOMAIN/UUID 없음이며 **[INFERENCE] 당시 field44 전용 route 검사 분기와 연결**된다. field44 enum·목적 domain 값은 미기록이다.
+- **위치 관측 한계:** phone source 약18초 활성은 logcat 근거지만 sidecar 진행·응답·최종 reason 영속 관측이 빠졌다. HELLO/query 실제 TX 여부·차량 거절·좌표 해석 거절을 확정할 수 없다. domain3 긍정 수신·실제 좌표·RF 근본 원인은 미확정이다.
+- **후속의 의미:** v67은 좁은 field44 주소/파싱 순서 교정과 비민감 관측 보강이지 이번 실차 packet 복원·무거리 원인 해결·field3 응답 승인·새 실차 검증이 아니다. 새 REA의 정확 Evidence/prototype·공식 BLE/서버 공존 한계는 [통합 정본](Tesla-Integration.md#새-공식-apk-rea-근거와-한계)을 따른다.
+
+## 0.66.0 — 미사용 잔재·구형 실행 가지 정리
+
+- Nordic 빈 패키지 체인 `app/src/main/java/no/`와 빈 `res/mipmap-anydpi-v26/`, 미사용 `ui-tooling-preview` 직접 선언·개행 상수·음성 조각 누적기·전용 테스트를 제거했다. Activity의 중복 busy 검사는 기존 확장함수로 통일했다.
+- 현재 시작점이 없는 구형 주소 GATT probe·관찰 모드·비교 preset·자동 BODY→DRIVE 조회·자동 마이크 실행 가지와 전용 테스트를 제거했다. 공통 `BleProbeState`·쓰기 예약/실제 요청 identity·수동 키/음성/프렁크·UWB/좌표 source·현재 scanner/owner/정리 안전 회귀는 보존했다. 죽은 관측 병합 helper와 전용 copy 테스트도 제거했다.
+- 과거 로그 schema·모델·분석기, 사용자 데이터·VIN·키·설정·녹음·실차 로그·로컬 모델·벤더 리소스/라이선스는 보존했다. 빌드/IDE 캐시는 정상 생성물이므로 미사용 소스로 간주해 일괄 삭제하지 않았다.
+
+|실행|결과|
+|---|---|
+|앱·계측 APK·JVM·독립 상대편·lint|성공. JVM39 suites·582개 실패/오류/skip0, 독립 상대편97개 PASS, lint 오류0·경고16|
+|release 의존성 경계|`compileReleaseKotlin` 성공. Preview 직접 선언 제거 후 debug 전용 tooling에 의존하지 않고 생산 Kotlin 컴파일|
+|Python 도구|분석기·녹음 도구 회귀176개 PASS. 과거 Nordic 로그 해석 포함|
+|실제 소비자 호스트 smoke|생산 consumer·독립 AES peer로 domain2/3 병행, 합성 위치 결과1·대략111m/90도·UWB 유효거리1. 개별 만료·clear 비재생 확인|
+|Android 등록 경계|정리 전후 생성 APK merged Manifest 동일. component identity·권한·앱 ID·버전 보존|
+|안전 검토|공통 송수신·현재 서비스·수동 마이크 경계 검토. 삭제 과정의 coroutine launch import 누락을 실제 컴파일에서 확인하고 복원 후 통합 빌드 통과|
+|정리 APK SHA-256|`25908df066db58bb3a8e13eb3035508fafbe6e7035970e606ab4559069457b87`|
+
+테스트 수 감소는 제거한 구형 실행 가지와 전용 테스트 때문이며 현재 scanner·VIN 입장·owner·기한·정리 검사는 제품 경로로 이관했다. 호스트 검증 당시에는 폰 미설치였고, 이후 사용자 요청으로 아래와 같이 설치했다. 호스트 증거는 `~/Library/Caches/hey-tesla/unused-cleanup-20261028-124500-397608/`에 보존했다.
+
+### 최신 정리본 데이터 보존 설치
+
+- 같은 버전66을 `-r`로 교체 설치했다. 최초 설치 시각은 유지됐고 갱신 시각은 `2026-10-28 13:20:22`다. 기기의 base APK SHA-256이 위 정리 APK와 일치하여 버전 번호만으로 판정하지 않았다.
+- 설치 전 저장 서비스 ON·실행 중 상태를 유지했다. 실제 홈의 **서비스 ON·차량 신호 대기**, 설정 `0.66.0 (빌드 66)`·권한 모두 허용 표시, 서비스 알림과 BeaconService/ObservationService 실행을 확인했다. MicrophoneService는 없다. 토글·권한을 대신 변경하지 않았다.
+- 기존722개 파일 누락0·동일719·변경3이다. 변경은 설치 프로필·활성 순환 이벤트 로그·Android ActivityThread ID이며 activation XML은 바이트 동일, enabled=true를 유지했다. VIN·녹음 파일을 삭제·초기화하지 않았다.
+- 현재 화면의 **차량 좌표 미제공·UWB 실측 미수신**은 성공이나0m가 아니다. 이번 확인은 설치·실행·복원 smoke이며 차량 응답·좌표·거리 정확도나 프렁크 성공 검증이 아니다. UI는 접근성 계층으로 확인했으며 보안 본문 픽셀 검증은 하지 않았다.
+- 설치·보존 근거는 `~/Library/Caches/hey-tesla/install-cleanup-v66-` 접두사의 이번 설치 캐시에 저장했다. 설치 도구가 Success/Failure verdict를 반환하지 않은 문제는 보고하고, 별도 package 조회·갱신 시각·기기 APK 바이트 해시로 설치를 검증했다.
+
+## 0.66.0 — 기능별 패키지 이관 검증
+
+- production75·JVM test44·androidTest24, 총143개 파일을 용도별 폴더로 이동했다. 전체157개 Kotlin 파일을 전후 비교하여 package/import와 계측 runner 선택자 외 본문이 동일함을 확인했다. 클래스·함수 분할, 가시성 확대, wrapper·alias는 추가하지 않았다.
+- Android component8파일의 기존 루트 package를 유지했다. production Manifest·voice XML 원문과 이관 전후 **생성 APK의 merged Manifest가 동일**하다. applicationId·버전·권한·기존 등록/PendingIntent·저장키·정책은 그대로다.
+
+|실행|결과|
+|---|---|
+|앱·계측 APK·JVM·독립 상대편·lint 통합 빌드|성공. JVM42 suites·662개, 실패/오류/skip0. 새 simulator FQCN으로97개 PASS. lint 오류0·경고17, deprecated API 등 컴파일 경고 유지|
+|Python 도구 전체 회귀|176개 PASS. 분석기와 녹음 재생 도구 포함|
+|새 패키지 실제 consumer 호스트 smoke|독립 AES peer·생산 conversation/session/geometry 실행. domain2/3 병행·위치 결과1·합성 대략111m/90도·UWB 유효거리1. 개별 만료와 clear 비재생 확인|
+|정적 참조·문서|옛 이관 클래스 선택자 잔여 없음, Kotlin 소스 링크 누락0. 기존 Android component 예외·reflection·저장 경계 읽기 전용 검토에서 수정 필요 결함 발견 없음|
+|이관 APK SHA-256|`29cbbc18b104a1d980bba6de3686a8eae2930071af3bbcf65a670566e490cc46`|
+
+이관본은 **기기에 설치·실행하지 않았으며 사용자 토글·데이터에 접근하지 않았다.** 이전 설치본의 기기 검증을 이관본의 검증으로 재사용하지 않는다. 이번 구조 정리로 실차 RF 성공이나 새 차량 시험 완료를 주장하지 않는다. 증거는 `~/Library/Caches/hey-tesla/package-refactor-20261028-110602-800312/`에 보존했다.
+
+## 0.66.0 — 좌표 기반 나침반·UWB 병행
+
+### 구현과 실제 검증
+
+- [v66 정본](Tesla-Integration.md#v66-좌표-기반-나침반uwb-병행)에 따라 기존 단일 BLE 연결의 domain3 READ_ONLY `GetLocationState`와 domain2 UWB를 병행한다. Tesla 계정·클라우드·차량 wake·새 키 등록·자동 마이크·프렁크는 추가하지 않았다.
+- 차량 WGS 좌표와 휴대전화 위치·진북으로 대략적 거리·화살표를 계산한다. UWB 실측/AoA와 독립이며 원시 좌표는 RAM 전용이다. 새 접근에서만 수집하며 차량60초·폰15초·heading2초 만료와 OFF/owner/권한 정리를 유지한다.
+
+|실행|관측|
+|---|---|
+|최종 앱·계측 APK·JVM·독립 상대편·lint|Gradle 성공. JVM42 suites·662개 실패/오류/skip0, standalone97개 PASS, lint 오류0·경고17|
+|Python 분석기|129개 PASS|
+|실제 production consumer 호스트 smoke|독립 AES peer로 domain2/3 병행, 위치 결과1·대략111m·화살표90도·UWB 유효거리1. heading/폰 만료와 clear 비재생 확인. 좌표·RF 입력은 합성|
+|S23 FGS/source bench|1개 PASS. 스캔/GATT/UWB RF/음성/차량 명령 없이 기존 BeaconService의 location type ACK 뒤 실제 source 등록·정상 해제. 위치0·heading0, `HEADING_UNRELIABLE`, 해제 후 callback0. 실제 측정 성공 아님|
+|S23 Compose UI bench|2개 PASS. 합성 좌표/UWB 독립 만료·OFF 소거, 명시 재개/권한 refresh로 죽은 서비스 미생성|
+|설치·실제 UI|65→66 `-r`, 최초 설치 시각 유지. 설정 `0.66.0 (빌드 66)`·홈 OFF·선택 항상 위치 미허용 안내 확인. 사용자 토글·권한 변경 없음|
+|파일 보존|기존718개 누락0·동일714·변경4, 이후723개. 변경은 진단 설정·설치 프로필·활성 이벤트 로그·Android ActivityThread ID. activation XML 동일, 저장 enabled=false·실행 서비스0. 전체 바이트 동일 주장 아님|
+|앱 APK SHA-256|`9fd295e233a3dba4f30bef6a9ad827ade6e432b491e5391e5d3a178b22a0ac7d`|
+
+첫 계측은 Mobile MCP DeviceServer의 UiAutomation 점유로 bench 진입 전에 실패했다. 해당 도구 소유 프로세스만 종료한 뒤 위 계측3개가 통과했다. 사용자 앱/데이터를 강제 종료·초기화하지 않았다. 증거는 `~/Library/Caches/hey-tesla/coordinate-v66-smoke-20261028-100819-190720/`의 최종 smoke·기기 계측·보존 JSON에 보관한다.
+
+### 미검증과 사용자 확인
+
+- 실제 차량 domain3 위치 조회 허용·좌표 신선도·UWB 거리 수신·방향 정확도·전력, HOME/잠금·재부팅/다음 접근의 실제 수명, 실제 Binder death/native unregister 실패는 미검증이다. `FLAG_SECURE`를 유지하며 본문 픽셀 검증은 하지 않았다.
+- 테스트는 잠금 해제된 앱에서 서비스 ON → 휴대전화를 평평하게 들고 차량 접근 → 알림의 좌표 기반 대략적 거리/방향과 UWB 실측을 각각 확인 → 종료 시 OFF → USB 로그 회수 순서다. 값이 없어도0m·정면·성공으로 판정하지 않는다. 가까운 거리에서는 위치 오차 때문에 화살표가 숨겨질 수 있다. 자동 마이크·프렁크 시험은 아니다.
+- 선택 “항상 위치 허용”은 재부팅 후 좌표 자동 복원을 원하는 경우 사용자가 직접 설정한다. 미허용이어도 화면에서 합법적으로 시작한 FGS와 BLE/UWB를 혼동하지 않는다.
+
+## 0.65.0 — 단말 정보 응답·수신 시각 및 실차 이전 검증
+
+### 수정과 실차 경계
+
+- [v65 프로토콜 정본](Tesla-Integration.md#v65-단말-정보-응답거리-receipt-시각)에 따라 private VCSEC field44 요청을 field40 단말 정보로 응답한다. GET_MODEL과 배터리·thermal·절전 ONCHANGE 구독을 구분하고 기존 AES-GCM·송신 직렬화·owner·OFF·권한·기한·종료 후 구독 해제를 유지한다. field3의 UNLOCK/DRIVE 자동 승인과 임의 거절 응답은 추가하지 않았다.
+- 거리 callback 진입 시각을 큐 밖에서 기록한다. framework timestamp는 그대로 보존하며 2초 최근값·최초60초·서비스 거리 공백10초 정책은 바꾸지 않는다.
+- v64 실차의 started5는 개별 RF 왕복 성공5회가 아니다. 첫 peer-stop은 native opened 후10.651초, 마지막은13.010초이며 그 뒤 앱이 close했다. `closed(4)`만으로 절전·권한·차량 중단을 특정할 수 없다. 단말 정보 미처리와 RF 중단의 인과는 미확정이다.
+
+### 실제 실행 결과
+
+|검증|관측 결과|
+|---|---|
+|JVM 전체 회귀|38 suites·600개, 실패/오류/skip0|
+|독립 상대편 standalone|81개 PASS, `VEHICLE_PEER_SMOKE_OK scenarios=81 deviceAccess=false rf=false`|
+|Python 분석기|129개 통과, schema27 유지|
+|생성물·lint|앱/계측 APK 빌드 성공, lint 오류0·경고17|
+|같은 생산 경로 수정 전/후|기존 v64 바이너리의 GET_MODEL 응답0→v65 응답1. 독립 AES peer가 수신하며 상태는 차량 요청 대기로 유지|
+|지연 표본 수정 전/후|callback ingress1000ms·processing3000ms에서 receipt3000→1000ms. 실제 production consumer·협상·ranging 실행|
+|명시 UUID 경계|초안의 목적지 없는 잘못된 UUID가 구독/응답1/1을 일으킨 결함을 재현 후 수정. 동일 입력의 최종 구독/응답0/0, 빈 UUID legacy와 현재 UUID 허용은 회귀로 분리|
+|실기기 SDK 계측|전용 plain `Application` runner의 단일 bench `OK (1 test)`. 실제 SDK builder·Parcelable 왕복과 고정 소비자 계약을 검사. Ranging manager·session·RF·마이크·차량 명령은 시작하지 않음|
+|데이터 보존 설치|64→65 `-r`, 최초 설치 시각 유지. 설정 `0.65.0 (빌드 65)`·홈 OFF·저장 enabled=false·실행 service record0 확인. 권한·사용자 토글 변경 없음|
+|파일 보존 비교|설치 전718개 중716개 동일, 이벤트 로그1개 변경, 생성된 `.dex.cur.prof`1개 미존재. 사용자 데이터 파일 누락0, activation XML 동일. 전체 바이트 동일 주장 아님|
+|앱 APK SHA-256|`e8bf938df02ac58b5e42beefd193374ec9d1e5ed8b1d5d0eb497e2ea27d4726e`|
+
+첫 통합 검증의4개 실패는 일반 malformed body의 기존 관측 경로를 새 parser가 가로챈2건과 봉인 후 상태 masking이 실제 facade와 다른 harness2건이었다. 원래 관측 계약을 복구하고 harness를 실제 facade에 맞춘 뒤600개를 통과했다. 늦은 native 입력과 무송신·샘플 보존 검증은 제거하지 않았다.
+
+계측 준비에서는 AGP가 첫 instrumentation 이름을 기본 runner로 덮어쓰는 문제와 `ContentProvider.attachInfo`의 필수 AppOps 초기화가 guard에 막히는 문제를 확인했다. 기본 runner와 전용 runner를 각각 명시하고, framework provider 부착 단계의 메인 스레드에서만 AppOps 조회를 허용했다. bench 시작 전에는 이 예외도 닫고 금지 경로 차단을 확인했다. 일반 `DiagnosticApp`으로 대체 실행하지 않았다.
+
+증거는 `~/Library/Caches/hey-tesla/device-info-v65-smoke-20261028-083109-639144/`의 수정 전/후 runtime·UUID 바인딩·데이터 보존·최종 검증 JSON에 보존했다. REA 계약 bundle은 `비공개 로컬 보관 경로`이다. 원시 키·주소·VIN·모델 hash·단말 식별자·OS dump 원문은 문서에 넣지 않는다.
+
+### 미검증과 사용자 확인
+
+- 실제 SDK 계측은 OEM service/UCI encoder 실행이나 차량 RF 수락의 증명이 아니다. USB의 읽기 전용 `dumpsys ranging`에서는 channel9와 config1..5·거리/각도·background 지원을 확인했지만, 보존 OS 진단에 해당 회차의 우리 앱 하위 종료 사유는 없었다.
+- 차량에 가지 않는 검증은 위 범위까지 완료했다. 이후 사용자가 실차 확인할 경우 **서비스 ON → 휴대폰 잠금 → 차량 접근 → 알림 거리/방향 관찰 → 종료 후 OFF·USB 회수**로 구분한다. 자동 마이크·프렁크 동작은 연결되지 않았다.
+- 차량의 field40 수락, 실제 거리·각도, 반복 접근·장시간 잠금·실차 안정성은 미검증이다. 거리0 원인이 해결됐다고 선언하지 않는다.
+
+## 0.64.0 — 비민감 본문 구조·직전 요청 관측 검증
+
+### 구현·불변식
+
+- [v64 관측 계약](Tesla-Integration.md#v64-미분류-본문-구조직전-요청-상관-관측)에 따라 UWB 미분류/해석 오류의 실제 body만 최상위 필드 번호·wire·길이로 제한 요약한다. 빈 body와 미관측을 구분하고8항목·4096바이트·135자 상한, 수신 reset·immutable snapshot을 적용한다. 값·본문·식별자·해시·자유 예외 문구는 보존하지 않는다.
+- 현재·직전 생성 요청의 header를 RAM에서만 비교한다. `PREVIOUS`도 기존 route 제외와 AEAD 미시도를 유지하고, 혼합 identity·cross-domain·2세대 이전은 일치로 승격하지 않는다. 이전 key/hash/replay context는 보존하지 않으며 직전 route/UUID도 회전·실패·close에 소거한다.
+- Kotlin/Python이 schema27의 본문3키를 원자적으로 strict 검증하고 correlation은 독립 enum으로 제한한다. impossible status/개수/길이 조합도 거절한다. schema1..26의 새4키는null이고 기존 분모·기한·재시도·owner·마이크·RF·프렁크 정책은 바꾸지 않는다.
+
+### 실제 실행 결과
+
+|검증|관측 결과|
+|---|---|
+|전체 JVM 회귀|38 suites·580개, 실패/오류/skip0|
+|독립 차량 상대편 standalone|기존41+신규25=66개 PASS, `VEHICLE_PEER_SMOKE_OK scenarios=66 deviceAccess=false rf=false`|
+|Python 분석기 전체 회귀|129개 통과|
+|앱·계측 APK / lint|`assembleDebug`·`assembleDebugAndroidTest`·`lintDebug` 성공. lint 오류0·경고17, deprecated API·불필요 cast/lateinit/safe-call 컴파일 경고 존재|
+|생성 APK|`app/build/outputs/apk/debug/app-debug.apk`, metadata `0.64.0`/64, SHA-256 `fcc604906579557e05de5038f294612a9cc1ec52b3481bc03701158ca8dc900e`|
+|독립 peer→실제 consumer→실제 sink→Python CLI|JShell로23행 실제 파일 기록·sync·분석. notification/frame/protocol 각6, body COMPLETE3·미관측3, header CURRENT3/PREVIOUS1/UNMATCHED1/미관측1. 반복 snapshot·terminal로 새 관측이 늘지 않음|
+|개인정보·버전 게이트 smoke|synthetic secret marker가 기록 파일·CLI 출력에 없음. 악성 요약 문자열과 부분·부적합 metadata는null, schema26의 새4키도null. sink health OK·pending/rejected/dropped0|
+|전체 key·최대 항목 fixture|114개 state key를 포함한 행에3896바이트 실제 body의8항목·127자 shape를 기록하고 CLI에서 동일하게 읽음. 행3657바이트. 다른 key는null인 fixture이며 모든 상태 조합의 최대 행 크기 주장 아님|
+|기존 실차 로그 호환|회수된5파일2475행 재해석 오류0·issues0, 기존 v63 작업의6/6/6 분모 유지, 새4키는모두미관측|
+|읽기 전용 소스 검토|본문 값 제외·bounded parsing·이전 identity 소거·수락 분리·strict validator·schema 호환·중복 집계 경계 검토 완료. 실차 성공 증거 아님|
+
+첫 Python 실행에서 신규 fixture가 마지막 RX의 누적3을 과거 PROTOCOL snapshot의2로 되돌려 operation을2개로 분리하는 오류를 발견했다. terminal fixture를 실제 마지막 RX snapshot 기준으로 수정하고 counter 역행 없음 assertion을 추가한 뒤129개를 통과했다. 집계기의 정상 counter-reset 경계를 완화하지 않았다.
+
+증거 파일은 `~/Library/Caches/hey-tesla/rx-v64-smoke-20261027-103224-873790/`의 `events-v2.jsonl`, `sink-analysis.json`, `v63-compat-analysis.json`, `max-fields/events-v2.jsonl`·`analysis.json`에 보존했다. smoke 코드는 JVM 입력으로만 실행했으며 저장소에 임시 실행 파일을 남기지 않았다.
+
+```sh
+./gradlew :app:assembleDebug :app:assembleDebugAndroidTest \
+  :app:testDebugUnitTest :app:runVehiclePeerSimulator :app:lintDebug
+python3 -m unittest discover -s tools -p test_analyze_field_log.py
+```
+
+### 미검증·설치 경계
+
+이번 실행은 합성 입력의 **같은 생산 consumer·conversation·협상·native 경계 port·sink·CLI**를 사용했다. Android `DiagnosticRuntime.fieldSnapshot` 연결은 컴파일·소스 검토로 확인했으며 실제 Android 화면/KeyStore/Bluetooth/framework/FGS 실행은 하지 않았다. 폰 설치·설정·서비스 ON/OFF·사용자 데이터와 차량/RF·마이크·명령에도 접근하지 않았다.
+
+v63 실제 본문의 원문·필드 정보는 당시 없었으므로 이번 시나리오가 그 packet을 복원한 것은 아니다. 다음 schema27 수신부터 빈 본문·최상위 구조·직전 생성 요청 일치를 구분할 수 있도록 준비한 것이며, 실차 타임아웃 원인 해결·차량 수락·거리/각도·물리 개방을 입증하지 않는다. 초기 호스트 검증 시점에는 설치63·마지막 확인ON을 변경하지 않았으며, 이후 별도 요청에 따른64 설치는 아래와 구분한다.
+
+### 사용자 요청에 따른 v64 설치·UI 확인
+
+- S23 Ultra USB에서63→64를 `adb install -r`로 설치했다. package `0.64.0`/64·최초 설치 시각 유지·위 APK SHA 일치를 확인했다.
+- 실제 설정 `0.64.0 (빌드 64)`·시스템 차량 등록·권한 모두 허용 표시를 확인하고 홈으로 복귀했다. 홈은 **서비스 ON·차량 신호 대기**이며 기존 저장 ON의 자동 복원이다. 사용자 토글·권한·키 등록은 조작하지 않았다.
+- 설치 전후718파일 중 누락0·동일716·변경2(profile/event log), activation XML은 동일하다. 저장 enabled=true·활성 service record2를 확인했다. 사용자 데이터 초기화·삭제는 하지 않았다.
+- 이는 설치·UI·서비스 복원 관측이며 schema27 실차 수신·거리·각도·프렁크 성공은 아직 검증하지 않았다.
+
+## 0.63.0 — 실차 이전 계약 재감사·독립 차량 상대편
+
+### 변경과 실패 전·수정 후 증거
+
+- [계약 재감사](Tesla-Integration.md#실차-재시험-전-계약-재감사독립-상대편-검증)에서 프레임·세션 HMAC·AES-GCM·FiRa54/59·stop48/stopped43·주소·STS·RF config·비동기 정리를 **확인/우리 정책/미확인**으로 분리했다. 기존 packet 원문이 없으므로 v61 실차 실패 원인을 특정하지 않았다.
+- 실제 공통 BLE consumer를 `TeslaBleKeySession`으로 이동하고, coordinator/ranging 상태 머신은 그대로 실행하되 Android native 경계만 주입한다. 독립 peer는 생산 parser·crypto·metadata·FiRa helper·기존 `VehicleFixture`를 사용하지 않는다. 공개 expected HMAC/ciphertext/tag KAT로 peer primitive를 별도 검증한다.
+- **queued stop 순서:** 같은 추출 consumer의 완료 부분만 구 순서인 `frameComplete → drain`으로 재생했을 때, response 대기 중 stop과 request+stop coalesce 두 회귀가 실패했다. 정식 `drain → 살아 있는 frameComplete` 순서에서는 두 회귀와 standalone 시나리오가 통과했다. 이는 합성 입력의 로컬 순서 결함이며 실제 RF를 켜거나 실차 원인을 관측한 것이 아니다.
+- **SessionInfo 시계:** 차량 clock100·최종 fragment 수신 뒤5초 소비 지연 조건에서, 수신 기준 TTL10초의 기대 expires115를 구 방식이 만족하지 못하는 회귀를 실행했다. SessionInfo 기준을 처리 시각이 아닌 수신 시각으로 바꾼 뒤 통과했다. 처음 검토한11초 지연은 controller의 handshake10초 제한을 넘으므로 “정상 controller가 이미 만료된 요청을 보낸다”는 증거로 쓰지 않는다.
+- malformed/coalesced framing 오류에서 decoder가 아직 반환하지 않은 소유 frame 배열도 소거한다. 이 소거는 코드 소유권 교정이며 JVM/provider/ByteString 전체 메모리 zeroization을 입증한 것은 아니다.
+- 추출 검토 중 이전 frunk SDK 반환이 새 작업의 공용 상태를 발행할 수 있는 가드 누락을 발견해 기존 `current === op` 경계를 복원했다. 같은 작업의 늦은 SDK 결과 관측은 유지한다.
+
+### 실제 실행
+
+|검증|결과|
+|---|---|
+|`assembleDebug`, `assembleDebugAndroidTest`|성공. APK·계측 APK 생성, 기기 실행·설치 아님|
+|`testDebugUnitTest`|36 suites·529개, 실패/오류/skip0|
+|신규 독립 peer 통합 / native 수명주기 / 공개 KAT|41 /31 /12개, 모두 통과. 위529개의 부분집합|
+|`runVehiclePeerSimulator`|실제 standalone JVM 실행,41개 PASS, `VEHICLE_PEER_SMOKE_OK scenarios=41 deviceAccess=false rf=false`|
+|`lintDebug`|오류0·경고17. Gradle `srcDir` deprecation과 불필요 `lateinit` 컴파일 경고도 존재|
+|소스 검토|공통 caller cutover·owner/기한·SDK와callback·seal/정리 경계 읽기전용 검토. 호스트/실차 실행을 대체하지 않음|
+|생성 APK|`app/build/outputs/apk/debug/app-debug.apk`, metadata `0.63.0`/63, SHA-256 `3f325562672247cb81cbc6ec95f4fd18c8c13cb8c59d599435631f103a50ba04`|
+
+재실행은 JDK 환경을 지정한 뒤 다음 명령을 사용한다. simulator는 test source의 호스트 진입점이며 배포 앱에 포함되지 않는다. Gradle task가 실제 test runtime 산출물의 의존성까지 빌드하므로 이전 runtime jar를 잘못 실행하지 않는다.
+
+```sh
+./gradlew :app:assembleDebug :app:assembleDebugAndroidTest \
+  :app:testDebugUnitTest :app:runVehiclePeerSimulator :app:lintDebug
+```
+
+41개 통합 시나리오는 raw/wrapped/encrypted 협상, uint32 ID·STS/config·RF 전달값, 모든 FiRa frame split, coalesce·queue overflow·malformed frame, response 완료 전 stop, SDK0/201·callback 실패/누락, exact0·부분 종료, 정책상 부적합 stop, peer별 raw result·invalid result·수동/서비스 측정창, HMAC·route/domain/UUID·AEAD 변조·request hash·replay, OFF·늦은 callback·GATT/native/unregister 정리 실패를 실행한다. native31개는 capability 등록 재진입·native prepare/create/start 실패·권한·queued callback·정확한5초 close·timeout/늦은 callback 실패 latch·소유 byte 격리/소거 등을 실제 생산 상태 머신으로 검증한다.
+
+### 기기·실차 경계
+
+초기 호스트 재감사에서는 USB/ADB·앱 실행·설치·RF·차량 명령·사용자 데이터에 접근하지 않았다. 이후 사용자의 명시적 설치 요청에 따라 아래 데이터 보존 설치·UI 확인을 별도로 수행했다. 호스트 결과를 실차 성공으로 확대하지 않는다.
+
+실제 Android Handler/Bluetooth/KeyStore/framework builder·권한·FGS/lease adapter 실행, OEM RF 호환·실제 차량 입력/타이밍·response 수락·거리/각도·물리 개방은 미검증이다. 합성 거리 입력이나 peer가 수락한 packet은 차량/RF 성공이 아니다. 자동 마이크·음성 프렁크 연결과 기존 허가 경계는 변경하지 않았다.
+
+### 사용자 요청에 따른 데이터 보존 설치
+
+- S23 Ultra USB에서62→63을 `adb install -r`로 설치했다. 최초 설치 시각은 그대로이며 package `0.63.0`/63·APK SHA는 위 산출물과 일치한다.
+- 실제 설정 `0.63.0 (빌드 63)`·시스템 차량 등록·권한 모두 허용 표시를 확인하고 홈으로 복귀했다. 홈 OFF·저장 enabled=false·활성 service record0을 확인했으며 ON으로 바꾸지 않았다.
+- 설치 전후718파일 중 누락0·동일715·변경3(profile/event log/runtime cache)이다. activation XML도 동일하다. 데이터 초기화·키 재등록·VIN 변경·녹음 삭제는 하지 않았다.
+- 이번 사용자 실차 절차: 차량에서 떨어진 곳에서 홈 ON→잠금/주머니 접근→앞1~2m에서60초 대기→거리 수신 시 앞3~5m로 이동해 변화 확인→차량에서 충분히 이탈 후 중지/미수신 표시 확인→OFF→USB 로그 분석. 접근·오류·OFF 시각을 기억한다. 차량은 정차/P 상태를 유지하며 자동 발화·프렁크·정밀 나침반 시험은 포함하지 않는다.
+
+
+## 0.62.0 — 서비스 UWB 수신 단계 관측
+
+### 근거와 변경 범위
+
+- v61 보존 실차10/26 17:07의1회는 BLE·CCCD·기존 키 인증·capabilities BLE 송신과 notification12 뒤 전체31.246초/인증 뒤 약30초에 `DEADLINE_EXPIRED`로 종료됐다. request 처리·response·backend opened·거리·각도 사건은0이다. 알림 중지 후 OFF였고5파일2380행 분석 오류0. 원문 패킷이 없어 차량 미송신과 앱 내부 제외를 구분하지 못한다.
+- 공식 Tesla4.61.6-4647 REA에서 raw/wrapped plaintext FiRa는 명령 응답 UUID/복호화 경로와 분리되고 빈 capabilities 생성도 확인했다. timeout 원인으로 확정된 수락/보안 결함은 없으므로 기존 정책을 바꾸지 않았다. [수신 대조·Evidence67개](Tesla-Integration.md#v62-rea-수신-대조--프레임프로토콜-관측)를 참조한다.
+- 실제 notification의 decoder 결과와 완성 frame·실제 protocol 소비 분모를 분리하고 실제 반환 step·입력 형식·auth evidence·AEAD·FiRa 분류·header/제외 사유를 schema26으로 기록한다. 정상 FiRa의 `RESPONSE_INVALID` 오표시는 교정했지만 인증·route·AEAD·replay·기한·backend·마이크·프렁크 동작은 유지한다.
+- 구버전 새 필드는 null, 지원 작업 무수신은0이다. 다음 protocol은 fresh metadata이며 fragment·terminal·거리의 마지막 snapshot은 새 분류가 아니다. GATT 관측은 거리 freshness·wake lock을 갱신하지 않는다. 원문·키·STS·VIN·MAC·UUID·자유 문자열은 저장하지 않는다.
+
+### 실제 호스트 검증
+
+- `assembleDebug`·`assembleDebugAndroidTest`·전체 JVM **445개** 실패/오류/건너뜀0. 분석기 **122개** 통과. Lint 오류0·기존 경고17. 분석기 첫 실행의2개 시험 오류는 확장 필드 전체목록 핀 제거·과거 schema23/24에서 미지원인 GATT 사건 fixture 교정 후 해소했다. 생산 정책을 예외 억제로 바꾸지 않았다.
+- 읽기 전용 안전 검토에서 수신→decoder→queue→conversation→PROTOCOL→FieldLog→분석기 연결과 수락/HMAC/AEAD/replay·소거·callback 봉인·분모·snapshot 중복 방지를 확인했고 수정 필요 결함은 없었다. 이는 실제 차량 실행 검증이 아니다.
+- JDK17 JShell에서 실제 생산 decoder·모델 전이·conversation과 기존 독립 JCA 상대편을 실행했다. 분할 header의0 frame/미완성 대기, 합쳐진2 frame의 실제 소비 전 protocol0, raw/wrapped FiRa, domain 제외, 다음 raw의 metadata reset, 실제 AEAD 복호화, replay의 복호화 전 거절을 확인했다.
+- 같은 실행의 실제 `FieldEventSink`가15행을 디스크에 sync했고 JSON/text 분석기 CLI 모두 오류0이었다. notification/frame/protocol 총분모와 중복 없는 관측은 각각6/6/6, FiRa request4·domain 제외1·replay 거절1로 집계됐다. duplicate RX1행과 terminal2행은 재합산되지 않았고 새 거리0·원문 sentinel 제외·AEAD 검증 성공1과 미시도5를 구분했다. 합성 입력이며 실차 RX12의 내용 복원이 아니다.
+- 생산 `FieldJson` UTF-8 측정에서 위15행은1,387~1,977바이트였다. 기존 전체 상태와 큰 고정 메타값을 합친 별도 표본은3,737바이트였다. 이는 선택적 다른 진단을 포함한 절대 최대 행 크기가 아니며 RF 시간/전력 benchmark도 아니다. 기존512KiB×4/2MiB 회전 경계 회귀는 통과했다.
+- 컴파일된 BuildConfig와 설치 package에서 **0.62.0/62**를 확인했다. APK SHA-256은 `90b09211a0009d4686c7877b5bfe4ac97b46c4c00b4204e5c66644e3ae2dbe75`다. USB 재연결 후 `TeslaUwbRxObservationDeviceTest` **1개 통과**. 독립 decoder/conversation/native-owner의 분할·합침·소비 대기·봉인 후 늦은 callback 경계이며 차량 RF·마이크·키 저장소를 사용하지 않는다.
+
+### 데이터 보존 설치와 다음 순서
+
+USB 재연결 후 앱·검증 APK를 데이터 보존 교체 설치했다. 첫 설치 시각 `2026-09-22 13:58:05` 유지, 기존713파일 누락0·동일710·변경3·새 파일0이다. 변경은 설치 프로필·순환 이벤트 active 파일·ActivityThread ID이며 VIN·녹음·activation은 동일하다. 키·차량 등록을 초기화하지 않았다. 저장 OFF 원문은 동일했고 ObservationService/BeaconService/MicrophoneService는 없었다.
+
+처음 앱 실행 시 AOD/잠금 화면이 가려 UI를 확인하지 못했으나 사용자가 직접 잠금을 해제한 뒤 실제 홈 OFF·설정의 **0.62.0 (빌드62)**·권한 모두 허용·시스템 차량 등록 표시를 확인했다. 서비스를 켜지 않고 홈으로 복귀했으며 보안 잠금·`FLAG_SECURE`는 유지했다. 화면 검증은 접근성 계층과 실제 조작 기준이고 보안 본문 픽셀·실제 차량 response 수락·RF·거리/각도·물리 프렁크는 미검증이다.
+
+사용자가 직접 서비스 ON → 정차 차량 접근 →30~40초 대기 →서비스 OFF →USB 로그 분석을 진행한다. 음성·프렁크를 섞지 않으며 새 로그의 frame/protocol/제외 지점으로 다음 수정 여부를 판단한다.
+
+## 0.61.0 — FiRa 요청 ID와 중지 enum 분리
+
+### 근거와 수정
+
+- v60 실차 회차는 2026-10-26 11:12:42~54 KST의1회다. 잠금 상태 정확 광고, native 연결 status0/state2, CCCD0, 기존 키 인증, RX12 뒤11.675초에 `UNSUPPORTED_ENDPOINT`로 끝났다. 거리·각도0, 로컬 close 확인. 08:34 개발 FGS smoke와 실차 회차를 구분했고 순환5파일2560행 분석 오류0이었다. 회수물은 PC `~/Library/Caches/hey-tesla/field-v60-20261026-112255/`에 보존했다.
+- 공식 Tesla4.61.6-4647 REA 재분석과 collector 원 DEX 보완으로 request `sessionId`는 uint32 상관 ID, backend FiRa ID는 별도 생성, stop/stopped는 enum0..11임을 확인했다. 잘못된 request1..11 제한과 Long→Int 축소를 제거하고 원 ID를 response까지 보존한다. 구체 Evidence·SHA·도구 누락과 보완·남은 차량 상호운용 한계는 [v61 REA 대조](Tesla-Integration.md#v61-rea원-dex-대조--fira-식별자-계약-정정)에 둔다.
+- stop은 원 ID와 exact 비교하고 큰 ID도 로컬 종료·소거한다. 표현 가능한 원 ID만 stopped enum으로 보내며 전부 비표현이면 NOT_SENT 후 로컬 완료 정산한다. 이 TX 생략과 unknown/unmatched stop의 전체 로컬 정리는 공식 동등성이 아닌 우리 보수 정책이다. ID에서 bit·peer 매핑을 만들지 않는다.
+- response 대기 중 닫힌 plan 재시작 금지·부분 세션 재료 격리·late callback/취소 봉인·정리 불명 lease 보존을 유지한다. 키·VIN·인증·권한·서비스 기한·RF backend·마이크·프렁크 동작은 바꾸지 않는다. FieldLog schema25는 유지한다.
+
+### 실제 실행과 미검증 범위
+
+- `assembleDebug`·`assembleDebugAndroidTest`·전체 JVM **428개** 실패/오류/건너뜀0, 분석기 **116개** 통과. Lint 오류0·기존 경고17. 읽기 전용 안전 검토에서 수정 필요 결함은 없었다.
+- JDK17 JShell에서 실제 컴파일된 생산 wire를 실행했다. field54 request의 `0`(필드 누락 기본값)·`11`·`12`·`0x7fffffff`·`0x80000000`·`0xffffffff`를 decode→prepare→response로 통과시켜 원 ID와 별도 backend ID의 uint32 wire를 직접 역파싱·대조했다. exact0/11 stop·빈/unknown/미매칭/혼합 차단·표현 가능한 stopped0/11만 직렬화·큰 ID의 임의 매핑 부재·요청 소거와 plan 격리·최종 peer/STS 소거를 확인했다. 무선·차량 수락·native 종료 성공을 검증한 것은 아니다.
+- 생성 BuildConfig를 직접 실행해 **`0.61.0/61`** 확인. 생성 APK SHA-256은 `b82c2db3b57dfa5ffb2bd7c463b5f55958bd68db68e08b1a40f0aef36d0ea2cf`다.
+- S23에서 `TeslaFiraCoordinatorDeviceTest` **7개 통과**. 독립 coordinator와 MainHandler/Listener의 response-pending→stop→late callback, 큰 ID 로컬 종료/timeout·mixed stopped·부분 소거·NOT_SENT 정산·취소 봉인을 실행했다. RF/키/마이크·전역 runtime/activation은 사용하지 않는 합성 입력이며 native RF close/차량 수락 검증이 아니다.
+- USB 재연결 후 앱·검증 APK를 데이터 보존 교체 설치했다. package와 실제 설정에서 **0.61.0 (빌드61)**, 첫 설치 시각 `2026-09-22 13:58:05` 유지·권한 모두 허용·시스템 차량 등록 유지 확인. 기기 회귀 후 홈에 저장 ON이지만 OS 시작 제한·감시 미실행으로 표시돼 안내대로 화면에서 OFF→ON을 수행했다. 이후 실제 홈 ON/차량 신호 대기·ObservationService/BeaconService·알림102/connectedDevice FGS, MicrophoneService 없음을 확인했다. 저장 ON과 실행 성공을 혼동하지 않았다.
+- 기존713파일 누락0·동일706·변경7·새 파일0. 변경은 설치 프로필·기존 순환 이벤트4파일·ActivityThread ID·화면 OFF→ON의 activation이다. VIN·녹음 관련 파일은 동일하며 키·차량 등록을 초기화하지 않았다. `FLAG_SECURE`를 유지했고 실제 화면 확인은 접근성 계층과 조작 기준으로 보안 본문 픽셀 검증은 하지 않았다.
+- 당시 사용자 요청에 따라 이후 USB를 분리했다. **당시 설치본0.61.0/61·서비스 ON** 이력이며 현재 설치68/OFF 상태와 구분한다. 이 관측으로 실제 차량 response 수락·RF/거리/각도·물리 프렁크 성공을 확인한 것은 아니다.
+
+### 다음 실차 순서
+
+현재 서비스 ON 상태에서 정차 차량에 접근해 알림의 거리(m) 수신을 확인한 뒤 USB를 연결하고 순환 로그를 분석한다. 이번 회차에는 음성·프렁크 시험을 섞지 않는다. 설치·비차량 회귀 성공만으로 차량 상호운용 성공을 판정하지 않는다.
+
+## 0.60.0 — REA 대조와 연결수명·정리 경계 수정
+
+### 수정 근거와 적용 범위
+
+- 수정 전에 공식 Tesla `4.61.6-4647`의 BLE 생성/재접속·FiRa 연결 순서·프렁크 native 명령 생성/서명/응답/상태 cache를 REA로 정적 분석했다. APK SHA-256·Evidence ID·보존 bundle과 적용/비적용 구분은 [REA 대조](Tesla-Integration.md#v60-수정-전-rea-대조--연결부터-프렁크까지)에 둔다. 공식 앱 실행·차량 펌웨어 전체 경로를 관측한 것은 아니다.
+- v59 보존 로그1017행(2026-10-23 13:58:40–16:59:33 KST), 분석 오류0. 상세가 남은 시도4~6은 광고 후10.060/10.068/10.072초 `SCAN_RESULT_STALE`,7은8.719초 `GATT_CONNECTION_LOST`로 종료됐다. 이전1~3의 상세는 순환 로그에 없으므로 복원·추정하지 않는다. 실제 거리·각도는0이며7의 원 native status도 소실되어133으로 단정하지 않는다.
+- 스캔을 멈춘 뒤에도 원 광고10초 검사로 진행 중인 GATT를 취소하던 수명을 분리했다. 최초 SDK 발급까지 신선도를 요구하고, 같은 Operation이 non-null 반환 handle을 실제 소유한 뒤만 광고 age 면제다. owner·VIN·권한·BT·FGS·scan-pause·20초 연결 단계/초기 전체180초·정리 봉인은 유지한다.
+- 서비스 UWB에도 초기133의 전송/연결 진전 전·동일 handle·2초 뒤1회 재접속을 적용했다. 기한 연장·새 handle fallback·명령 재생은 없다. schema25 GATT snapshot과 분석기는 실제 callback status/state·발급/반환·단계/첫/마지막 RX 시각·종료 관측을 보존한다. SDK 접수와 연결·인증·거리 수신은 분리한다.
+- 정상 문장 인식과 마이크 해제가 있어도 recognizer/pipe 정리가 false/null이면 차량 처리로 넘기지 않도록 수정했다. 인식 원결과를 오류로 바꾸지 않고 정리 실패·lease·UI 재입장 차단을 보존한다. 공개 SDK closure 방식의 프렁크 명령·신선한 P·단발 전송·ACK와 후속 BODY OPEN 분리는 유지한다.
+
+### 실제 실행 근거
+
+- `assembleDebug`·`assembleDebugAndroidTest`·전체 JVM **424개** 실패/오류/건너뜀0·분석기 **116개** 통과. Lint 오류0·기존 경고17. 읽기 전용 안전 검토에서 미해결 결함은 없었으며 실제 무선 성공을 판정한 검토가 아니다.
+- 컴파일된 생산 정책을 JDK17 JShell에서 직접 실행했다. null/다른 handle 미입장·소유 handle 입장·10초 초과 진행·OFF/기한/권한/VIN 차단·전송/진전 뒤 retry 거부·cleanup false/null 차단·정상 정리 후 단발 허용을 확인했다. 실제 Android SDK/RF 연결 재현은 아니다.
+- 실제 `FieldJson`이 생성한 합성5행을 분석기 CLI stdin으로 실행해 오류0·133/8/0 원 status·SDK true와 연결 미관측 false 분리·callback 미관측 null·상대시간·v24 GATT 미관측·raw 음수 각도 보존·종료 snapshot 새 거리0·민감 임의키 제외를 확인했다.
+- S23에서 `FrunkVoiceCleanupDeviceTest`2개와 `TeslaGattConnectRetryDeviceTest`3개, 합계 **5개 통과**. 첫 실행은 신규 fixture의 VIN alias namespace 오류로2개 실패했고, 허용된 테스트 namespace로 수정·검증 APK 재빌드/교체 뒤5개 통과했다. 실제 production runtime의 정리/재입장 차단과 MainHandler의2초/동일 소유권/late-generation 경계 검증이며 마이크 캡처·차량 명령·native133 재현은 하지 않았다. 비차량 lab GATT SDK 시험은 이번에 실행하지 않았다.
+- 데이터 보존 교체 설치 후 package와 실제 설정 UI에서 **`0.60.0 (빌드 60)`** 확인. APK SHA-256 `f6db007111673401115eda6127366f31e02cab7616e51d47a759db26360e13f1`, 첫 설치 시각 `2026-09-22 13:58:05` 유지. 홈 ON·ObservationService/BeaconService·알림102/connectedDevice FGS·HOME 뒤 알림·알림의 **서비스 끄기**·재진입 OFF를 확인했다. MicrophoneService는 없었다. 권한은 모두 허용 표시를 유지했다. `FLAG_SECURE`를 유지해 앱 화면 확인은 실제 조작·접근성 계층 기준이며 보안 본문 픽셀 검증은 하지 않았다.
+- 기존707파일 중 누락0·동일703·변경4: 설치 프로필·순환 이벤트·Android ActivityThread ID·서비스 activation(ON/OFF smoke의 명시 ON 시각). VIN1파일·녹음 관련51파일은 동일했고 기존 앱 키·등록을 초기화하지 않았다. 새6파일은 독립 runtime 검증 전용 이벤트이며 사용자 데이터와 구분해 보존했다. 실제 설치 앱의 새25행은 schema25이며 UWB 거리/각도·프렁크 사건은 없었다.
+- 최종 저장 서비스 **OFF**, ObservationService/BeaconService/MicrophoneService 없음. 이번 기기 smoke는 차량 신호 대기/서비스 수명 검증이며 차량 인증·FiRa 협상·거리·각도·물리 프렁크 개방 성공이 아니다.
+
+### 사용자 실차 절차
+
+1. 앱 버전 `0.60.0 (빌드 60)`을 확인하고 **서비스 사용 ON**으로 바꾼다.
+2. 정차 차량에 접근해 알림의 실제 거리(m) 수신 여부와 시작/종료 시각을 확인한다. 먼저 거리 수신 경로를 검증하며 수동 마이크·프렁크 시험은 섞지 않는다.
+3. 짧은 한 회차 후 USB를 연결한다. 원 광고 → SDK 발급/반환 → native 연결/CCCD → 인증/FiRa → 거리/각도 순서로 로그를 분석한다. 미수신이면 마지막 관측 단계와 원 status부터 구분한다.
+4. 이 버전만으로 자동 음성 프렁크 통합을 완료했다고 보지 않는다. 실제 프렁크 시험은 별도 수동 음성 동의·신선한 P·ACK/BODY 결과를 확인하는 회차로 분리한다.
+
+## 0.59.0 — 360도 방향각 검증 로그
+
+### 확정 범위와 구현
+
+- 사용자는 정확한 360도 회전 화살표와 제한된 좌우 신호가 다름을 확인하고 **360도 검증부터 진행**을 선택했다. 이번 버전은 화살표·도/라디안 변환·나침반/GPS 센서·새 UWB backend를 추가하지 않는다. 단위·좌표·앞뒤 수신의 현재 한계는 [방향 계약](Tesla-Integration.md#방향-수신과-단위-충돌)에 둔다.
+- 로그 스키마24에 `uwbLastAzimuthRaw`, `uwbLastAzimuthConfidence`, `uwbLastElevationRaw`, `uwbLastElevationConfidence`, `uwbAzimuthSupported`, `uwbElevationSupported`를 추가했다. 같은 `lastReceivedSample`의 거리·peer·framework 원시 시각·callback elapsed와 함께 기록한다. 유한한 음수 각도는 무변환 보존하고, 축별 신뢰도0..2·Boolean 지원 여부만 허용하며 누락·무효는 null이다.
+- 종료·peer stop·capability의 반복 표본은 새 각도 수신으로 세지 않는다. v1..v23 원본과 로그 경로·2MiB 순환 상한을 유지한다. VIN·주소·STS·GPS·자유 원문은 추가하지 않았다. 개발자 UWB 화면에는 raw 기록과 화살표 미표시, 상세에는 한 자리 회전 절차를 안내한다.
+
+### 실제 실행 근거
+
+- 앱 빌드·전체 JVM **407개** 실패/오류/건너뜀0, 분석기 **111개** 통과, Lint 오류0·경고17. 이번에는 기기 자동 테스트를 다시 실행하지 않았다.
+- 실제 컴파일된 `FieldJson`을 JDK17 JShell에서 실행해 합성5행을 만들고 실제 분석기 CLI에 stdin으로 전달했다. 음수 원값·축별 독립 confidence·다음 peer 표본의 null·종료 스냅샷·NaN/Inf/문자열/Boolean 차단·v23 새 필드 미확인·민감 임의키 제외를 확인했다. **합성 입력이며 실차 각도 결과가 아니다.**
+- S23 데이터 보존 설치 후 package와 실제 설정에서 **`0.59.0 (빌드 59)`**를 확인했다. APK SHA-256은 `17dc3d8f9e42419fb79936188f69c2dd0921191142c32b87dc0f9064d1d29324`이며 첫 설치 시각은 유지됐다. 실제 UWB 진단의 360° 검증 안내·RANGING 허용·측정값 미수신을 확인했다. 앱의 `FLAG_SECURE`를 유지하며 이번 UI 확인은 접근성 계층과 실제 조작 기준이다.
+- 설치 앱이 실제로 남긴 현재 로그12행에서 스키마24를 확인했다. 이 표본에는 실제 UWB 거리/각도 수신 사건이 없으며 신호 미수신 원인이나 차량 위치를 단정하지 않는다. 서비스 ON과 BeaconService/ObservationService를 유지했고 MicrophoneService는 없었다.
+- 기존 저장 파일707개 중 누락0·해시 동일705개이며 변경2개는 설치 프로필·순환 이벤트다. 실사용 키·VIN·녹음 관련 파일은 동일했다. 실차 단위·좌우/앞뒤·반사/몸 가림 영향·360도 연속성은 미검증이다.
+
+### 사용자 실차 절차
+
+1. 정차한 차량에 접근해 알림에 실제 거리(m)가 나오는지 확인한다. 현재 서비스 ON·사용자 RANGING 허용은 유지됐다. 수동 거리 진단 버튼을 누를 필요는 없다.
+2. 차량 앞 한 자리에 서서 휴대폰을 세로로 세우고 후면을 차량 쪽으로 향한다. 시작 시각을 기억한다.
+3. 몸과 휴대폰을 함께 오른쪽으로 한 바퀴 돌며 시작·90°·180°·270°·원래 방향에서 각각5초 멈춘다. 한 회차에서 차량 주변 이동까지 섞지 않는다. 값이 끊기면 그 지점도 관측이며 성공/실패 원인을 미리 단정하지 않는다.
+4. 종료 후 USB를 연결하고 시작 시각·끊긴 지점을 알려 준다. 동일 peer별 raw 각도·독립 confidence·거리·시각을 대조해 단위와 앞뒤 변화부터 판단한다. 마이크·음성·프렁크 시험은 포함하지 않는다.
+
+## 0.58.0 — 스텔스 그레이 앱 아이콘
+
+- 차체·미러·하이라이트·음영의 빨간 팔레트만 스텔스 그레이 계열로 변경했다. 차량 형태·청록 배경·유리·조명·상태바 단색 아이콘·서비스 동작은 유지했다.
+- `:app:assembleDebug :app:lintDebug` 성공, Lint 오류0·기존 경고17. 색상 변경이므로 자동 테스트는 재실행하지 않았다. S23 데이터 보존 설치 후 package의 `0.58.0`·빌드58과 시스템 앱 정보의 실제 그레이 아이콘 픽셀을 확인했다. APK SHA-256은 `b6d3eef8ca6cb8a9090346ed5db2b2280c8486421158a6257bd41c3317e35928`이다.
+- 설치 전 사용자가 켜둔 서비스 ON과 차량 신호 대기 상태를 확인했다. 교체 후 저장 ON·BeaconService/ObservationService·connectedDevice FGS 알림102 복원을 확인했으며 MicrophoneService는 없었다. 이번 아이콘 변경을 위해 서비스를 OFF로 바꾸지 않았다.
+- 기존 저장 파일707개 중 누락0·해시 동일705개이며 변경2개는 설치 프로필·순환 이벤트다. 실사용 키·VIN·녹음 관련 파일은 동일했다. 폰의 별도 아이콘 테마는 유지했고 실차 거리·방향이나 다른 런처 마스크 검증은 추가하지 않았다.
+
+## 0.57.0 — 컬러 차량 앱 아이콘
+
+- 모델 Y 느낌의 자체 빨간 크로스오버·청록 그라데이션 배경을 adaptive icon으로 적용했다. 테슬라 T 심볼·공식 이미지 없이 직접 그린 벡터이며, 상태바는 기존 단색 차량 아이콘을 유지한다. 일반·원형 launcher 선언과 테마 단색 리소스를 연결했고 서비스·차량·음성 로직은 수정하지 않았다.
+- 최종 `:app:assembleDebug :app:lintDebug --no-watch-fs --rerun-tasks` 성공. 리소스 폴더 이동 뒤 증분 병합에서 아이콘을 찾지 못한 오류는 전체 재병합으로 해소했다. Lint 오류0·경고17이며 기존16개 외에 로컬에 남은 빈 `mipmap-anydpi-v26` 폴더 경고1개가 있다. 단위·기기 자동 테스트는 재실행하지 않았다.
+- 최종 APK SHA-256은 `6c6c0a2a99ef2b355b4291d9427176defe6d5acd3b42993a20e0e8e4641cbefd`다. 데이터 보존 설치 후 package·실제 설정 화면에서 **`0.57.0 (빌드 57)`**를 확인했고 첫 설치 시각은 유지됐다.
+- 런처·시스템 앱 정보의 실제 픽셀 캡처에서 컬러 차량을 확인했다. `current_sec_appicon_theme_package`는 별도 아이콘 테마 적용을 보고했으며 종이 모양 외곽 프레임이 화면에 보인다. 앱 리소스에는 해당 프레임이 없고 시스템 테마는 변경하지 않았다. 최종 설치 후 런처의 실제 아이콘 좌표를 눌러 `com.heytesla.app/.MainActivity` 실행과 홈 OFF를 확인했다.
+- 기존 저장 파일707개 중 누락0·해시 동일705개이며 변경2개는 설치 프로필·순환 이벤트다. 실사용 키·VIN·녹음 관련 파일과 서비스 OFF를 유지했다. 실제 거리·방향·단색 테마·다른 런처 마스크는 이번 검증에 포함하지 않았다.
+
+## 0.56.0 — 차량 알림 아이콘
+
+- 테슬라 심볼을 쓰지 말라는 사용자 요청에 따라 자체 24dp 단색 차량 정면 벡터를 추가했다. `ObservationService`와 BLE 감지 기본 알림의 small icon만 바꾸고, 서비스 수명·거리 표시·권한·차량/마이크 동작은 바꾸지 않았다. 별도 마이크 진단 아이콘은 유지했다.
+- `:app:assembleDebug :app:lintDebug` 성공, Lint 오류0·경고16. UI 아이콘 변경이므로 단위·기기 자동 테스트는 다시 실행하지 않고 실제 서비스 알림으로 확인했다.
+- S23에 데이터 보존 교체 설치한 뒤 package의 `versionName=0.56.0`, `versionCode=56`과 첫 설치 시각 유지를 확인했다. APK SHA-256은 `4b6254fcf965b26742d0f1d4ca5d34b89e6e98a81dee844da797d73e8a852c5e`다.
+- 홈에서 ON 후 알림102가 앱 차량 리소스 `0x7f060064`를 사용함을 확인하고, 실제 상태바 픽셀 캡처에서 차량 정면 모양을 확인했다. 알림 제목·대기 문구·**서비스 끄기**가 유지됐으며 중지 뒤 저장 OFF와 BeaconService·ObservationService 부재를 확인했다. 최종 서비스 OFF, 사용자 `RANGING` 허용은 유지됐다.
+- 기존 저장 파일707개 중 누락0·해시 동일703개. 변경4개는 설치 프로필·순환 이벤트·ActivityThread ID·서비스 활성화 설정이며 실사용 키·VIN·녹음 관련 파일은 동일했다. 실차 UWB 거리·방향·잠금 측정 검증은 추가하지 않았다. 앱 본문은 `FLAG_SECURE`를 유지하며, 이번 픽셀 확인 범위는 시스템 상태바 아이콘뿐이다.
+
+## 0.55.0 — 자동 UWB 서비스와 알림
+
+### 구현 범위
+
+- 홈 서비스 ON이 새 정확 BLE 광고를 소비해 기존 앱 키 인증·FiRa 협상·UWB 측정을 자동 시작한다. 저장 ON 복원도 새 token·빈 후보로 시작하며 이전 작업을 재생하지 않는다. 마이크·프렁크·키 등록·자동 깨우기·클라우드는 연결하지 않는다.
+- 알림 채널은 기존 ID를 유지하고 표시명·제목을 **Hey Tesla 서비스**, 중지 행동을 **서비스 끄기**로 정리했다. 현재 제품 UI의 주말 시험 표현을 제거했지만 과거 로그·분석 스키마·별도 수동 진단은 보존했다.
+- live peer의 callback2초 이내 거리만 알림에 표시한다. 오래된 값·정지 peer·정리 중 값은 현재 거리로 표시하지 않는다. 방향은 이번 세션의 AoA 지원에 따라 요청하되 단위 충돌 때문에 화살표로 변환하지 않는다. [현재 계약과 시스템 모듈 근거](Tesla-Integration.md#v55-자동-uwb-서비스와-알림)를 따른다.
+- 최초 유효거리60초, 첫 수신 뒤 무수신10초를 종료 조건으로 사용한다. 연속 수신은 기존60초/180초로 끊지 않는다. 한 접근당 한 번이며 pause 시간을 이탈로 계산하지 않는다. 수동 UWB의 서비스 OFF·화면 이탈 취소·고정 기한은 유지한다.
+
+### 호스트 실행 근거
+
+- 앱·androidTest APK 빌드, JVM404개 실패/오류/건너뜀0을 확인했다. 로그 분석기105개도 통과했다. 최종 Lint는 오류0·경고16이며 새 무기한 wake-lock 경고는 유한 갱신과 실패 시 예약 보존으로 수정했다.
+- 실제 컴파일된 서비스 후보 정책·측정 기한·알림 함수를 JDK17 JShell에서 실행했다. 정확 광고만 시작, CDM/자체BT 미시작, OFF 봉인, 합성 유효수신300초 지속,10초 무수신 종료, 수동60초 유지, 최근1.25m 표시→2초 초과 만료→정지 peer 제외→정리 실패 우선 전이를 확인했다. **합성 입력이며 차량 RF 결과가 아니다.**
+- 실제 분석기 CLI에 거리·capability·endpoint 종료·peer 종료·시간초과5개 사건을 입력했다. 새 측정은 거리 사건1개만 집계하고 `DISTANCE_RECEIVE_TIMEOUT`과 원시 framework 시각을 보존했다. 종료 스냅샷을 추가 측정으로 세지 않았다.
+- S23의 공개 `service-ranging.jar`를 읽기 전용 분석해 라디안 값을 공개 measurement로 변환 없이 전달하는 경로를 확인했다. 공개 문서의 degrees 계약과 달라 모듈·기기명 하드코딩으로 보정하지 않는다. 이는 실제 방향 수신·좌우 정확도 검증이 아니다.
+
+### S23 설치·실제 화면 관측
+
+- 데이터 보존 교체 설치 후 package와 실제 설정 UI에서 **`0.55.0 (빌드 55)`**를 확인했다. 첫 설치 시각은 유지됐고 앱 APK SHA-256은 `c17b7a9460c3deeab61c9672c9aa814e9b0df6c84aee31010c21eb333b998917`이다.
+- `VehicleServiceUiDeviceTest`, `VehicleVinRuntimeDeviceTest`, `BleNameDetectionDeviceTest` **39개 통과**. 첫 실행의 UiAutomation 중복 등록은 모바일 도구가 시작한 서버만 종료해 해소했고, 기존 감지 전용 config를 사용하던 제품 서비스 fixture는 `VEHICLE_SERVICE_UWB`로 이행했다. 이는 합성 런타임·UI 회귀이며 실차 RF 검증이 아니다.
+- 실제 홈 ON 후 `Hey Tesla 서비스` 알림과 `차량 신호 대기 · 접근 시 UWB 측정`을 확인했다. HOME에서도 BeaconService의 connectedDevice FGS·알림102가 유지됐고 MicrophoneService는 없었다. 사용자가 직접 허용한 `RANGING`의 `granted=true`와 홈의 권한 경고 해제를 확인했다.
+- 알림을 펼쳐 **서비스 끄기**를 누른 뒤 저장 OFF, BeaconService·ObservationService 종료, 서비스 알림 제거를 확인했다. 앱 재진입에서도 **서비스 OFF · 차량 감지·UWB 자동 측정을 사용하지 않아요.**를 표시했다. 최종 상태는 OFF다.
+- 설치 직전 기존 저장 파일594개 중 누락0·해시 동일587개다. 변경7개는 진단 설정 DataStore, profileInstalled, 순환 이벤트, 테스트용 VIN 저장2개, ActivityThread ID, 서비스 활성화 설정이며 신규113개가 생겼다. 기존 실사용 키·VIN·녹음 관련 파일은 해시가 같았다. 데이터 삭제·초기화는 하지 않았다.
+- 앱은 `FLAG_SECURE` 때문에 픽셀 캡처가 검게 표시되어 접근성 계층·실제 조작·서비스 상태로 확인했다. 큰 글꼴·TalkBack·실차 거리/방향·측정 중 잠금 유지·wake-lock 갱신/native 종료는 미검증이다. 이번 작업에서 마이크·프렁크를 실행하지 않았다.
+
+### 사용자 실차 확인
+
+1. 설정에서 앱 버전을 확인하고 **거리 측정 권한**을 직접 허용한다. 휴대전화 UWB 설정도 ON으로 둔다. 기존 앱 키·VIN·차량 등록을 다시 만들지 않는다.
+2. 홈 **서비스 사용 ON** 후 차량에 접근한다. 알림의 감지/인증/협상/거리 미수신과 **실제 최근 거리(m)**를 구분해서 본다. 버튼으로 수동 거리 진단을 시작할 필요는 없다.
+3. 거리 수신 중 HOME·잠금에서 유지되는지, 이동에 따라 값이 변하는지, 멀어진 뒤 수신 지연/종료로 바뀌는지 확인한다. 거리·방향 값이 없으면 성공으로 취급하지 않는다.
+4. 다시 접근했을 때 한 회차만 시작하는지 확인하고 **서비스 끄기**로 중지한다. USB 로그 분석 뒤 다음 단계 여부를 판단한다. 마이크·발화·프렁크 시험은 이번 절차에 포함하지 않는다.
+
+## 0.54.0-probe — 수동 UWB 거리 진단
+
+### 소스 정리와 경계 수정
+
+- 읽는 곳 없는 런타임 상태(`savedPreference`, `lastAppeared`, `lastDisappeared`), 호출 없는 `setAutomaticMicrophone()`과 로그 정산의 미사용 인자를 제거했다. 설정 키·저장 데이터·출현/이탈의 RAM/파일 기록·남아 있는 진단 기능은 유지했다.
+- 저장 ON·복원 대기 상태의 UWB 시작 차단, response 전송 중 닫힌 endpoint의 재시작 방지, 요청 전 최신 capability 반영과 측정 elapsed 기한 검사를 보강했다. [상세 계약](Tesla-Integration.md#v54-수동-tesla-uwb-거리-진단)을 따른다.
+- 공식 요청별 counter 계약에 맞춰 새 FiRa 요청의 동일 응답 counter를 허용한다. 동일 요청 replay와 이전 요청 응답의 route·UUID 변조 replay는 계속 거절하며 새 회귀 2개로 검증했다. route·UUID 비교의 불필요한 바이트 복사도 제거했다.
+- 분석기는 배열·객체형 event/kind 하나 때문에 이후 정상 로그까지 잃지 않도록 수정했다. `FieldEventSink.sync()`는 큐 적재부터 배리어 완료까지 하나의 제한 시간을 적용한다. 로그 스키마·파일명·보존 정책은 바꾸지 않았다.
+
+### 구현과 실제 검증
+
+- **수동 실측 경로:** 서비스 OFF에서 기존 키·차량 등록·VIN으로 BLE 세션을 검증하고 FiRa OOB→Android16 RAW UWB를 실행하도록 연결했다. `RANGING` 권한은 사용자 요청 버튼으로만 허용받으며 신규 키 등록·마이크·프렁크·클라우드는 실행하지 않는다.
+- **정리 후 빌드·자동 검증:** JDK21로 `:app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug` 성공. JVM378개 실패/오류/건너뜀0, Lint 오류0·경고16개. `python3 -B -m unittest discover -s tools -p 'test_analyze_field_log.py'` 105개 통과.
+- **JVM 실행 smoke:** 새 파일 없이 JDK17 JShell에서 컴파일된 실제 BLE/FiRa 클래스를 실행했다. 합성 차량의 세션 HMAC 검증→endpoint2개·peer3개 협상→framework config4/2→AES-GCM 응답을 차량 fixture 측에서 복호화·대조했다. 미사용 rangingType 값에도 peer 보존, endpoint별 소거 격리·닫힌 endpoint 재선택 거절과 close 후 송신 거절을 관측했다. 실제 Android RF·차량을 실행한 결과는 아니다.
+- **로그 결함 수정 전후 smoke:** 배열·객체형 event/kind 네 입력은 수정 전 모두 TypeError였고, 수정 후 실제 CLI(`/dev/stdin`)에서 뒤의 정상 UWB1.25m·원시 framework 시각을 보존했다. 1.25m는 합성 입력이다. 실제 컴파일된 sink의 writer를 latch로 막고 큐를 채웠을 때 `sync(20)`은 수정 전300ms 뒤에도 미반환, 수정 후 writer 해제 전에 false를 반환했다. 해제 후 pending0이며 이 smoke는 디스크 파일을 만들지 않았다.
+- **APK 확인:** 초기 v54의 `aapt2` 검사에서 min/target36, `RANGING` 선언과 `INTERNET`/`UWB_RANGING` 미선언을 확인했다. 버전·Manifest는 유지했다. 설정 버전 표시 추가 후 APK의 `versionCode54`·`0.54.0-probe`를 다시 확인했으며, 현재 `app-debug.apk` SHA-256은 `d2d6d8366b39e58496c681809976570e1eca09e8e27ace073f5dc771e1cb9699`다.
+- **기기 경계:** 데이터 보존 설치·홈/설정 진입·버전 표시는 확인했다. UWB 권한 승인·공식 앱 조작·차량 TX는 하지 않았다. UWB 실제 UI 동작·HOME/잠금·다중 endpoint의 OEM callback·native close timeout/부분 실패·실제 거리·차폐·배터리·공식 폰키 동시 사용은 미검증이다.
+- **설정 버전 표시:** 설정 → 앱 정보에 `BuildConfig` 기반 버전 이름·빌드 번호를 추가했다. 앱·계측 APK 빌드, JVM378개 통과·Lint 오류0/경고16개를 확인했다. JShell에서 생성된 클래스의 값과 APK 메타데이터를 대조했고, 2026-10-23 S23 실제 설정 화면의 접근성 UI 계층에서도 `0.54.0-probe (빌드 54)`를 확인했다. 큰 글꼴·TalkBack·픽셀 검증은 미실행이다.
+- **데이터 보존 설치:** APK 해시를 대조하고 `replace=true`로 설치했다. 설치본 v54와 첫 설치 시각 유지, 업데이트 시각 `2026-10-23 07:38:52`를 확인했다. 설치 전 파일594개 중 최종591개가 바이트 동일하고 누락0개다. 변경3개는 `files/profileInstalled`, Android `ActivityThread.IDS` 설정, 실행에 따라 갱신된 활성 순환 로그이며 사용자 설정·VIN·녹음 파일은 그대로다. 홈과 저장 설정 모두 서비스 OFF, `dumpsys activity services`에서 앱 ServiceRecord0개·감지/마이크 서비스 없음을 확인했다.
+
+### 다음 실차 확인 절차
+
+1. v54 데이터 보존 설치는 완료했다. 설정 → 앱 정보의 버전을 확인한다. 기존 앱 키를 재등록하거나 BLE 차량 인식 시험을 반복하지 않는다.
+2. 홈 **서비스 사용 OFF**, 휴대전화 UWB 설정 ON 상태에서 **설정 → 개발자 진단 → UWB**로 이동한다. 필요한 `RANGING` 권한은 사용자가 직접 허용한다.
+3. 차량 근처에서 **거리 진단 시작**을 누른다. 인증/협상/세션 시작과 **실제 peer별 m·confidence·유효 수신 횟수**를 따로 기록한다. 미수신·시간 초과·실패는 성공으로 취급하지 않는다. 거리 변화가 관측돼도 마이크·프렁크·탑승 판정에는 연결하지 않는다.
+4. **거리 진단 정지**, 화면 이탈·HOME·잠금을 각각 확인하고 USB 로그를 회수한다. v23 `TESLA_UWB_*` 사건과 `uwbLastDistanceMeters`·framework 원시 시각·callback elapsed·open/close 사유로 실제 수신과 종료를 분석한 뒤 다음 단계 여부를 결정한다.
+
+capabilities 빈 응답의 차량측 의미·config5 individual 호환·주소 byte order·framework 시각 기준은 미확정이다. 자세한 근거는 [v54 Tesla UWB 계약](Tesla-Integration.md#v54-수동-tesla-uwb-거리-진단)을 따른다.
+
+
+## 0.53.0-probe — 홈 서비스 제어와 감지만 복원
+
+### 변경 범위
+
+- 홈의 **서비스 사용 ON/OFF**가 고정된 광고명 감지 전용 서비스를 제어한다. 저장 ON과 실제 시작·스캔·정리·복원 제한 상태를 구분하고, 권한 상실·시작 실패에도 OFF를 허용한다.
+- 개발자 진단의 BLE/접근 탭·비교 옵션·자동 마이크 계측 동의와 홈/설정의 주말 BLE 시험 표시를 제거했다. 음성·수동 마이크·UWB·차량 키·이벤트, VIN 등록과 기존 취소·화면 이탈 정리는 유지한다.
+- 기존 `BleDetectionRecoveryReceiver`의 `BOOT_COMPLETED`·`MY_PACKAGE_REPLACED`를 재사용한다. ON 설정만 새 감지 세션으로 복원하고, OFF·사용자 종료·권한/OS 제한을 존중한다. 마지막 명시 ON보다 오래된 종료 이력이 복원을 계속 막지 않도록 시각을 함께 저장하며, 자동 복원은 이 시각을 갱신하지 않는다.
+- 실제 스캔 소유자인 AltBeacon `BeaconService`의 manifest·`startForeground()`를 등록 차량 Bluetooth 감시에 맞는 `connectedDevice`로 통일했다. 불필요한 location FGS 권한을 제거했으며 백그라운드 위치 권한은 추가하지 않았다. 기존 Bluetooth·위치·알림 준비 검사는 유지한다.
+
+### 실제 검증
+
+- 앱·계측 APK 빌드 성공, JVM **357개** 실패/오류/건너뜀 0, 앱 범위 Lint **오류 0·경고 16**을 확인했다.
+- S23 관련 계측을 분리 실행했다. 서비스·VIN runtime 및 활성화 저장 **18개**, 기존 차량 키 UI **8개**, VIN UI **2개**, 홈 서비스 UI **2개**가 통과했다. 홈 회귀는 복원 실패·권한 상실 화면에서도 실제 토글 OFF와 영속화를 수행하고, 화면 재진입이 무단 서비스/오디오 시작을 만들지 않는지 검증한다.
+- 초기 UI 계측의 도구 `DeviceServer`/`UiAutomation` 점유를 해제하고, 시험용 키 alias namespace·탐색 deadline 및 Android 접근성 라벨/토글 관계를 바로잡았다. checked/enabled·OFF 실행·저장 결과 단언을 제거하지 않았다.
+- 실제 홈에서 서비스 ON, HOME 이동 뒤 감시 유지, `BeaconService` foreground 유형 **`0x10`(connectedDevice)**·foreground 알림 소유자 1개를 확인했다. 마이크 서비스는 없었다.
+- 저장 ON 상태로 앱을 백그라운드에 둔 뒤 같은 앱을 `adb install -r`로 업데이트했다. 화면을 열기 전 새 프로세스의 복원 요청·감지 시작과 실제 connectedDevice FGS를 확인했다. 자동 마이크 false, 차량 명령 요청·전송 상태 false였다. **이는 실제 `MY_PACKAGE_REPLACED` 복원 smoke이며 물리 재부팅 시험은 아니다.**
+- 실제 홈에서 OFF를 실행하고, 비동기 `BLE_FIELD_STOPPED` 뒤 저장 OFF·`ObservationService`/`BeaconService`/`MicrophoneService` 없음·foreground 알림 소유자 0개를 확인했다. 이후 OFF 설정의 데이터 보존 업데이트와 앱 재진입에서도 감지는 시작되지 않았다.
+- 홈 → 설정 → 개발자 진단에서 음성·차량 키·UWB·마이크·이벤트 메뉴 유지와 BLE/접근 메뉴 제거를 실제 UI 계층으로 확인했다. 전면 앱 확인 뒤 스크린샷은 `FLAG_SECURE`로 본문이 검게 나왔다. 보호 정책을 해제하지 않았으며 **픽셀 기반 시각 검증은 미완료**다.
+- 설치 전 보존·순환 로그 5개를 Git 제외 영역에 보관했다. 첫 설치 직후 사용자 VIN·녹음·설정 54개 파일이 바이트 동일했고, 모든 조작 뒤 VIN·녹음 52개 파일이 동일했다. 서비스 ON/OFF·독립 계측 설정 기록으로 DataStore와 활성화 설정은 갱신됐으며, 사용자 데이터·키·차량 등록은 초기화하지 않았다.
+- 최종 설치는 `0.53.0-probe`이며 서비스 사용 **OFF**로 원래 설정을 돌려두었다. 마이크·차량 명령은 실행하지 않았다.
+
+### 사용자 확인 및 한계
+
+1. 홈의 **서비스 사용**을 ON으로 두고 실제 감시 상태를 확인한다.
+2. 휴대폰을 정상 재부팅하고 최초 잠금 해제 뒤 감지 서비스가 복원되는지 확인한다.
+3. OFF로 끈 상태에서는 재부팅 뒤에도 감지가 켜지지 않는지 확인한다.
+
+물리 재부팅·잠금 장기 유지·강제 종료 이후의 OS 동작·OEM 배터리 관리·큰 글꼴·실제 TalkBack 낭독은 이번에 실행하지 않았다. 사용자 강제 종료를 우회하거나 자동 마이크·탑승 판정·음성 실차 개방을 추가하지 않는다.
+
+## 0.52.0-probe — sherpa-onnx zipformer 진단 그림자 인식
+
+### 변경점
+
+- 사용자가 승인한 추가: sherpa-onnx 1.13.8 AAR(Apache-2.0, 내부 ONNX Runtime MIT)과 `sherpa-onnx-zipformer-korean-2024-06-24`(icefall KsponSpeech zipformer transducer, int8, Apache-2.0)를 **음성 인식 진단(`SpeechRecognitionProbe`)의 그림자 인식기**로만 붙였다. **v47~v49 Moonshine의 재도입이 아니다.** `.local-models/assets/moonshine-ko/`는 사용하지 않고 보존한다.
+- 명령 판정(`FrunkVoicePolicy`, `recognitionOutcome`)은 Android 내장 `SpeechRecognizer` 결과로만 내린다. 실차 음성 시험(`FrunkVoiceProbe`)에는 붙이지 않는다.
+- 인식 설정: `modified_beam_search`, `maxActivePaths=16`, 핫워드 "헤이 테슬라"·"프렁크 열어줘"(`hotwordsScore=3.0`, `modelingUnit="bpe"`, `bpe.vocab`), `numThreads=2`, 16 kHz·80-dim.
+- 화면: 음성 진단 결과 아래 RAM 전용 행 "실험용 로컬 인식"(값 "sherpa-onnx · 명령 판정·차량 제어에 사용 안 함"), "로컬 인식 원문"(실패 시 "결과 없음 · 실패 코드" — `SHADOW_MODEL_MISSING`/`SHADOW_LOAD_FAILED`/`SHADOW_DECODE_FAILED`), "로컬 시험 문장 일치"(예/아니오/미판정), "로컬 호출어·명령 판정", "로컬 처리 시간"("모델 로드 N ms · 인식 N ms")과 안내 "로컬 인식 원문도 화면에만 표시합니다 · RAM 전용 · 위 판정·dry-run·저장 녹음 결과에 반영 안 함".
+- 개인정보: 네트워크 권한·클라우드 전송 없음. 그림자 원문은 v0.51 n-best와 같은 규칙으로 RAM에만 두고 다음 시험 시작·프로세스 종료 시 사라지며, 사용자 취소 시험에는 표시하지 않고 로그·이벤트·요약·녹음 저장소에 쓰지 않는다.
+- 빌드: `.local-models/`는 Git 제외이므로 새 클론은 `python3 tools/prepare_sherpa_ko.py --download`가 먼저 필요하다. APK는 arm64-v8a만 포함(native 약 32 MB), 모델 asset 약 76 MB(onnx 무압축), 디버그 APK 146,245,204 B. 라이선스 고지 3개를 `app/src/main/proto/licenses/`에 두어 APK 루트에 동봉한다.
+
+### PC·기기 replay 근거(표본 작음)
+
+- 화자 1명의 S23 직접 마이크 녹음 10개(무관 발화 1개 포함)와 합성 TTS 3개. PC sherpa(`p16_s3.0`)와 S23 기기 replay가 같은 4개 녹음(`2115129e`·`5a2278cf`·`b003d0aa`·`e820f353`)을 명령 후보로 판정했다. 같은 실녹음에서 Android STT 수락은 `b003d0aa` 1개다.
+- 핫워드 없는 PC greedy·beam은 명령 후보 0개였다. 무관 발화 1개는 두 엔진 모두 미수용. PC 핫워드 점수 2.5–4.0 구간에서 결과가 안정적이었다.
+- `62565728`·`6f4677a9`는 Android 오류 7, 기기 그림자 빈 결과(PC 그림자는 호출어 없음)다.
+- 합성 TTS 3개는 Android 3/3 수락, 그림자 0/3(호출어 부분 오인식). 그림자는 합성 음성에서 호출어에 약하다.
+- 한계: 화자 1명·소표본이라 일반화 근거가 아니다. 저장 녹음 재생이며 사용자 실사용 발화·실차 환경이 아니다.
+
+### 검증 체크리스트
+
+- [x] 빌드: `:app:assembleDebug`·`:app:testDebugUnitTest`(JVM 357, 실패·오류·건너뜀 0)·`:app:lintDebug`(오류 0, 경고 16 — v0.51 대비 +1 `ChromeOsAbiSupport`, arm64 전용의 의도된 결과)·`:app:assembleDebugAndroidTest` 성공
+- [x] APK 내용: `assets/zipformer-ko/` encoder 70,784,728 B·decoder 2,844,692 B·joiner 2,581,421 B 무압축(Stored), `tokens.txt`·`bpe.vocab` 포함, `lib/arm64-v8a/`만 포함, 라이선스 3개 동봉, `INTERNET` 권한 없음
+- [x] 기기 replay(`SpeechRecordingReplayDeviceTest#replayAll`, 데이터 보존 설치본): 실패 0, 명령 후보 4개가 PC와 같음
+- [x] 원문 미기록(합성 dry-run·replay 범위): 시험 이후 전체 logcat 시험 문장 키워드 0건, 앱 sherpa 로그는 native 라이브러리 로드 1줄, `events-v2.jsonl`의 v0.52 이벤트 11줄에 한글·shadow 필드 없음, replay `HTSTT` 그림자 13줄 한글 0. 마이크 시험 녹음 `runs/`·RAM 이벤트 직접 관측은 미실행. replay 테스트의 Android n-best 원문 `HTSTT` 출력은 v0.52 이전부터 있던 테스트 프로세스 한정 동작이다
+- [x] UI dry-run(합성 한국어 파일 PCM, 2026-10-22 14:30): Android 시험 문장 일치 "예"·"호출어 확인 · 명령 후보 (전송 안 함)", 그림자 시험 문장 일치 "아니오"·"호출어 없음", "모델 로드 773 ms · 인식 89 ms", "차량 전송 안 함". `FLAG_SECURE`로 화면 캡처 대신 접근성 트리로만 확인. 실차 음성 시험·동의 체크는 누르지 않음
+- [ ] asset 누락 시 크래시 없이 `SHADOW_MODEL_MISSING` 표시 — 미확인
+
+### 사용자 실사용·실차 근처 시험 절차
+
+1. 설정 → 개발자 진단 → 음성 → "차량 미전송 · dry-run 입력 선택"에서 **직접 마이크** 또는 **녹음 후 PCM**을 고른다. 실차 음성 시험·동의 체크는 건드리지 않는다.
+2. "선택한 입력으로 진단 시작"을 누르고 "헤이 테슬라 프렁크 열어줘"를 말한 뒤 "입력 종료"가 보이면 누른다. 휴대폰은 입에서 20–30 cm 떨어뜨리고(클리핑 방지) "헤이" 뒤에 짧게 쉰다. 마이크 시험은 기존 v49 동작대로 녹음·1순위 결과를 전용 파일에 보관한다.
+3. 결과에서 Android 후보(`후보 N`)·판정과 "로컬 인식 원문"·"로컬 시험 문장 일치"·"로컬 호출어·명령 판정"·"로컬 처리 시간"을 비교한다. 그림자 결과는 차량 실행 허가가 아니다.
+4. 여러 번 반복한 뒤 USB를 연결해 로그 분석을 요청한다.
+
+### 한계
+
+- 화자 1명·소표본 근거뿐이다. 실차 음성 시험 경로에는 적용하지 않았고 명령 판정에 반영하지 않는다. 그림자는 시험마다 모델을 로드해 결과 표시가 약 1–2 s 늦어진다. 합성 음성 호출어에 약하다. 배터리·연속 발화·다른 화자 정확도는 미검증이다.
+
+## 0.51.0-probe — 시험 인식 후보 화면 표시
+
+### 변경점
+
+- 사용자가 승인한 정책 변경: 사용자가 직접 시작한 시험의 n-best 인식 후보 원문을 진단 화면에 표시한다. RAM 상태에만 두며 다음 같은 시험 시작이나 프로세스 종료 때 사라진다. 파일·일반 로그·RAM 이벤트·`SpeechTrialSummary`·필드 스냅샷에는 넣지 않는다.
+- `SttTranscript`(앞 3개 후보와 전체 개수)를 `FrunkVoiceState.transcript`(`transcriptAccepted`·`transcriptReason` 포함)와 `SpeechTrialState.transcript`에만 둔다.
+- 진단 → 음성: 실차 음성 시험 영역에 `인식 판정`(수락 또는 차단 사유)과 `후보 N` 행(따옴표 원문 · 점수)을 표시한다. 0.0 등 미제공 점수는 `점수 미제공(원값 …)`으로 보인다. 후보가 3개를 넘으면 `표시 후보: 전체 N개 중 3개`, 없으면 `후보 없음`과 RAM 전용 안내를 표시한다. 일반 STT 시험은 합성·무음을 포함한 모든 모드에서 같은 행을 보이며, 사용자가 취소한 회차는 표시하지 않는다.
+- 판정 정책·로그 마스킹(`[마스킹]`, 최대 3후보·160자)·안전 게이트는 v0.50과 같다. 녹음 run 결과 JSON의 인식 원문 저장은 v49 이후 기존 동작이며 v0.51은 새 파일 출력을 추가하지 않는다. **표시된 후보나 문장 일치는 차량 제어 허가가 아니다.**
+
+### 검증 상태
+
+- 호스트: JDK21 `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug :app:assembleDebugAndroidTest` 성공. JVM 357개 실패 0, Lint 오류 0·경고 15(v0.50과 동일). 배선 확인에 그치는 단위 테스트는 추가하지 않았다.
+- S23(SM-S918N, Android 16): v0.50 위에 앱 APK를 `adb install -r`로 설치해 `versionCode=51`/`0.51.0-probe`(`lastUpdateTime=2026-10-22 12:57:55`)를 확인했다. 설치 전후 로그·VIN 저장 파일·DataStore 해시가 같았고, 녹음 8개 폴더·파일 30개의 최신 수정 시각이 설치 시각보다 앞섰다.
+- 일반 STT 합성 시험 1회(UI 계층): `후보 1 "헤이 테슬라 프렁크 열어 줘" · 점수 미제공(원값 0.0)`, `후보 2 "헤이 테슬라 프렁크 열어줘" · 점수 미제공(원값 0.0)`, RAM 전용 안내, `최종 결과 수신`·`시험 문장 일치` 예. 실차 음성 시험 영역은 대기 상태였고 동의 체크박스는 체크하지 않았으며 실차 음성 시험은 시작하지 않았다.
+- 앱 프로세스 logcat에서 `프렁크|열어 ?줘|테슬라` 일치 0건. `HTSTT` 원문 행은 계측 테스트 `SpeechRecordingReplayDeviceTest` 프로세스에서만 나왔다. `fieldSnapshot()`은 명시적 키 목록이라 후보가 포함되지 않음을 코드로 확인했다.
+- 미검증: 실차 음성 시험의 후보·판정 표시(컴파일 수준), 두 번째 시험 시작 때 이전 후보 제거(코드상 시작 시 새 상태로 교체), 3개 초과 후보 표시, 사용자 발화 정확도·실차 성공. `FLAG_SECURE`로 **픽셀 기반 시각 검증 미완료**. 감지 상태는 OFF다.
+
+## 0.50.0-probe — Android 온디바이스 SpeechRecognizer 전환
+
+### 근본 원인
+
+1. 기존 인식 경로가 `EXTRA_MAX_RESULTS 1`과 `firstOrNull`/`singleOrNull`로 첫 후보만 봤다.
+2. 기존 `FrunkVoiceProbe`가 `onSegmentResults`를 `FRUNK_VOICE_FINAL_REQUIRED`로 처리했다.
+3. S23 Google 인식 서비스의 confidence가 항상 0.0이라 0.85 게이트를 통과할 수 없었다.
+4. 음향 변형 인식이 나왔다: 페이/해이/해의/a 테슬라, 브렁크/프랑크.
+5. Moonshine(v47~v49)은 빈 결과나 “브렁크”를 반환했다.
+6. 일부 저장 녹음은 무음·주변 대화만 담겨 error 7(`NO_MATCH`)이었다.
+7. 마스킹 어휘에 “열어”·“줘”가 없었다.
+
+### 변경점
+
+- `MoonshineRecognizer.kt`, `tools/prepare_moonshine.py`, `app/src/main/assets/licenses/`, sherpa AAR 의존성, `.local-models/assets` srcDir, `noCompress`를 제거했다. `.local-models/` 폴더와 gitignore 항목은 보존하되 쓰지 않는다.
+- `SpeechMicCapture`가 16 kHz mono PCM을 최대 10초/320,000 bytes 캡처하고, `SpeechRecordingStore`가 개발 시험 녹음을 `no_backup/speech-recordings/<id>/`에 보관한다(정책 불변).
+- `AndroidPcmRecognizer`가 같은 PCM을 `EXTRA_AUDIO_SOURCE` 파이프에 non-blocking으로 쓰고 `EXTRA_SEGMENTED_SESSION`의 `onSegmentResults`를 결합한다. 비segmented 모드는 S23에서 결과가 null이었고 `EXTRA_BIASING_STRINGS`는 효과가 없었다. 타임아웃은 운영 15초, 재생 테스트 30초다.
+- `FrunkVoicePolicy`: 후보 중 하나라도 정규화 후 `헤이테슬라프렁크열어줘`와 정확히 일치하면 수락, 하나라도 `취소`/`열지마`를 포함하면 차단한다. 점수 0.0·−1·null·비유한값은 “점수 미제공”으로 기록하고 신뢰도 게이트를 생략하며, 실제 점수는 0.85 이상이어야 한다. 발음 변형 문자열은 수락하지 않는다. 인식기 실패는 부분 세그먼트가 있어도 명령 없음이다.
+- P·HANDOFF 5초·명령 10초·안전 동의 게이트는 그대로다. **STT 일치는 차량 제어 허가가 아니다.**
+- 마스킹 어휘에 “열어”, “줘”, “해이”, “페이”, “브렁크”, “프랑크”를 추가했다.
+
+### 재생 절차
+
+- `connectedAndroidTest`는 앱을 제거·재설치해 저장 녹음을 지울 수 있으므로 쓰지 않는다. 앱·계측 APK는 `adb install -r`로 데이터 보존 설치한다.
+- `python3 -B tools/speech_recordings.py --serial DEVICE_SERIAL replay --id RECORDING_UUID`는 `SpeechRecordingReplayDeviceTest#replaySavedRecording`(`-e recordingId`)으로 저장 녹음을 온디바이스 STT로 재인식하고 결과를 해당 녹음의 `runs/`에 추가한다.
+- `replayAll`은 fixture와 모든 저장 녹음을 정책에 통과시켜 `HTSTT` 태그 로그만 남기고 저장하지 않는다. `adb logcat -d -s HTSTT:I`로 확인한다.
+
+### 검증 상태
+
+- 호스트: JDK21 `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug :app:assembleDebugAndroidTest` 성공. JVM 357개(실패·오류·skip 0), Lint 오류 0·경고 15, `tools` 단위 테스트 141개 통과. 디버그 APK에 sherpa/onnx/Moonshine 항목 없음.
+- S23(SM-S918N, Android 16): v0.49 위에 앱·계측 APK를 `adb install -r`로 설치해 `versionCode=50`/`0.50.0-probe`를 확인했다. 설치 전후 순환 로그 4개·`registered.enc`·DataStore 해시, 녹음 파일 27개, 현재 로그 앞부분 해시가 같았다.
+- `replayAll` 1개 통과. 결과(점수는 모두 0.0, 인식기 판정 기준):
+
+  |입력|상위 후보|결과|
+  |---|---|---|
+  |fixture(합성)|헤이 테슬라 프렁크 열어 줘|수락|
+  |`a77cf896`|헤이 테슬라 프렁크 열어 줘|수락|
+  |`2115129e`|헤이/해이 테슬라 브렁크 열어 줘|문법 차단|
+  |`5a2278cf`|해의 테슬라 브렁크 열어 줘|문법 차단|
+  |`c722ad73`|해의/a 테슬라 프렁크 열어 줘|문법 차단|
+  |`ca38f7fa`|주변 대화(원문 생략)|문법 차단|
+  |`62565728`, `6f4677a9`|없음|error 7|
+
+  fixture는 이전 실행에서 “페이 테슬라 …”였으므로, 같은 PCM이라도 실행마다 후보가 달라질 수 있다.
+- `savedSyntheticSpeechDecodesIdentically` 1개 통과.
+- 진단 → 음성 탭은 UI 계층으로만 확인했다. 새 문구가 표시되고, 동의 체크박스가 활성이며 차단 사유 문구가 없었다. `FLAG_SECURE`로 픽셀 기반 시각 검증은 하지 못했다. 감지 상태는 OFF(`PROCESS_START_OFF`)다.
+- **실차 미검증.** 실시간 마이크 캡처 → 인식 경로와 사용자 발화 결과는 실차 시험 후 기록한다.
+
+## 0.49.0-probe — 녹음 기본 저장·체크 단계 제거
+
+### 실제 검증
+
+- JDK21로 `:app:assembleDebug`, `:app:assembleDebugAndroidTest`, `:app:testDebugUnitTest`, `:app:lintDebug` 성공. JVM 345개 실패·오류 없음.
+- 루트 `lintDebug`는 별도 `altbeacon` 모듈의 기존 권한 등 36개 오류로 실패했다. JDK17에서는 lint 내부 `List.removeLast()` 오류도 발생했으며 앱 범위 검증은 Android Studio JDK21로 실행했다. 전체 저장소 lint 통과 주장이 아니다.
+- S23 데이터 보존 설치 후 v49 확인. 기존 XML 설정 22개 동일·기존 로그 5개 접두부 보존.
+- 실제 UI 계층에서 저장 체크 제거·기본 저장 안내·실차 1회 안전 동의 유지를 확인했다. 직접 마이크 선택만으로 저장 회차가 늘지 않았다.
+- 저장 체크 없이 시작 버튼만 눌러 마이크 시험을 연속 2회 실행했다. WAV 310,444바이트·316,204바이트와 각 최종 빈 인식 결과 파일이 저장됐다. 주변음 smoke이며 사용자 발화 정확도 검증이 아니다.
+- 종료 후 앱 서비스 없음·설정 지문 동일. 화면 캡처 차단은 유지하며 픽셀 기반 시각 검증은 미완료다. 차량 명령은 실행하지 않았다.
+
+### 차량 없는 발화 수집
+
+1. 설정 → 개발자 진단 → 마이크 → `차량 미전송 · dry-run 입력 선택`에서 **직접 마이크** 선택.
+2. 별도 체크 없이 **선택한 입력으로 진단 시작**을 누른다.
+3. 녹음 중 “헤이 테슬라 프렁크 열어줘” 발화 후 결과까지 기다린다. 반복 시험도 시작 버튼만 누른다.
+4. USB 연결 후 분석을 요청한다. 녹음·최종 원문은 기본 보관되며 ADB 회수·휴대폰 재인식이 가능하다.
+
+화면 진입·복원·복귀만으로 녹음하지 않는다. 실차 1회 안전 동의는 별개이며 현재 신뢰도 미제공으로 프렁크 전송은 차단된다. 자동 업로드·백업·삭제는 하지 않는다.
+
+## 0.48.0-probe — 시험 녹음 저장·USB 회수·휴대폰 재인식
+
+### 실제 검증
+
+- `assembleDebug`, `assembleDebugAndroidTest`, `testDebugUnitTest`, `lintDebug` 성공. JVM 345개·호스트 도구 141개 테스트 실패 없음.
+- S23 데이터 보존 교체 설치 후 `versionCode=48`·`0.48.0-probe` 확인. 기존 XML 설정 22개와 로그 5개를 설치 전후 비교했다. 앱 실행 후 변경된 설정은 Android 프레임워크의 `android.app.ActivityThread.IDS.xml` 내 `IDSCount`뿐이다.
+- `SpeechRecordingReplayDeviceTest#savedSyntheticSpeechDecodesIdentically` 기기 시험 통과. 저장 전후 PCM 및 native 인식 결과 동일. 합성 문장의 “브렁크” 오인식은 그대로이며 정확도 합격이 아니다.
+- 실제 진단 UI에서 `직접 마이크` → 이번 시험 저장 동의 → 시작을 실행했다. WAV 311,084바이트와 최종 빈 인식 결과를 저장·회수했다. 별도 발화를 요청하지 않은 주변음 smoke이며 사용자 명령 인식 시험이 아니다.
+- 시작 후 저장 동의가 해제됨을 UI 계층으로 확인했다. 동의하지 않은 다음 직접 마이크 시험도 종료됐으며 저장 회차가 추가되지 않았다.
+- 합성 음성과 실제 마이크 녹음 각각 `tools/speech_recordings.py`의 `list`·`fetch`·`replay`·재회수를 실행했다. 재인식은 휴대폰 Moonshine에서 수행됐고 기존 WAV·메타데이터·결과 파일은 동일하게 보존되며 새 결과만 추가됐다.
+- 종료 로그에서 감지 OFF·세션 비활성, `dumpsys activity services com.heytesla.app`에서 서비스 없음을 확인했다. 일반 로그의 원문 마스킹과 신뢰도 `null`·0.85 안전 조건을 유지한다. `FLAG_SECURE`를 유지했으며 픽셀 기반 시각 검증은 미완료다.
+
+### 당시 차량 없는 발화 수집(v48, v49에서 저장 체크 제거)
+
+1. 설정 → 개발자 진단 → 마이크 → 아래 `차량 미전송 · dry-run 입력 선택`에서 **직접 마이크** 선택.
+2. **이번 시험 녹음과 인식 원문 저장 동의** 체크 → **선택한 입력으로 진단 시작**.
+3. 녹음 중 “헤이 테슬라 프렁크 열어줘” 발화 후 결과까지 대기. 회차마다 저장 동의를 다시 체크한다.
+4. USB 연결 후 분석을 요청한다. 개발자가 ADB로 녹음·결과를 Git 제외 `.local-recordings/`로 회수하고 같은 녹음을 휴대폰에서 재시험한다. 사용자가 PC 도구를 직접 실행할 필요는 없다.
+
+녹음은 앱 내부 백업 제외 전용 영역에 저장하며 자동 업로드·자동 삭제하지 않는다. 저장 녹음 재시험은 마이크를 열거나 차량 명령을 보내지 않는다. 이번 버전은 발화가 맞아도 신뢰도 미제공으로 프렁크 전송이 차단되며, 차량 개방 시험과 구분한다.
+
+## 2026-09-22 기존 0.1.0-probe 실기기 결과
+
+### 환경과 실행 근거
+
+- AGP 9.3.1, Gradle 9.5.0, Android Studio bundled JDK 21.0.10, compile/min/target SDK 36, Build Tools 36.0.0. Compose compiler plugin 2.4.10, BOM 2026.06.01.
+- 실행: `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon`. APK 생성 및 S23 Ultra 설치·실행 성공. 정책 테스트 5개 통과, Lint 오류 0·경고 12개. 남은 경고는 최신 SDK/의존성 안내와 문자열·KTX 권고다.
+- Gradle wrapper JAR와 배포 ZIP의 공식 SHA-256을 확인하고 버전을 고정했다. SDK 환경 변수 경로 불일치는 로컬 설정과 해당 빌드 프로세스의 환경에서 해결했으며 전역 설정은 변경하지 않았다.
+- 최종 APK 권한 목록에 `INTERNET`, `BLUETOOTH_SCAN`, 위치 권한이 없다. CDM이 시스템 검색을 담당하고 앱은 Bluetooth 연결/상태 권한만 요청한다.
+- 사용자가 마이크·Bluetooth 상태·알림 권한을 승인한 상태에서 시험했다. 기본 비서는 이 앱으로 변경되지 않았고, 차량 association은 없었다. ADB 권한 부여·제한 우회는 사용하지 않았다.
+- `AssistantService`의 시스템 서비스 등록을 확인했다. 기본 비서 선택과 실제 백그라운드 예외 적용은 미검증이다. 필수 `recognitionService`는 모든 STT 요청을 비지원 오류로 거절하며, 호출어/STT 구현이나 성공을 뜻하지 않는다.
+
+### 실제 시험 결과
+
+| 시험 | 관측 결과 | 증거 범위 |
+| --- | --- | --- |
+| 초기 실행·설정 UI | DRY-RUN, STT OFF, 권한 상태, association 없음, 세션 대기 표시 | 실제 기기의 UI 요소 조회. `FLAG_SECURE`로 스크린샷 본문은 가려져 픽셀 기반 레이아웃 검증은 수행하지 못함 |
+| 수동 10초 세션 | 실제 샘플 151,040개 표시, `silenced=false`, `SESSION_EXPIRED` | 요청→종료 이벤트 약 10.045초, OS `RECORD_AUDIO` 사용 약 9.818초. 샘플 수는 마지막 UI 집계값이며 음성 인식·정확도 측정이 아님 |
+| 사용자 즉시 종료 | 활성 세션 입력 확인 후 `USER_STOP`, 세션 ID 제거 | OS 녹음 사용 약 1.893초 |
+| 수동 세션 중 화면 이탈 | HOME 이동 후 `MANUAL_UI_HIDDEN`, 세션 ID 제거 | OS 녹음 사용 약 1.897초. 자동 접근 세션의 화면 이탈 동작과 혼동하지 않음 |
+| 각 세션 종료 | 앱의 실행 중 서비스 없음, 녹음 사용이 종료된 duration으로 표시됨 | 앱 범위 `dumpsys activity services`, `cmd appops get ... RECORD_AUDIO` 읽기 진단 |
+| 빈 VIN | `VIN_FORMAT_INVALID` | 실제 차량 선택·검색 성공은 아님 |
+| 차량 미등록 상태 활성화 | `ASSOCIATION_REQUIRED`, 자동 세션 미시작 | 시험 후 기능·저장 선호 OFF, `OBSERVE_STOPPED`, `DISABLED` 확인 |
+| 세션 정책 회귀 | debounce 중 이탈, 중복 출현의 만료 연장 차단, 실제 이탈 요구, cooldown, 이전 세션의 늦은 종료: 5개 통과 | 순수 Kotlin 정책 검증이며 OS·실제 BLE·자동 90초 캡처의 증거가 아님 |
+
+Mobile MCP의 요소 ref 클릭이 핸들러를 실행하지 않는 경우가 있어, 최신 UI 계층에서 관측한 버튼 좌표로 시험하고 실제 상태 변화를 확인했다. 권한 승인 버튼은 자동 클릭하지 않았다. 원시 오디오·VIN·Bluetooth 주소·기기 일련번호·계정 정보는 결과 기록에 넣지 않는다.
+
+### 미검증과 다음 실차 근처 시험
+
+1. 차량 근처에서 사용자가 기본 비서 변경의 영향을 확인하고 직접 선택한다. 기존 비서를 대체하며 일반 STT가 비지원 상태가 되므로, 시험 뒤 앱의 복원 설정 버튼으로 이전 비서를 다시 선택할 수 있다.
+2. 실제 VIN은 앱에만 입력하고 시스템 CDM chooser에서 대상 차량을 직접 승인한다. 공식 Tesla `VehicleLocalName`과 같은 광고명 필터를 사용하지만, 광고 노출과 주소 안정성·주소 회전에서의 presence 동작은 아직 확인하지 않았다. CDM 검색에는 위치 서비스가 필요할 수 있다.
+3. 이번 프로세스에서 기능을 활성화하고, USB를 분리해 실제 이탈→잠금·주머니→접근을 시험한다. 앱 실행·알림 터치 없이 `REAL_BLE_APPEARED`와 실제 마이크 입력이 나타나는지 확인한다.
+4. 이탈, 90초 정책 만료, 기본 비서 교체, 권한 철회, 통화·다른 앱의 마이크 경합에서 종료를 확인한다. 이러한 자동 경로와 silenced 전환은 이번에 실측하지 않았다.
+5. 이후 USB를 다시 연결해 비민감 이벤트를 확인한다. 원거리 장기 대기·절전·배터리·재부팅·프로세스 복구는 별도 시험이다.
+
+**6단계는 사용자 참여 대기이며 미통과다.** 현재 구현은 프로세스가 새로 생성되면 실행 OFF로 시작한다. 이전 마이크 세션을 복원하지 않으며, 정상 프로세스 종료 후 무터치 접근 대기 복원까지 완성됐다고 주장하지 않는다. 시험 앱은 종료 시각·샘플 집계·이벤트만 RAM에 두며, 다음 빌드나 프로세스 종료 전에 필요한 비민감 결과를 기록한다.
+
+## 2026-09-22 0.2.0-probe 지원 진단
+
+### 구현과 호스트 검증
+
+- `versionCode=2`, `versionName=0.2.0-probe`. `MainActivity`의 5번에 **녹음 없이 한국어 지원 확인**을 추가했다. 온디바이스 전용 `SpeechRecognizer`로 `ko-KR` 요청의 메타데이터만 조회하며 실제 음성 인식이나 모델 다운로드는 하지 않는다.
+- `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon --console=plain` 실행: **BUILD SUCCESSFUL**, 정책 테스트 7개(기존 세션 5개, 새 지원 판정 2개), 실패·오류·건너뜀 0. Lint 오류 0·경고 12개이며 기존 새 버전·문자열·KTX 권고를 숨기지 않았다.
+- 실제 컴파일된 `SpeechSupportPolicy`/`SpeechSupportMetadata`를 호스트 JVM에서 별도 실행했다. 다운로드 대기·다운로드 가능·온라인 보고는 설치 완료가 아니며, 일반 한국어 태그는 참고로만 남고, 대소문자만 다른 정확한 `ko-KR`은 설치 보고로 취급하는 스모크를 통과했다. 잘못된 구분자·공백·확장 태그도 정확 일치로 승격하지 않았다.
+- 스모크는 기존 Gradle의 Groovy 실행기로 메모리 내 스크립트를 실행했으며 별도 스크립트 파일·음성 파일을 생성하지 않았다. Android 서비스·실기기 응답을 모의 성공으로 대체한 시험이 아니다.
+- 패키징된 APK의 버전·min/target API 36과 권한 목록을 확인했다. `INTERNET`·`BLUETOOTH_SCAN`·위치 권한 추가 없음. 외부 음성 SDK·모델·AccessKey·계정·과금 도입 없음.
+- `SpeechSupportProbe`는 진행 중 중복 조회를 막고, 요청 ID로 늦은 응답을 무시하며, 응답·오류·10초 타임아웃·취소·화면 이탈 때 `destroy()`를 수행하도록 구현했다. 실기기에서 정상 응답·재조회·완료 결과의 화면 이탈 보존을 확인했다. 진행 중 취소·무응답 타임아웃·서비스 오류·늦은 콜백 주입은 아직 실측하지 않았다.
+
+### USB 분리와 재연결 결과
+
+이전 작업에서는 USB 분리로 호스트 검증만 마쳤다. 사용자가 휴대전화를 다시 연결한 뒤 같은 `0.2.0-probe` APK를 기존 설정·권한을 보존해 설치하고 실행했다. 앱 코드는 변경하지 않아 재빌드나 기본 마이크 시험을 반복하지 않았다. APK 경로는 `app/build/outputs/apk/debug/app-debug.apk`다.
+
+| 실제 시험 | 관측 결과 | 해석 경계 |
+| --- | --- | --- |
+| 업데이트 설치·초기 UI | 새 지원 조회 섹션 표시, 마이크·Bluetooth·알림 권한 유지, 기본 비서 활성 `false` | 권한이나 기본 비서를 대신 승인·변경하지 않음 |
+| 온디바이스 지원 조회 | `METADATA_RECEIVED`, 온디바이스 서비스 **있음** | 실제 발화는 인식하지 않음 |
+| 정확한 `ko-KR` | 설치 완료 **보고됨**. 다운로드 대기·다운로드 가능·온라인은 보고되지 않음 | 설치 응답 확인이며 모델 다운로드나 네트워크 차단 발화 시험은 아님 |
+| 재조회 | 두 번 모두 `SPEECH_SUPPORT_REQUESTED` → `SPEECH_SUPPORT_METADATA_RECEIVED` | 이벤트 간격은 각각 약 134 ms·79 ms. 지원 조회 응답 시간이며 STT 지연 시간 아님 |
+| 완료 후 HOME → 앱 재진입 | 완료 상태·설치 보고 유지, 조회 버튼 재사용 가능 | 해당 실행에서의 결과이며 프로세스 재생성 보존을 주장하지 않음 |
+| 재조회 직후 HOME 시도 | 79 ms 안에 응답이 먼저 완료되어 재진입 후 완료 상태 유지 | **진행 중 취소 경로를 시험한 것으로 세지 않음** |
+| 오디오 미사용 | 세션 대기·ID 없음·샘플 0, 종료 사유 `PROCESS_START_OFF`. 조회 전후 OS `RECORD_AUDIO` 기록은 한 시간 이상 지난 기존 약 1.897초 사용만 표시, 앱의 실행 중 서비스 없음 | 이번 지원 조회에서 이 앱의 새 마이크 사용이나 microphone FGS 시작이 관측되지 않음 |
+
+실제 UI 계층과 상태 변화로 확인했다. 화면 보호 `FLAG_SECURE`를 유지했으므로 픽셀 기반 레이아웃 검증은 하지 않았다. Mobile MCP에서 스크롤 뒤 이전 계층을 계속 반환하는 현상이 있었고 HOME → 앱 재진입 뒤 실제 이동 위치가 반영됐다. 이를 도구 문제로 보고했으며 권한·설정 우회나 앱 코드 변경으로 덮지 않았다.
+
+**7단계 전체 합격은 아니다.** 온디바이스 서비스와 한국어 설치 응답 확인은 통과했지만 네트워크 차단 실제 발화·외부 PCM 소비·신뢰도·연속 문장 인식·호출어 엔진 최종 채택은 남아 있다. 빠른 정상 응답 때문에 활성 요청 취소·10초 타임아웃·지연 콜백 경합도 미검증이다. 6단계 실차 접근 시험은 별도로 대기하며 후보 선택 근거는 [네이티브 아키텍처](Native-Architecture.md#호출어와-stt)를 따른다.
+
+### 지원 진단의 재현 절차
+
+1. 기존 권한·설정을 보존해 새 APK를 설치하고 앱을 연다. ADB 권한 부여나 기본 비서 변경은 하지 않는다.
+2. 기능과 수동 마이크가 OFF인 상태에서 **5. 온디바이스 한국어 지원 → 녹음 없이 한국어 지원 확인**을 누른다. 말하거나 차량 VIN을 입력할 필요가 없다. 마이크 권한이 없다면 필요 상태만 확인하고 실제 허용은 사용자가 결정한다.
+3. 서비스 있음/없음/미확인, 조회 상태·코드, 네 분류의 정확한 `ko-KR` 보고를 구분한다. 미보고·타임아웃·조회 불가는 실제 한국어 전체 미지원의 증거가 아니다. `SUPPORT_ERROR_14`는 서비스의 지원 조회 불가, `SUPPORT_ERROR_12`는 해당 요청 언어 비지원 응답이며 다른 엔진 전체로 일반화하지 않는다.
+4. 조회 중 취소·화면 이탈·재조회와 완료 후 화면 이탈을 확인한다. 늦은 응답이 새 결과를 바꾸지 않고 조회가 무기한 남지 않아야 한다. 이미 완료된 메타데이터는 같은 Activity의 화면 이탈만으로 지워지지 않아야 한다. Activity 재생성 시 미조회 상태는 정상이다.
+5. 지원 조회 전후 마이크 세션·샘플이 시작되지 않고 microphone FGS가 남지 않는지 확인한다. 설치 보고만으로 실제 인식 성공을 주장하지 않으며 모델 다운로드·외부 SDK 도입은 별도 승인 후 결정한다.
+
+## 2026-09-22 0.3.0-probe 실제 STT·PCM 진단
+
+### 구현과 빌드
+
+- `versionCode=3`, `versionName=0.3.0-probe`, min/target API 36을 설치 기기에서 확인했다. 기존 권한·설정을 보존했으며 기본 비서는 변경하지 않았다. APK 권한에도 `INTERNET`·BLE 스캔·위치 권한 추가 없음.
+- 직접 마이크 인식과 RAM PCM 인계를 별도 버튼으로 제공한다. 두 경로 모두 `ko-KR` 설치 보고·마이크 권한·화면 표시·접근 진단 OFF·기존 캡처 없음이 필요하다. 지원 조회·기존 캡처와 동시 실행하지 않는다.
+- PCM은 16 kHz·mono·PCM16·최대 320,000바이트로 제한한다. 캡처를 종료·해제한 뒤에만 외부 FD를 인식기에 넘긴다. 캡처와 인식은 각각 10초 제한 정책이며 준비·정리 시간은 별도다.
+- 최종 원문 대신 고정 시험 문장과의 일치 여부·첫 결과 신뢰도·최종 응답 여부만 남긴다. 원문·오디오 파일·외부 SDK·모델 다운로드·클라우드 fallback·명령 실행 없음.
+- `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon` 최종 **BUILD SUCCESSFUL**. 기존 정책 테스트 7개, 실패·오류 0. Lint 오류 0·경고 12개. 최초 Lint의 캡처 권한 지적은 생성 직전 재확인과 명시적인 `SecurityException` 처리로 고쳤다. 테스트 7개를 새 STT 동작의 증거로 간주하지 않는다.
+
+### S23 실측과 판정
+
+맥의 설치된 한국어 음성으로 고정 문장을 스피커에 재생했다. 재생 명령은 정상 종료했지만 휴대전화에 도달한 소리의 품질은 확인하지 못했으며 사용자 직접 발화 시험이 아니다. 합성·캡처 음성 파일과 시험 스크립트 파일을 만들지 않았다.
+
+| 시험 | 실제 관측 | 판정 |
+| --- | --- | --- |
+| 새 APK 설치·지원 조회 | 수동 STT 섹션 표시, 정확한 `ko-KR` 설치 보고 유지 | 음성 모델 지원 응답이며 실제 인식 성공 아님 |
+| 직접 마이크 + 문장 재생 | 약 9.519초에 `RECOGNIZER_ERROR_7`, 최종 결과 `false`, 신뢰도 미제공, 예약 `false` | `ERROR_NO_MATCH`. 발화 인식 합격 아님 |
+| 10초 PCM 캡처 → 인계 + 문장 재생 | 159,360샘플·318,720바이트 전송, 약 10.589초에 `RECOGNIZER_ERROR_7`. OS 캡처 사용 약 10.054초 | RAM 캡처·pipe 쓰기·오류 응답 실측. **인식기의 PCM 소비 성공은 미확인** |
+| PCM 캡처 중 HOME → 재진입 | `USER_CANCELED`, 17,280샘플·전송 0바이트, 경과 약 1.342초, 예약 `false` | 인식으로 넘어가지 않고 중단. OS 녹음 약 1.197초 후 종료 |
+| 직접 인식 중 HOME → 재진입 | `USER_CANCELED`, 경과 약 1.452초, 예약 `false` | 진행 중 인식 취소. OS 녹음 약 1.354초 후 종료 |
+| 최종 해제 상태 | 앱 실행 서비스 없음, `RECORD_AUDIO`가 running 아닌 종료 duration으로 표시 | 이 실행 범위의 해제 증거이며 모든 오류 주입 경로를 증명하지 않음 |
+
+화면 보호를 유지한 실제 UI 계층과 앱 범위 OS 진단으로 확인했다. 픽셀 레이아웃은 검증하지 못했다. 이전과 같이 UI 계층이 오래된 내용을 반환하는 경우가 있어 HOME → 재진입·화면 전환 대기 후 실제 상태와 OS 사용 기록을 함께 확인했다. 오래된 좌표를 누른 시도는 새 세션 이벤트가 없어 시험 횟수에 넣지 않았다.
+
+당시 사용자는 **지금 직접 발화 시험이 어렵다**고 선택했다. 따라서 `0.3.0-probe`의 직접 발화·PCM 소비·신뢰도 합격은 보류했고, 이후 아래 `0.4.0-probe`에서 사용자 참여 없는 파일 주입으로 한국어 최종 결과와 외부 PCM 인식을 확인했다. 이전 `NO_MATCH`를 모델 전체 미지원으로 일반화하지 않는다. 7단계 최종 채택이나 8단계 호출어 연결·첫 음절 보존도 합격 처리하지 않는다. 강제 무응답 타임아웃, 권한 철회, silenced 전환, 정리 예외·늦은 콜백 경합은 별도 미검증이다.
+
+### 실제 발화가 가능한 때의 별도 시험
+
+1. 현재 사용자 참여를 요구하는 절차가 아니다. 자동화 가능한 합성 파일 시험을 먼저 진행한다. 실제 발화가 가능한 때 접근 진단 OFF·기존 세션 종료 상태에서 5번 지원 조회를 실행한다. 6번 시험은 정확한 `ko-KR` 설치 보고 뒤 활성화된다. 권한·기본 비서·네트워크 설정을 대신 변경하지 않는다.
+2. **직접 마이크로 한국어 인식**을 누르고 `캡처 중`에 “헤이 테슬라 프렁크 열어줘”를 한 번 말한다. 완료 뒤 문장 일치·신뢰도를 확인한다. 최종 결과가 없거나 신뢰도가 미제공이면 합격으로 보충하지 않는다.
+3. **PCM 녹음 후 한국어 인식**으로 같은 문장을 캡처 중에 말한다. 10초 종료 또는 **녹음 끝내고 PCM 인식** 뒤에는 조용히 기다린다. 결과와 전송량·해제를 확인하되 전송량만으로 소비 성공을 판정하지 않는다.
+4. 사용자 승인 아래 네트워크를 차단한 조건에서도 실제 발화 시험을 따로 수행한다. 현재 결과에는 그 증거가 없다. KWS·자동 접근·명령 파서는 이 진단에 연결하지 않는다.
+
+## 2026-09-22 0.4.0-probe 사용자 참여 없는 TTS 파일 시험
+
+### 고정 입력과 구현
+
+- 당시에는 macOS 한국어 시스템 음성으로 만든 로컬 시험 파일을 사용했다. 아래 측정은 그 파일의 역사 기록이며, 해당 음성은 현재 공개용 자산에 포함하지 않는다.
+
+- 16 kHz·mono·PCM16 little-endian, **35,549샘플·PCM 71,098바이트·2.2218125초**. WAV의 `fmt `·`FLLR`·`data`를 구분해 PCM만 넘기며, 무음 대조는 같은 길이를 0으로 채운다.
+- 현재 자산은 [공개용 합성 WAV](Native-Architecture.md#진단-wav-출처)로 교체했다. 당시 인식 결과는 교체본의 단말 인식 검증을 대신하지 않는다.
+- `versionCode=4`·`versionName=0.4.0-probe`·min/target API 36을 설치 기기에서 확인했다. 앱에 `INTERNET`·자체 BLE 스캔·위치 권한 추가 없음. 기존 권한·기본 비서·네트워크 설정을 바꾸지 않았다.
+- 파일 경로는 앱의 `AudioRecord`·스피커를 시작하지 않는다. 기존 화면 표시·지원 조회·마이크 권한·접근 OFF·오디오 예약 조건과 PCM writer·취소·해제를 공유한다.
+- 첫 구현의 일반 `onResults`는 비어 있었다. 외부 FD에 **`EXTRA_SEGMENTED_SESSION=EXTRA_AUDIO_SOURCE`**를 명시하고 `onSegmentResults`·`onEndOfSegmentedSession`으로 처리하도록 고쳤다. 분절 하나의 신뢰도만 그대로 표시하며 여러 분절의 신뢰도를 임의로 합성하지 않는다.
+- 최종 `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon` **BUILD SUCCESSFUL**. 단위 테스트 **11개**, 실패·오류 0, Lint 오류 0·경고 12개. 추가한 4개 테스트는 WAV filler·padding·포맷·잘림·크기·취소 경계를 방어한다.
+
+### S23 실측과 판정
+
+설치·UI 조작·결과 확인은 자동화했고 **사용자 참여 0회**였다. 차량 명령·기본 비서 변경·권한 승인·스피커 재생은 수행하지 않았다.
+
+| 시험 | 실제 관측 | 판정 |
+| --- | --- | --- |
+| 분절 계약 수정 전 고정 TTS 입력 | 35,549샘플·71,098바이트, 754 ms에 `NO_FINAL_RESULT` | 전송량만으로 성공하지 않음을 재현. 이후 세션 계약 수정 |
+| 수정 후 고정 TTS 입력 | `SEGMENTS_RECEIVED_1`, 최종 결과 `true`, 시험 문장 일치 **예**, 신뢰도 **0.0000**, 596 ms, 예약 `false` | 이 고정 입력의 한국어 최종 인식 확인. 명령 안전성 합격 아님 |
+| 같은 길이의 무음 PCM 대조 | 35,549샘플·71,098바이트, 164 ms에 `RECOGNIZER_ERROR_7`, 최종 결과 `false`, 신뢰도 미제공, 예약 `false` | 예상한 `ERROR_NO_MATCH`. 허위 성공 없이 입력 차이를 반영 |
+| TTS 시작 직후 HOME → 재진입 | `USER_CANCELED`, 예약 `false` | 진행 중 취소와 오디오 예약 해제 |
+| 대조·취소 후 TTS 재실행 | `SEGMENTS_RECEIVED_1`, 최종 결과 `true`, 문장 일치 **예**, 신뢰도 **0.0000**, 442 ms, 예약 `false` | 정리 후 같은 입력으로 재진입 가능 |
+| OS 관찰과 최종 상태 | 시험 전후 AppOps의 과거 녹음 duration `4s707ms` 유지, 마지막 사용 이후 경과 시간만 증가, running 없음. 최종 앱 실행 서비스 없음 | 이 시험 범위에서 새 앱 마이크 사용·남은 서비스가 관측되지 않음 |
+
+596 ms·442 ms는 **미리 생성한 약 2.22초 파일의 진단 시작부터 정리까지**이며 실시간 발화·호출어 지연이나 일반 성능 벤치마크가 아니다. 단순 pipe 전송이 아니라 문장 일치·무음 대조·AppOps를 함께 확인했다. 화면 보호를 유지한 UI 계층과 OS 기록으로 관찰했으며 픽셀 레이아웃은 검증하지 못했다.
+
+**남은 경계:** 신뢰도 `0.0`을 높여 보충하지 않는다. 고정 합성 음성은 사용자 발음·마이크·주변 소음·거리·주머니 음향·잠금·실차 접근을 대체하지 않는다. 기존 직접 마이크·녹음 후 입력은 이번 버전에서 다시 발화 시험하지 않았다. 네트워크를 실제 차단한 조건도 미시험이며 온디바이스 API 사용과 구분한다. 7단계 최종 엔진 채택·8단계 KWS·명령 해석·실차 제어에 연결하지 않는다. 앞으로도 자동화 가능한 입력·대조·실패 경로를 먼저 확인하고 물리 조건만 별도로 남긴다.
+
+## 2026-09-22 0.5.0-probe UI 개편
+
+### 구현과 호스트 검증
+
+- `hey-tesla-ui` 스킬을 적용해 홈·설정·개발자 진단과 공통 차콜 테마를 분리했다. 홈에 짧은 상태와 주 행동 하나를 두고, 진단은 음성·마이크·접근·이벤트 탭과 입력 선택·결과 요약·펼친 상세로 구성했다.
+- 합성 파일이 기본 선택이며 선택만으로 시작하지 않는다. 진행 중 입력 종료·취소는 상단에 고정했다. 진단 목적지·탭 이탈 시 기존 지원 조회·STT·수동 마이크 정리를 명시적으로 호출하며 자동 접근 세션의 수명은 유지한다.
+- `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon` **BUILD SUCCESSFUL**. 기존 단위 테스트 **11개**, 실패·오류 0. Lint 오류 0·경고 **11개**이며 API·라이브러리 버전 및 기존 비서 안내 문자열 권고를 숨기지 않았다.
+- 실제 컴파일된 `HomeScreenKt`·`DiagnosticsScreenKt`의 상태 판정을 호스트 JVM에서 실행했다. **13개 스모크 통과:** 자원 정리 실패·활성 시험·잔류 예약·기존 세션·접근 활성의 차단 사유 우선순위, 온라인 보고의 설치 승격 금지, 마이크·Bluetooth·알림 권한 요약을 확인했다. 기존 Gradle Groovy 실행기로 메모리에서 실행했으며 임시 스크립트·추가 영구 테스트 파일은 만들지 않았다.
+- 실제 `AppTheme.kt`의 불투명 문자 색상 **12조합 최소 6.45:1**을 계산했다. 글자 확대·투명도·비활성 상태·실제 화면 가독성 검증은 아니다.
+- `aapt2 dump badging`으로 APK의 `versionCode=5`, `versionName=0.5.0-probe`, min/target API 36, 앱 이름 `Hey Tesla`를 확인했다. `INTERNET`·자체 BLE 스캔·위치 권한을 추가하지 않았다.
+
+### 미실행 범위와 재연결 후 절차
+
+Mobile MCP에서 Android 연결 기기 0대, ADB에서 USB 기기 없음으로 확인했다. 설치된 AVD는 API 30으로 앱의 최소 API 36을 충족하지 않는다. 따라서 **새 APK 설치·UI 실제 조작·회전·글자 확대·TalkBack·무음 음성 회귀는 실행하지 않았다.** `FLAG_SECURE`는 유지했고 UI 검증을 위해 낮은 API나 보호 해제로 우회하지 않았다. 호스트 스모크는 Android UI·음성 API의 실행 증거가 아니다.
+
+S23 USB 재연결 후 다음을 확인한다. 직접 발화·스피커 재생은 요구하지 않는다.
+
+1. 기존 데이터·권한을 보존해 새 APK를 설치하고 홈 → 설정 → 개발자 진단 진입, 상태·선택·뒤로 이동을 확인한다.
+2. 음성 탭에서 지원 조회 → 합성 파일 양성 → 무음 대조 → 진행 중 취소 → 재실행을 확인한다.
+3. 탭 변경·앱 내부 뒤로/홈·앱 외부 HOME 이탈의 취소와 오디오 예약 해제, 재진입 시 자동 재시작 없음을 확인한다.
+4. AppOps와 실행 서비스로 남은 오디오 점유를 확인한다. 픽셀 캡처가 보안 정책에 막히면 그 한계를 별도로 남긴다.
+
+## 2026-09-29 UI 스킬 강화·적용 실측
+
+- 기존 `hey-tesla-ui`에 화면별 구성 계약과 첫 뷰포트·안전 경계·설치 검수 기준을 추가했다. 홈 카드 제거·타이포 위계, 설정 단일 펼침, 진단 상세 분리와 탭·중지 행동 줄바꿈을 적용했다. 음성 엔진·권한·실차 승인 게이트는 변경하지 않았다.
+- JDK 21.0.10과 동일한 SDK 경로를 빌드 프로세스에 지정해 `:app:assembleDebug :app:lintDebug --no-daemon` **BUILD SUCCESSFUL**(1분 5초, 46개 task)을 확인했다. 이번에는 단위 테스트를 재실행하지 않았다.
+- S23 Ultra Android 16의 기존 `0.4.0-probe`에 `0.5.0-probe` APK를 `adb install -r`로 업데이트하고 MainActivity를 실행했다. 데이터·권한을 초기화하지 않았다.
+- 1080×2316, 450 dpi의 실제 UI 계층에서 홈의 `Model Y`·개발 중/차량 제어 미연결·차량 등록 필요·등록 CTA·준비 상태가 첫 화면에 표시됨을 확인했다.
+- 설정의 차량·권한·기본 비서·앱 정보·개발자 진단 다섯 행이 첫 화면에 나타났다. 차량 상세 펼침에서 VIN 입력과 시스템 선택 승인 설명, 빈 입력의 비활성 제출 버튼을 확인하고 접은 뒤 진단에 진입했다.
+- 음성 진단에서 네 탭, 기본 합성 음성 선택, 조회 전 시험 비활성 상태를 확인했다. 지원 조회 후 **“메타데이터 응답 수신 · 실제 인식 성공 아님”**과 시험 버튼 활성화를 관찰했다. 이를 음성 인식 성공으로 간주하지 않는다.
+- 클릭·스크롤 도구가 성공을 반환해도 화면 계층이 변하지 않는 경우가 있었으며 ADB 입력도 혼용했다. 시험 시작 후 결과 전환을 확인하지 못해 합성 양성·무음 대조·활성 취소·재진입 회귀는 합격 처리하지 않았다. 원인은 확정하지 않았다. 이후 기기가 갤러리로 전환돼 추가 조작을 중단했다.
+- `FLAG_SECURE`를 유지했으며 스크린샷의 앱 영역은 검게 표시됐다. **픽셀·큰 글꼴·회전·TalkBack 검증은 미완료**다. VIN 제출·시스템 승인·실차 명령은 실행하지 않았다.
+- 종료 시 `dumpsys activity services com.heytesla.app`는 `(nothing)`이었다. 임시로 늘린 화면 꺼짐 시간을 원래 `15000` ms로 복원하고 값을 확인했다. 글꼴 배율·회전 설정은 변경하지 않았다. 서비스 없음만으로 모든 오디오 회귀를 통과했다고 판단하지 않는다.
+
+## 2026-09-29 사용자 실차 등록 확인
+
+- 사용자가 실제 차량에서 VIN 입력 → Bluetooth 기기 발견 → 시스템 등록 승인을 완료했고, 앱을 재시작한 뒤에도 등록이 유지된다고 보고했다.
+- 사용자 실측 보고이며 개발 도구로 재현한 결과와 구분한다. VIN·Bluetooth 식별자는 기록하지 않는다.
+- 등록 성공은 실제 BLE 접근·이탈 수신, 차량 인증·제어, 잠금·주머니 자동 마이크 성공을 의미하지 않는다. 다음 시험은 마이크 없는 실제 접근·이탈 관찰이다.
+
+## 2026-09-29 0.6.0-probe 퇴근길 관찰 시험 준비
+
+- 기본 접근 진단을 **관찰 전용·자동 마이크 OFF**로 분리했다. 접근 탭에서 관찰 요청 수락, 현재 감지, 출현·이탈 콜백 누적 횟수, 최근 출현·이탈, 종료 사유를 확인한다. 자동 마이크는 진단 시작 전 별도 동의가 필요하며 비활성화·프로세스 재시작 시 OFF다.
+- JDK 21에서 `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon` 성공(1분 24초, 51개 task). 세션 정책 테스트 8개 통과, Lint 오류 0·경고 11개. 추가로 컴파일된 `SessionPolicy`를 Groovy 메모리 스크립트로 직접 실행해 감지 초기화 후 대기 캡처 폐기, 실제 이탈 없는 재무장 차단, 새 이탈·출현 후 재무장을 확인했다. 임시 스크립트 파일은 생성하지 않았다.
+- Mobile MCP에는 iOS 기기만, `adb devices -l`에는 연결 기기 0대였다. 설치된 AVD는 API 30으로 앱의 minSdk 36을 만족하지 않는다. **새 APK 설치·화면·CDM 콜백·실제 마이크 미시작 실측은 미완료**다. 호스트 정책 실행은 Android 런타임·실차 성공의 증거가 아니다.
+
+## 2026-09-29 0.7.0-probe 영속 로그 검증
+
+- 앱 내부 append 전용 JSONL, 2 MiB 상한, 고정 이벤트 허용목록, 프로세스·시험 UUID, 저장 확정·대기·실패·유실 표시를 추가했다. 안전 게이트·관찰 전용 기본값·등록 데이터는 변경하지 않았다.
+- JDK 21에서 `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon` 성공(39초, 51개 task). 전체 26개 테스트 통과(로그 12·세션 8·PCM 4·지원 정책 2), Lint 오류 0·경고 11개. 초기 컴파일의 문자열 이스케이프 오류를 수정했고, 용량 테스트의 직렬화 크기에 종속된 고정 행 수 단언은 제거했다. 상한·기존 내용 보존·유실 집계 검증은 유지했다.
+- 컴파일된 `FieldEventSink`를 서로 다른 JVM 프로세스에서 실행하여 첫 행 보존·새 프로세스 행 추가·JSON 파싱·마이크 OFF 상태 필드를 확인했다. 별도 직접 실행으로 500바이트 시험 상한에서 쓰기 중단·기존 바이트 보존, 파일 열기 실패의 고정 오류와 대기 해제를 확인했다. 합성 이벤트를 사용한 저장소 검증이며 실제 BLE 수신 증거가 아니다.
+- 스모크 스크립트는 메모리에서 실행했다. 생성된 비민감 시험 파일은 OS 임시 디렉터리에 보존했으며 승인 없이 삭제하지 않았다.
+- 최초 설치 시도에서는 ADB 연결 목록이 0대였고 `adb install -r`이 `device not found`로 실패했다. 아래 USB 재연결 후 검증으로 설치·실행·파일 보존 미확인 상태를 해소했다. 등록 삭제·권한 대리 승인·실차 명령은 실행하지 않았다.
+
+### USB 재연결 후 S23 실측
+
+- 기존 데이터를 유지하는 `adb install -r`이 `Success`를 반환했고 앱을 실행했다. 실제 홈·설정 계층에서 차량 등록됨·권한 허용 상태를 확인했다. 기본 비서는 현재 앱이 아니었다.
+- `run-as com.heytesla.app cat no_backup/field-diagnostics/events.jsonl`로 실제 파일을 USB를 통해 읽었다. 최초 2행에서 앱 버전 `0.7.0-probe`, 등록 개수 1, 자동 마이크 OFF를 확인했다. 호스트 메모리에서 JSON을 파싱했으며 별도 회수 파일로 저장하지는 않았다.
+- 접근 진단·자동 마이크 OFF 상태에서 앱을 강제 종료하고 다시 실행했다. 재회수한 4행·1,750바이트는 기존 바이트 전체를 그대로 보존했고 서로 다른 프로세스의 `PROCESS_START_OFF` 이벤트 2개를 포함했다. 재시작 후에도 등록 개수 1·접근 진단 OFF·자동 마이크 OFF였다. 서비스 조회에는 실행 중인 앱 서비스가 없었다.
+- 홈·설정 계층 확인과 달리 개발자 진단 행을 눌렀을 때 상세 화면 전환은 확인하지 못했다. 대체 `uiautomator dump`는 `Killed`를 반환했다. 스크린샷은 앱 영역이 검정으로 표시되어 시각 검증에 사용할 수 없었으며 캡처 보호는 해제하지 않았다.
+- 이후 사용자가 차량을 다녀온 뒤 USB로 읽은 JSONL 65행에서 `REAL_BLE_APPEARED` 1회·`REAL_BLE_DISAPPEARED` 1회를 확인했다. 실제 BLE 이벤트 저장은 확인했지만 잠금·주머니 시점과 감지 거리·지연·장기 생존은 확정하지 않았다.
+- 사용자는 화면 카운트가 즉시 바뀌지 않는 것처럼 보였다고 보고했다. 코드는 `StateFlow`를 구독해 이벤트 수신 시 카운트를 갱신하며 페이지 진입 시 파일을 읽는 방식은 아니다. 이벤트 전달 지연과 화면 갱신 문제 중 어느 원인인지는 미확인이다. 다음 작업에서 이벤트 시각과 화면 표시 시점을 대조한다.
+
+### 2026-09-29 합의: 접근 관찰 포그라운드 서비스
+
+**아래는 당시 설계 합의이며, 2026-09-30 `0.8.0-probe`에서 구현했다.** 당시 `0.7.0-probe` 실측과 새 버전의 검증은 구분한다.
+
+- 목표는 사용자가 명시적으로 켠 접근 관찰을 화면 이탈·잠금 상태에서도 지속하는 것이다. 접근 진단 ON 시 전용 포그라운드 서비스를 시작하고 지속 알림을 표시하며, 서비스가 CDM 관찰의 시작·종료와 진단 상태·로그 수명주기를 관리하도록 전환한다.
+- 화면은 서비스가 관리하는 상태를 구독한다. 앱 화면과 알림에서 관찰을 종료할 수 있어야 하며, 서비스 실행·관찰 요청 수락·실제 차량 감지를 서로 다른 상태로 표시한다.
+- 현재 활성 상태와 카운트는 프로세스 메모리에 있고 프로세스 재시작 시 접근 진단은 OFF가 된다. 영속 이벤트 파일은 남지만 활성 상태나 카운트를 복원하지 않는다. 서비스 전환 시 프로세스 종료·재생성·사용자 중지별 복원 정책을 명시하고, 과거 감지 상태를 현재 감지로 표시하지 않는다.
+- 관찰 서비스와 마이크 사용은 분리한다. 관찰 시작만으로 마이크를 켜지 않으며, 자동 마이크의 별도 동의와 Android의 마이크·백그라운드 시작 제한을 유지한다. 실제 수행 작업에 맞는 FGS 유형·권한·시작 조건은 구현 전에 확인한다.
+- 포그라운드 서비스도 강제 종료나 시스템 종료를 막는 보장은 아니다. Tesla 앱의 내부 구현은 확인하지 않았으며 이번 설계의 검증 근거로 삼지 않는다.
+
+다음 검증은 잠금·주머니·장시간 대기 중 출현·이탈 기록, 화면 복귀 시 카운트 일치, 알림에서 종료, 프로세스 재생성 시 상태, 관찰 전용의 마이크 미사용을 포함한다. 사용자가 보고한 카운트 표시 지연은 이벤트 수신 시각과 화면 표시 시점을 대조해 별도로 조사하며, 서비스 도입만으로 해결됐다고 판단하지 않는다.
+
+### 2026-09-30 0.8.0-probe 관찰 FGS 구현·S23 실측
+
+- `ObservationService`의 `connectedDevice` FGS·지속 알림과 CDM 소유권을 추가했다. UI는 시작 요청·서비스 실행·CDM 수락·실제 감지를 구분한다. 등록 차량 1대, Bluetooth 권한·ON, 알림 권한·앱 및 관찰 채널 허용을 요구한다. 기본 비서·마이크 권한은 관찰 전용 시작 조건이 아니다.
+- JDK 21에서 `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon --console=plain`이 **BUILD SUCCESSFUL**(1분 33초, 51개 task). 전체 32개 테스트 통과(관찰 수명주기 6개 추가), Lint 오류 0·경고 11개다.
+- 기존 `0.7.0-probe`에서는 접근 활성·CDM 수락 true 상태에도 실행 중 앱 서비스가 없었다. `adb install -r`로 새 버전을 설치한 뒤 등록·권한을 보존했다. 자동 탭·짧은 ADB tap이 반복해서 무시돼 일부 탐색·시작·앱 종료는 사용자 조작으로 수행했으며 조작 성공 응답만으로 통과 처리하지 않았다.
+- 실제 서비스 조회에서 `ObservationService`, `isForeground=true`, 유형 `0x10`(connectedDevice), `startCommandResult=2`(START_NOT_STICKY)를 확인했다. 화면의 관찰 서비스 실행·CDM 수락 true, 실제 감지 false·출현/이탈 0회를 확인했다. HOME 뒤 `UI_PAUSED`와 관찰 유지, 짧은 화면 꺼짐(`mWakefulness=Dozing`) 중 FGS 유지를 확인했다. 마이크 서비스·캡처 세션은 없었고 자동 마이크 OFF였다. 실제 BLE 수신·장기 잠금 생존의 증거는 아니다.
+- 앱 종료 경로는 `DISABLED → OBSERVE_STOPPED → FEATURE_DISABLED`, 실제 알림 종료 버튼은 `OBSERVATION_NOTIFICATION_STOP → OBSERVE_STOPPED → FEATURE_DISABLED`로 분리 확인했다. 최초 알림 종료 시도는 `DISABLED`만 남아 알림 통과로 처리하지 않았고, 재시작 후 알림을 펼쳐 실제 **관찰 즉시 종료**를 실행한 뒤 정확한 코드와 정리를 확인했다. 앱 복귀 화면에서 서비스 꺼짐·관찰 수락 false·알림 종료 사유 반영을 확인했다.
+- 관찰을 다시 켠 뒤 프로세스를 강제 종료·재실행했다. 기존 JSONL 바이트 전체가 보존되고 새 프로세스 `PROCESS_START_OFF`가 추가됐으며 접근·자동 마이크·서비스·감지 모두 OFF, 등록 개수 1이었다. 초기 회수는 비동기 writer 저장 전이어서 새 행이 없었고, 화면 확인 뒤 저장된 행으로 판정했다. 앱 데이터·로그·등록을 삭제하지 않았다.
+- 캡처 보호를 유지해 앱 스크린샷은 검정이었다. **픽셀·큰 글꼴·TalkBack·주머니·실제 잠금 차량 접근·장시간 대기·배터리·감지 및 화면 카운트 지연·권한 철회·시스템 재생성 실측은 미완료**다. 토큰 정책의 JVM 회귀는 Android 서비스 경쟁 실측을 대체하지 않는다. 기본 비서 변경·권한 대리 승인·자동 마이크 동의·실차 명령은 실행하지 않았다.
+
+
+### USB 회수형 사용자 시험 순서
+
+1. `0.8.0-probe`를 기존 앱 위에 업데이트 설치한다. 등록·권한 데이터를 지우거나 다시 등록하지 않는다. 앱 정보에서 버전을 확인한다.
+2. 차량에서 떨어진 안전한 곳에서 **설정 → 개발자 진단 → 접근**을 연다. Bluetooth·등록·알림 권한 및 관찰 알림 허용을 확인하고 **관찰 전용 · 마이크 시작 안 함**으로 둔 뒤 **접근 관찰 시작**을 누른다. 기본 비서 변경·마이크 권한·자동 마이크 동의는 관찰 시험에 필요 없다.
+3. **관찰 서비스 실행 중**과 **관찰 요청 수락 true**를 확인한다. 시작 중·서비스 꺼짐·수락 false면 최근 종료 사유와 이벤트를 확인하고 시험을 중단한다. 서비스 실행·수락은 실제 감지 합격이 아니다.
+4. 시작 횟수를 적고 화면을 잠가 주머니에 넣은 채 차량에 접근한다. 안전하게 정지한 곳에서 앱을 열어 **출현 횟수 증가·최근 출현 `REAL_BLE_APPEARED`**를 확인한다. 이미 차량 곁에서 시작하면 새 출현을 못 받을 수 있으므로 거리를 두고 다시 접근한다. 감지 거리·시간은 아직 보장하지 않는다.
+5. 도착 후 주차·하차하고 휴대전화를 잠근 채 차량에서 충분히 멀어진다. 안전한 곳에서 **이탈 횟수 증가·최근 이탈 `REAL_BLE_DISAPPEARED`**를 확인한다. 가능하면 다시 접근해 새 출현을 한 번 더 확인한다. **운전 중 앱 조작 금지.**
+6. 앱의 **접근 관찰 중지** 또는 알림을 펼친 뒤 **관찰 즉시 종료**로 끝낸다. 서비스 꺼짐·관찰 수락 false와 파일 기록 대기 0, 한도·실패·유실 여부를 확인한다. 횟수는 프로세스 누적이며 재시작하면 초기화되고 저장 완료한 파일은 남는다. 프로세스 종료로 OFF가 된 경우를 “감지 0회”와 구분한다.
+
+보고할 항목: 버전 / 잠금·주머니 여부 / 시작→종료 출현·이탈 횟수 / 최근 출현·이탈 코드 / 마이크 표시가 켜졌는지 / 진단이 OFF로 바뀌거나 기록이 사라졌는지. VIN·Bluetooth 식별자·위치는 보내지 않는다. 관찰 전용인데 마이크 표시가 켜지면 진단을 비활성화하고 사용 중이던 다른 앱과 함께 보고한다. 화면 캡처가 차단되므로 수치와 코드를 텍스트로 전달한다.
+
+이 시험은 접근·이탈 신호 관찰만 검증한다. 음성 인식·자동 캡처·차량 인증·실차 명령·장기 프로세스 생존 합격으로 확대하지 않는다.
+
+### 시험 로그 보관·USB 회수
+
+- 비민감 이벤트만 앱 전용 `no_backup/field-diagnostics/events.jsonl`에 JSONL로 추가한다. UTC 시각·부팅 후 경과 시간, 프로세스·시험 식별자, 허용된 이벤트 코드와 진단 상태를 기록한다. VIN·Bluetooth 주소·association ID·위치·음성·인식 원문·예외 원문은 기록하지 않는다.
+- `0.9.0-probe`의 새 행은 `version: 2`이며 기존 v1 행을 고치지 않는다. STT 종료 이벤트의 `speechTrial` 객체에 `mode`, `status`, `reason`, `finalReceived`, `phraseMatched`, `confidence`, `elapsedMs`, `samples`, `pcmBytesWritten`, `audioLeaseRetained`를 기록한다. `0.10.0-probe`의 새 행은 `version: 3`이고 같은 객체에 `commandDecision`을 더한다. 값은 `SpeechCommandDecision` 이름만 허용하며 그 밖은 `null`이고 인식 원문은 담지 않는다. 시작·다른 이벤트에는 `null`이다. 미제공 결과는 `null`, 유효한 신뢰도 `0.0`은 그대로 남기며 범위 밖·비유한 신뢰도는 `null`로 저장한다.
+- `0.11.0-probe`의 새 행은 `version: 4`다. 같은 객체에 `dryRunResult`, `speechResponseStatus`, `speechResponseReason`, `inputReleased`, `outputReleased`, `audioFocusReleased`, `offlineVoiceSelected`, `speechResponseCleanupFailed`를 추가한다. 결과·사유는 enum 이름만 기록하고 원문·음성 안내 문장은 저장하지 않는다. 기존 v1~v3 행은 그대로 보존한다.
+- 입력 정리 실패에는 `commandDecision: null`이며 이전 회차 값을 다음 회차로 넘기지 않는다. `0.10.0-probe`는 실패·취소·시간 초과도 판정 `null`로 기록했다. `0.11.0-probe`는 이미 로컬 처리한 뒤 안내 중 취소·만료·안내 실패가 발생하면 관측한 최종 판정·`PROCESSED`/`UNKNOWN` 결과를 보존하고 안내 상태를 별도로 기록한다. 이를 미처리로 덮거나 재시도하지 않는다. 판정·로컬 처리는 실제 차량 전송 판단이 아니다.
+- `trialId`는 접근 관찰 세션 식별자이며 STT 회차 UUID가 아니다. STT 회차는 종료 이벤트 행과 시각·프로세스·요약으로 비교한다. `audioLeaseRetained`는 이 시험이 정리 후 예약을 보유하는지 나타내며 다른 기능의 예약 상태가 아니다. 시작 전 거절은 `elapsedMs: null`이다. 과거 결과를 화면에 복원하는 기능은 추가하지 않았다. `0.8.0-probe`의 상세 값은 소급 복원할 수 없으므로 새 APK 설치 후 시험해야 한다.
+- 최대 2 MiB이며 자동 삭제·회전·덮어쓰지 않는다. 한도 도달·쓰기 실패·큐 유실은 진단 화면에서 확인한다. 실패 이후 로그가 완전하다고 해석하지 않는다. 삭제는 사용자 승인 후 별도 처리하며 등록을 보존하려고 앱 데이터 초기화를 사용하지 않는다.
+- 파일은 일반 USB 파일 탐색에 노출되지 않는다. USB 디버깅을 사용자가 승인한 PC에서 아래 명령으로 **디버그 APK**의 내용을 읽는다. 여러 Android 기기 연결 시 `-d` 대신 해당 기기의 `-s` 선택을 사용한다. 저장할 때 기존 파일을 덮어쓰지 않는 새 경로를 사용하고 저장소·Wiki에 원본을 넣지 않는다.
+
+```sh
+adb -d exec-out run-as com.heytesla.app cat no_backup/field-diagnostics/events.jsonl
+```
+
+- USB는 회수에만 필요하다. 시험 중 연결·네트워크·PC 실행이 없어도 앱이 받은 이벤트를 기록한다. 기록을 위해 별도 상주 서비스나 주기적 깨우기를 추가하지 않는다.
+- 앱 프로세스가 죽으면 이후 콜백은 기록하지 못하며 대기 중인 기록이 유실될 수 있다. 파일 끝의 불완전한 JSON 행은 손상 행으로 구분한다. 파일 부재·이벤트 부재는 차량 접근 부재의 증거가 아니다.
+- 파일은 재시작 후 보존되지만 앱 삭제·데이터 초기화 시 사라진다. 시험 파일을 먼저 회수한다. 릴리스 APK는 `run-as` 회수가 보장되지 않으며 별도 내보내기 설계가 필요하다.
 
 ## 검증 범위와 합격 기준
 
@@ -46,7 +1560,7 @@
 |`RECORD_AUDIO` 런타임 권한|음성 수집 전|마이크를 실제 사용하는 구현에 한정|미실행/미확인|
 |foreground service 선언·type|구현·설치 시|`microphone` type 및 해당 권한·manifest 요구를 실제 API 버전에서 확인; 런타임 `RECORD_AUDIO`와 구분|미실행/미확인|
 |Nearby Bluetooth scan/connect|선택한 접근 감지 API가 요구할 때|스캔·연결 목적과 Android 버전을 먼저 확인|미실행/미확인|
-|CDM association·background permission|접근 이벤트에 CDM을 채택할 때|CDM background permission 필요 여부와 조건을 실제 API 버전에서 확인|미실행/미확인|
+|CDM association·background permission|접근 이벤트에 CDM을 채택할 때|association 승인과 background 실행 허용을 구분|9월 29일 사용자 보고: 실차 등록 승인·앱 재시작 후 유지. background presence는 미확인|
 |기본 비서 지정|`VoiceInteractionService` 경로를 시험할 때|기존 비서 교체 영향과 해제 방법을 먼저 고지|미실행/미확인|
 |`POST_NOTIFICATIONS`|선택한 Android API와 사용자 노출 설계가 요구할 때|거부가 언제나 FGS 시작 불가를 뜻하지는 않으나, FGS 사용자 표시와 제한을 기기에서 시험|미실행/미확인|
 |위치 권한|스캔 목적별 검토 후 필요한 경우만|무조건 추가하지 않는다. `neverForLocation` 선언·필터링이 실제 근접도 추론과 부합하는지 검토|미실행/미확인|
@@ -86,24 +1600,1103 @@
 
 배터리 비교는 충전선을 분리한 상태에서 한다. 같은 화면 상태, 통신 조건, 관찰 시간을 맞춘 앱 비활성 기준선과 앱 원거리 대기를 비교한다. 원거리 대기의 합격 불변식은 마이크·STT 활성 시간이 0이라는 것이며, 이는 아직 측정값이 아니다. 각 실행에서 시작·종료 배터리, 기간, 세션 활성 시간, 스캔 이벤트, FGS, wake lock 자료를 읽기 전용 진단으로 기록한다. USB 충전은 배터리 측정을 왜곡하고 시스템 배터리 퍼센트는 해상도가 낮다. 종료 후 연결해서 누적 자료를 수집하거나, 측정 영향을 기록한 진단 경로를 사용한다. 환경·반복 횟수·성공·실패 횟수를 함께 보고하며 단일 실행을 일반화하거나 미측정 수치를 주장하지 않는다.
 
-배터리·서비스 상태 진단은 읽기 전용 명령을 예시로만 사용한다. 예: `adb shell dumpsys batterystats`, `adb shell dumpsys activity services`, `adb shell dumpsys media.audio_flinger`. 아직 구현물이 없으므로 현재 실행할 빌드·설치·검증 명령은 없다. `batterystats --reset`, `pm grant`, 백그라운드 제한 우회 또는 권한 우회는 사용하지 않는다.
+배터리·서비스 상태 진단은 읽기 전용으로 수행한다. 예: `adb shell dumpsys batterystats`, `adb shell dumpsys activity services`, `adb shell dumpsys media.audio_flinger`. 이번에는 앱 범위 서비스와 마이크 app-op 종료만 확인했으며 배터리 측정은 하지 않았다. `batterystats --reset`, `pm grant`, 백그라운드 제한 우회 또는 권한 우회는 사용하지 않는다.
 
 원시 시스템 로그에는 개인식별정보, 차량 식별번호, 토큰이 포함될 수 있으므로 공유 전 마스킹한다. 오디오는 기본적으로 저장하거나 전송하지 않는다. 앱 이벤트 로그는 `sessionId`, `state`, `event`, `elapsed`, `success`, `reason`과 필요한 비민감 측정값으로 제한한다. `reason`에는 정해진 오류 코드만 사용하고 원본 예외·응답을 그대로 넣지 않는다. 발화 원문·VIN·토큰·계정 식별자는 기록하지 않는다.
 
+## 2026-09-30 — 0.8.0 오프라인 STT 재검증 시도
+
+- 대상: USB 연결 S23 Ultra / Android 16, 설치된 `0.8.0-probe`. 차량·실제 발화 없이 기존 합성 WAV·무음 PCM을 검증하려 했다. 기본 비서 변경·권한 대리 승인·자동 마이크 활성화·데이터 삭제는 수행하지 않았다.
+- 차단 조건: 비행기 모드 ON·Wi-Fi OFF 적용 후 `dumpsys connectivity`의 `Active default network: none` 확인. 적용 직후 남아 있던 기본 네트워크는 다음 관찰에서 없어졌다. 이 조건에서 STT 자체는 시작하지 못했으므로 오프라인 인식 성공 증거가 아니다.
+- UI 관찰: 홈 → 설정 → 개발자 진단의 음성 화면까지 계층으로 확인했으나, `지원 확인` 입력 이후에도 `아직 조회하지 않음`이 유지됐다. MCP 최신 ref 클릭, ADB 좌표 터치·분리 DOWN/UP·마우스 입력·키보드 이동, 데이터 보존 force-stop/재실행을 시도했다. 진입도 일관되지 않았으며 원인이 앱인지 자동 입력 경로인지는 미확정이다. 입력 도구의 성공 응답을 앱 동작 성공으로 취급하지 않았다.
+- 결과: **보류**. 합성 문장 일치·무음 NO_MATCH·활성 취소·재실행·자원 해제는 이번 버전/차단 조건에서 미검증이다. 실제 파일 인식 세션이 없었으므로 기존 `0.4.0-probe` 결과를 새 버전의 합격으로 승계하지 않는다.
+- 종료 관찰: AppOps `RECORD_AUDIO`의 마지막 사용은 시험 전후 모두 약 21시간 전·지속 9.965초로 새 사용이 관찰되지 않았다. 최종 앱 실행 서비스는 `(nothing)`. 이는 미시작 상태의 근거이지 활성 STT 해제 증거가 아니다. `FLAG_SECURE`를 유지했으며 스크린샷의 앱 영역이 검정이어서 픽셀 검증은 불가했다.
+- 복구: 비행기 모드 OFF·Wi-Fi OFF·모바일 데이터 ON·화면 꺼짐 15,000ms가 원래 값과 일치함을 조회했다. 다음 전제는 일반 `지원 확인` 버튼의 실제 상태 전이 확인이다. 이 입력 장애가 해소된 뒤 차단 조건을 다시 적용하고 파일 STT·무음·취소·재실행을 실측한다.
+
+### 같은 날 — 사용자 지원 조회 후 합성 파일 시험
+
+- 사용자가 일반 `지원 확인` 버튼을 누른 뒤 `메타데이터 응답 수신 · 실제 인식 성공 아님`으로 전이한 것을 UI 계층으로 확인했다. 지원 메타데이터와 실제 인식 결과는 구분한다.
+- 비행기 모드 ON·Wi-Fi OFF, `Active default network: none`을 다시 확인한 조건에서 합성 파일 시험 1회가 실행됐다. 비음성 구조화 이벤트 `SPEECH_TRIAL_START_TTS_PCM` → `SPEECH_TRIAL_SEGMENTS_RECEIVED_1_TTS_PCM`과 화면의 `최종 결과 수신: 예`를 관찰했다. **네트워크 차단 상태의 최종 응답 수신 근거이며, 문장 일치·신뢰도·안전 실행 합격 근거는 아니다.**
+- 이후 자동 스크롤과 무음 선택 입력에도 계층이 변하지 않고 합성 입력 선택이 유지됐다. 사용자가 결과 요약에서 **문장 일치: 예, 첫 결과 신뢰도: 0.0000**을 확인해 보고했다. 문장 일치는 사용자 관찰 근거이며 신뢰도 0.0000을 안전 실행 합격으로 취급하지 않는다. 무음 NO_MATCH·활성 취소·재실행·자원 해제는 이번 실행에서 미검증이다. 입력 명령의 정상 종료만으로 버튼 동작을 인정하지 않는다.
+- AppOps의 마지막 마이크 사용은 여전히 약 21시간 전·9.965초였다. 새 마이크 사용은 관찰되지 않았으나 이 값만으로 파일 STT 자원 해제를 증명하지 않는다. 실제 발화·차량 명령은 시험하지 않았다.
+- 비행기 모드 OFF·Wi-Fi OFF·모바일 데이터 ON으로 원상 복구한 값을 조회했다. 나머지 시험은 일반 UI 입력의 실제 전이가 가능한 상태에서 차단 조건을 다시 적용해 진행한다.
+- 후속 UI 계층에서도 문장 일치 `예`·첫 결과 신뢰도 `0.0000`을 직접 확인했다. 상세는 `SEGMENTS_RECEIVED_1`, 35,549샘플·전송 71,098바이트(소비 확인 아님), 651ms, 종료 후 오디오 예약 `false`였다. 예약 해제 관측과 recognizer·writer·FD 전체 해제 증명은 구분한다.
+- 후속 무음 선택 자동 입력에서는 목표와 실제 선택이 일치하지 않았다. 최종 계층은 `직접 마이크` 선택으로 보여 시작을 실행하지 않았다. 화면 ON·확대 비활성·앱 입력창으로 DOWN/UP 전달은 확인했으나 좌표/ref 입력의 선택 불일치 원인은 미확정이다. 네트워크는 원래 설정 그대로 유지했으며 수동 무음 선택을 다음 전제로 둔다.
+
+### 같은 날 — 수동 시작으로 무음·활성 취소·재실행 완료
+
+- 자동 입력 장애 때문에 사용자가 무음 칩과 일반 시험 시작을 눌렀다. 도구는 선택 계층·비음성 구조화 이벤트·결과 계층을 확인했다. 각 시험 전에 비행기 모드 ON·Wi-Fi OFF·`Active default network: none`을 확인했고, 결과 이벤트 또는 120초 제한에서 원래 네트워크 설정으로 자동 복구하도록 감시했다.
+- 무음 대조: `SPEECH_TRIAL_START_SILENT_PCM` → `SPEECH_TRIAL_RECOGNIZER_ERROR_7_SILENT_PCM`, 최종 결과 수신 `아니오`. ERROR7은 결과 없음(NO_MATCH)이며 인식 성공으로 바꾸지 않았다.
+- 활성 취소: 무음 START 이벤트를 감지한 뒤 HOME을 전송했다. 사용자의 홈 화면 보고와 `SPEECH_TRIAL_USER_CANCELED_SILENT_PCM`을 확인했다. 완료 후 HOME만 보낸 시험과 구분한다.
+- 취소 후 재실행: 같은 프로세스에 앱을 다시 열고 무음을 실행해 START → `RECOGNIZER_ERROR_7` 종료를 확인했다. 결과 상세는 문장 일치 `미판정`, 신뢰도 `미제공·유효하지 않음`, 상태 `실패`, 35,549샘플·전송 71,098바이트(소비 확인 아님), 145ms, 오디오 예약 `false`였다.
+- 해제 근거: 종료 이벤트는 소스상 recognizer cancel/destroy·writer join·PCM FD close·버퍼 지움·예약 해제 이후 발생하며, 이번 이벤트에는 정리 실패/재시작 필요 코드가 없었다. 취소 후와 재실행 후 같은 프로세스의 파이프 FD는 2개로 같고 새 파이프 식별자는 없었다. 새 앱 마이크 사용은 없었고 실행 서비스는 `(nothing)`이었다.
+- 해제 한계: 전체 FD는 138→159로 증가했으며 증가 유형은 `sync_file` 21개였다. 이후 3초 안정화 관찰에도 유지됐다. 파이프·소켓·기타 FD 유형의 개수는 같았지만 전체 FD 불변이나 모든 자원의 누수 부재를 증명한 것은 아니다.
+- 종료: 비행기 모드 OFF·Wi-Fi OFF·모바일 데이터 ON 조회로 원상 복구를 확인했고 모든 자동 복구 감시가 종료됐다. 위 보류 항목 중 파일 무음·HOME 활성 취소·재실행·STT 정리 경로의 관측은 이 후속 시험으로 갱신한다. 신뢰도 0.0000·실제 발화·외부 PCM 소비·차량 명령·장기 반복 누수·픽셀 검증의 제한은 남는다.
+
+### 같은 날 — sync_file의 UI 수명·무음 반복 대조
+
+- 대상은 같은 `0.8.0-probe` 프로세스다. 재시작·강제 종료 없이 앞서 증가한 `sync_file`이 후속 관측에서 0개까지 감소했다. 이번 비교에서는 네트워크 설정을 변경하지 않았다. 앞선 네트워크 차단 시험과 구분하며 오프라인 검증 횟수에 추가하지 않는다.
+- STT를 시작하지 않고 HOME↔앱 복귀를 3회 반복했다. HOME의 `전체 FD / sync_file / dma-buffer`는 `125 / 0 / 0`, `127 / 1 / 0`, `127 / 1 / 0`이었다. 앱 복귀는 매번 `139 / 4 / 8`이었고 파이프는 모든 관측에서 2개였다. 이 구간에 새 STT 이벤트는 없었다.
+- 같은 진단 화면에서 사용자가 무음 대조를 3회 시작했다. 각 회차의 START → `RECOGNIZER_ERROR_7_SILENT_PCM` 종료 이벤트를 확인했다. 종료 직후와 0.5초 후 FD를 각각 측정했으며 모든 표본은 같은 프로세스였다.
+
+| 시점 | 전체 FD | sync_file | dma-buffer | pipe | socket |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 반복 전 | 139 | 4 | 8 | 2 | 13 |
+| 무음 1 종료 직후 / 0.5초 후 | 160 / 160 | 25 / 25 | 8 | 2 | 13 |
+| 무음 2 종료 직후 / 0.5초 후 | 164 / 168 | 29 / 33 | 8 | 2 | 13 |
+| 무음 3 종료 직후 / 0.5초 후 | 155 / 159 | 20 / 24 | 8 | 2 | 13 |
+| 3회 후 HOME, 1초 후 | 127 | 1 | 0 | 2 | 12 |
+| 앱 복귀, 0.7초 후 | 139 | 4 | 8 | 2 | 13 |
+| 사용자 완료 응답 후 | 139 | 4 | 8 | 2 | 13 |
+
+- 판정: 이번 3회에서는 FD가 단조 누적되지 않았고 HOME·복귀 후 기준값으로 돌아왔다. 전체 FD 증가분은 `sync_file` 변화와 일치하며 파이프는 증가하지 않았다. STT가 없어도 UI 표시 상태에 따라 `sync_file`·`dma-buffer`가 변하므로 **UI 렌더링 수명과 연동된 일시 증가라는 추론을 지지한다.** STT 반복으로 인한 지속적인 앱 파이프 FD 누적은 이 범위에서 관측되지 않았다.
+- 한계: STT 중 결과 갱신과 UI 렌더링이 함께 발생하므로 증가분의 생성 주체를 이 비교만으로 분리하지 못했다. `fdinfo`에서 fence 소유자·타임라인은 확인하지 못했으며 렌더러 귀속 확정이나 장기 누수 부재를 주장하지 않는다. 스크롤 입력 시도는 계층 이동이 확인되지 않아 유효한 스크롤 대조에서 제외했다. 화면 보호는 유지했으며 픽셀 검증은 미완료다.
+- 조치: 지속 누적이 재현되지 않아 앱 코드는 수정하지 않았다. 3회 감시는 오류 없이 종료됐으며 실제 발화·차량 명령·권한 변경·데이터 삭제는 수행하지 않았다.
+
+
+
+## 0.9.0-probe — STT 종료 요약 영속화
+
+- 음성·인식 원문 없이 종료 결과·일치 여부·신뢰도·시간·PCM 수량·정리 후 예약 잔존 여부를 기존 JSONL에 추가했다. 용량 제한·실패/유실 표시·화면 보호는 유지한다. USB 없이 기록하고 재연결 후 회수하는 기존 절차를 사용한다.
+- `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug` 성공. 전체 36개 테스트 통과, Lint 오류 0·경고 11개. 기존 v1 행 보존, 재개 후 회차 분리, 잘못된 신뢰도와 허용 목록 밖 문자열 처리의 회귀 검증을 포함한다.
+- 컴파일된 실제 파일 sink를 별도 JVM 두 프로세스에서 실행했다. 이전 파일 바이트 보존·v2 행 추가·JSON 파싱·신뢰도 `0.0`/`null`·서로 다른 시간 및 예약 상태 보존을 확인했다. 합성 비민감 데이터로 수행한 호스트 검증이며 Android 인식 실행을 대신하지 않는다.
+- 빌드 당시 USB 분리 상태로 설치·Android 실측은 하지 않았다. 이후 USB 재연결하여 S23 Ultra에 `adb install -r`로 데이터 보존 업데이트했고 `versionCode=9`·`versionName=0.9.0-probe` 및 Activity 정상 실행을 확인했다.
+
+### 실제 발화 2회 — 직접 마이크 인식 성공
+
+- 사용자가 직접 마이크로 고정 시험 문장을 2회 발화했다고 보고했다. USB로 읽은 v2 JSONL에 `SPEECH_TRIAL_START_DIRECT_MIC`와 `SPEECH_TRIAL_FINAL_RECEIVED_DIRECT_MIC`가 각각 2회 남았으며 두 종료 요약 모두 `COMPLETE`, `FINAL_RECEIVED`, `finalReceived: true`, `phraseMatched: true`다. **실제 발화 2회 모두 시험 문장 인식 성공**으로 기록한다.
+- 1회 시작→종료 4,420ms, 2회 4,732ms. 발화·끝 감지·인식·정리를 포함한 전체 시험 시간이며 순수 엔진 처리 시간은 아니다. 두 회차 모두 엔진 보고 신뢰도 `0.0`, 정리 후 `audioLeaseRetained: false`다.
+- 두 회차 상세 값의 파일 저장을 확인했다. 회수한 전체 361행은 JSON 파싱에 성공했다. 직접 마이크 모드의 앱 PCM 수량 0은 엔진에 음성이 없었다는 뜻이 아니다. 원문·음성·프로세스 UUID 등 원본 로그는 문서에 복사하지 않는다.
+- 신뢰도는 Android `CONFIDENCE_SCORES`에서 받은 첫 후보 점수이며 앱이 문장 일치 여부로 계산하거나 미제공 값을 0으로 채우지 않는다. [공식 계약](https://developer.android.com/reference/android/speech/SpeechRecognizer#CONFIDENCE_SCORES)은 1에 가까울수록 높은 신뢰도, 0에 가까울수록 낮은 신뢰도로 정의하며 미제공 또는 -1도 허용한다. 이번 엔진이 왜 일치 결과에 0을 보고했는지는 미확정이다.
+- 판정 범위: 이 기기·고정 문장의 직접 마이크 2회 인식 및 결과 영속화 성공. 소음·거리·다른 발화·오인식률·신뢰도 유용성·차량 명령 안전성·장기 자원 해제는 미검증이며 네트워크 차단 시험으로 확대하지 않는다. 실제 차량 명령은 전송하지 않았다.
+
+### 추가 STT·PCM 실측과 판정 정책
+
+- 정답 TTS: 문장 일치, 신뢰도 0.0, 630ms. Yuna TTS로 만든 “헤이태진아 프렁크 열어줘”·“헤이 문열어” 입력은 비교 정답을 바꾸지 않은 시험용 APK에서 각각 불일치, 339ms·367ms, 신뢰도 각각 0.0. 입력 WAV만 바뀐 설치 APK를 확인했고 두 시험 뒤 원본 APK 전체 바이트 일치로 복원했다. 기존 로그는 보존됐다.
+- 사용자 직접 마이크 오답 발화 2회도 불일치, 6,119ms·4,716ms, 신뢰도 각각 0.0. 원문을 저장하지 않으므로 각 회차의 엔진 반환 문장 자체를 추정하지 않는다.
+- 녹음 후 PCM: 발화 요청 없이 실행한 회차는 159,040샘플·318,080바이트 전달 후 `ERROR_NO_MATCH(7)`, 10,604ms. 이후 사용자 정답 발화는 `SEGMENTS_RECEIVED_1`, 문장 일치, 159,360샘플·318,720바이트, 10,484ms, 신뢰도 0.0. 모든 위 종료 요약은 오디오 예약 잔존 false다. 시간은 캡처·인식·정리를 포함하며 순수 엔진 지연이 아니다.
+- 사용자는 신뢰도 0.0을 **현재 진단 판정에서 제외**하도록 승인했다. 점수는 원래 값으로 기록하며 왜 0.0인지 확정하지 않는다. 실제 차량 명령의 안전 게이트를 없애는 승인으로 확대하지 않는다. 소음·거리·주머니 조건 시험은 사용자 요청으로 이번 범위에서 보류하며 미검증이다.
+
+## 0.10.0-probe — 온디바이스 STT 호출어·명령 진단
+
+- 사용자가 **진단 버튼으로 시작**하는 방식을 선택했다. 기존 네 입력의 최종 한 문장에서 호출어와 명령을 판정한다. 전용 저전력 호출어 감지·실시간 부분 결과 실행·호출어 뒤 별도 무제한 인식·자동 차량 접근·차량 전송은 추가하지 않았다.
+- 정확한 시작 호출어 “헤이 테슬라”와 정확한 명령 “프렁크 열어줘”를 공백·구두점 차이만 허용해 후보로 판정한다. 호출어 없음, 호출어만 있음, 허용 외 명령, 취소·부정은 별도 판정이다. 분절에 걸친 문장은 최대 128자 정규화 문자열을 RAM에서만 누적하고 종료 시 비운다. 원문·음성은 영속화하지 않는다.
+- 기존 취소·화면 이탈·10초 제한·오디오 예약·실제 정리 실패 시 재시작 요구를 유지한다. 최종 결과 없음·실패·취소·정리 실패에는 `commandDecision: null`, 새 JSONL은 v3이며 기존 v1/v2 행은 고치지 않는다.
+- 빌드·47개 테스트 통과, Lint 오류 0·경고 11개. 실제 컴파일된 판정 모듈을 JVM에서 실행해 5분기·호출어 분절 경계를 확인하고, 실제 파일 sink에서 v3 판정·신뢰도 0.0을 JSON으로 파싱했다. S23 데이터 보존 설치·앱 실행·기존 로그 전체 바이트 보존을 확인했다.
+- 최초 MCP 최신 ref 클릭과 ADB 좌표 입력 뒤에도 설정 화면이 유지되어 합성 시험을 시작하지 못했다. 이후 사용자 조작으로 실행한 합성 음성은 `SEGMENTS_RECEIVED_1`, 문장 일치, `commandDecision: FRUNK_OPEN_CANDIDATE`, 542ms, 35,549샘플·71,098바이트, 신뢰도 0.0, 예약 잔존 false로 종료되어 v3 파일에 기록됐다. 실제 UI 계층에서도 “호출어 확인 · 명령 후보 (전송 안 함)”과 최종 결과·문장 일치 예를 확인했다. 기존 파일 재시험도 문장 일치·명령 후보, 887ms로 종료됐다. 화면 보호를 유지하며 픽셀·큰 글자·TalkBack 검증은 미완료다.
+
+### 직접 발화와 TTS 경계 입력 자동 실측
+
+- 사용자 직접 마이크 첫 회차는 호출어 확인·허용 외 명령, 4,841ms였다. 호출어 없는 문장 회차는 `WAKE_MISSING`, 3,435ms로 거절됐다. 이후 정답 문장을 다시 2회 발화한 결과는 모두 문장 일치·`FRUNK_OPEN_CANDIDATE`, 4,262ms·4,099ms였다. 첫 실패는 재현되지 않았지만 원문을 저장하지 않아 원인은 미확정이다.
+- 사용자는 추가 발화·마이크 시험을 보류하고 TTS 경우의 수 시험 뒤 다음 구현 단계로 진행하도록 요청했다. 실제 부정·취소 발화, 소음·거리·잠금·주머니·차량 접근 검증을 합격으로 바꾸는 요청으로 해석하지 않는다.
+- Yuna 합성 WAV를 PCM16/mono/16kHz로 변환하고 입력 리소스만 교체한 동일 코드 APK를 데이터 보존 설치했다. 첫 정답 회차는 실제 진단 UI로 실행했다. 원격 터치가 간헐적으로 반영되지 않아 나머지는 별도 일회성 Android 계측 패키지에서 실제 Activity의 지원 조회와 인식 시작을 호출했다. 한국어 설치 보고를 확인하고 기존 foreground·권한·예약·온디바이스 엔진 검사를 그대로 거친 실제 STT 결과다. 파서에 정답 문자열을 직접 넣은 시험이 아니다.
+
+| 합성 입력 | 기대 판정 | 실제 최종 판정 | 전체 시간 |
+| --- | --- | --- | --- |
+| 헤이 테슬라 프렁크 열어줘 | 명령 후보 | `FRUNK_OPEN_CANDIDATE` | 871ms |
+| 프렁크 열어줘 | 호출어 없음 | `WAKE_MISSING` | 297ms |
+| 헤이 태진아 프렁크 열어줘 | 호출어 없음 | `WAKE_MISSING` | 375ms |
+| 헤이 테슬라 프렁크 열지 마 | 취소·부정 | `COMMAND_UNSUPPORTED` | 374ms |
+| 헤이 테슬라 프렁크 열어줘 취소 | 취소·부정 | `COMMAND_CANCELED` | 324ms |
+| 헤이 테슬라 문 열어줘 | 허용 외 | `COMMAND_UNSUPPORTED` | 346ms |
+| 헤이 테슬라 아까 프렁크 열어달라고 했잖아 | 허용 외 | `COMMAND_UNSUPPORTED` | 501ms |
+| 헤이 테슬라 | 명령 없음 | `WAKE_MISSING` | 170ms |
+
+- 후보/거절의 안전 분리는 8/8, 세부 enum 기대 일치는 6/8이다. 부정 입력과 호출어 단독 입력은 예상 세부 범주와 달랐지만 모두 거절됐다. 인식 원문이 없으므로 오인식 글자를 추정하거나 이를 맞추려고 허용 문법을 확장하지 않았다. 모든 회차는 최종 분절 1개·신뢰도 0.0·예약 잔존 false, 실제 차량 전송 없음이다.
+- 시험 후 원본 `0.10.0-probe` APK를 데이터 보존 설치하고 실행했다. 합성 fixture·시험 APK·계측 산출물은 삭제 승인 없이 보존했으며 저장소의 입력 WAV는 변경하지 않았다.
+
+## 0.11.0-probe — 로컬 dry-run과 오프라인 음성 안내
+
+- 최종 한 문장의 판정 뒤 정확한 후보만 한 번 로컬 dry-run 처리한다. 실제 계정·키·차량 통신·전송 경로는 없다. STT부터 오프라인 TTS 정리까지 같은 진단 세션·오디오 예약을 유지한다. 입력 해제 뒤 TTS를 시작하고 출력·포커스 해제 확인 후 예약을 푼다.
+- `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug` 성공(1분 30초). 총 58개 테스트, 실패·오류·건너뜀 0, Lint 오류 0·경고 11개다. Kotlin 컴파일에는 레거시 `UtteranceProgressListener.onError(String)` override의 deprecated 경고가 남았다. 경고를 억제하지 않았다.
+- S23에 `0.11.0-probe`를 데이터 보존 설치했다. 업데이트 이전 비민감 로그 474행의 전체 prefix 보존을 확인했고 새 종료 요약은 v4다. 테스트 APK는 입력 WAV만 교체하고, 마지막에는 저장소 빌드의 원본 APK를 다시 설치·실행했다.
+- 별도 일회성 계측 러너가 실제 Activity·한국어 지원 조회·기존 probe의 시작 경로를 실행했다. 포그라운드·권한·오디오 예약·온디바이스 엔진 게이트를 우회하지 않는다. 실제 TTS의 설치된 오프라인 한국어 voice 선택·완료 콜백을 관측했으며 실제 발화나 스피커 음질 검증으로 확대하지 않는다.
+
+| 실제 기기 시나리오 | 로컬 결과 | 음성 안내 결과 | 전체 시간 |
+| --- | --- | --- | --- |
+| 원본 정답 TTS | `PROCESSED` | `COMPLETE` | 8,082ms |
+| 동일 활성 회차에 시작 2회 | `PROCESSED` 1회, `SPEECH_TRIAL_BUSY` 1회 | `COMPLETE` | 7,019ms |
+| 입력 중 취소 | `CANCELED` | `CANCELED` | 182ms |
+| 입력 중 HOME | `CANCELED` | `CANCELED` | 186ms |
+| 안내 중 취소 | 기존 `PROCESSED` 보존 | `CANCELED` | 1,044ms |
+| 안내 중 HOME | 기존 `PROCESSED` 보존 | `CANCELED` | 932ms |
+| 호출어 없는 명령 TTS | `REJECTED` | `COMPLETE` | 5,492ms |
+| 다른 호출어 TTS | `REJECTED` | `COMPLETE` | 5,527ms |
+| 부정 TTS | `REJECTED` | `COMPLETE` | 5,520ms |
+| 취소 포함 TTS | `REJECTED` | `COMPLETE` | 5,433ms |
+| 허용 외 명령 TTS | `REJECTED` | `COMPLETE` | 5,371ms |
+| 회상 TTS | `REJECTED` | `COMPLETE` | 5,570ms |
+| 호출어 단독 TTS | `REJECTED` | `COMPLETE` | 5,414ms |
+| 실제 진단 화면의 정답 TTS | `PROCESSED` | `COMPLETE` | 7,318ms |
+
+- 전체 14회차 종료 요약에서 입력·출력·오디오 포커스 해제 true, 예약 잔존 false, 출력 정리 실패 false를 확인했다. 처리 후 안내 취소에서도 이미 완료한 로컬 결과를 취소 완료로 덮지 않았다. 부정·호출어 단독 입력의 세부 STT 판정은 이전과 같은 거절 분류 차이가 남지만 명령 후보·처리는 없었다.
+- 계측의 Activity 터치 전달로 홈→설정→음성 진단을 실제 전환했다. UI 계층에서 “호출어 확인 · 명령 후보 (전송 안 함)”, “로컬 처리됨 · 차량 승인 아님”, “음성 안내 완료”, “차량 전송 안 함”을 확인했다. 화면 보호 유지로 픽셀·큰 글자·TalkBack은 미검증이다.
+- 사용자 추가 발화·마이크 참여 시험은 보류했다. 단위 회귀의 만료·UNKNOWN 증거를 기기의 실제 만료·정리 실패·권한 철회 증거로 승격하지 않는다. 자동 접근·잠금·주머니·실차 요청은 미검증/미구현이다.
+- 일회성 host fixture·APK·계측 산출물과 기기의 시험 패키지 `com.heytesla.smoke`는 삭제 승인 없이 보존했다. 시험용 코드는 저장소에 추가하지 않았으며 앱의 상시 녹음·자동 실행 경로도 추가하지 않았다.
+
+## 0.12.0-probe — 수동 BLE 연결 진단
+
+- APK·전체 단위 회귀 71개(실패·오류·건너뜀 0)·Lint 오류 0/경고 11개. BLE 세션 10개와 CCCD readback 3개 회귀는 늦은 token/중복 callback·정리 중 예약 유지·close 실패와 정확한 해제 값 경계를 다룬다.
+- S23에 데이터 보존 업데이트했다. 새 스캔·VIN 재입력·권한 대리 승인·기본 비서 변경·OAuth·키 등록·TX characteristic 쓰기·차량 명령은 수행하지 않았다. 등록 주소는 probe 내부 RAM에만 두며 RX payload는 읽거나 저장하지 않는다.
+- 최초 실제 시작은 `BLOCKED / ASSOCIATION_RESOLVE_FAILED`였다. 같은 등록 주소를 Android SDK에 직접 전달하여 `MacAddress.toString()`은 `IllegalArgumentException`, 바이트 배열 overload는 정상 해석됨을 재현했다. 주소 원문은 기록하지 않았으며 바이트 배열 API로 수정했다.
+- 수정 후 실제 홈 → 설정 → 개발자 진단 → BLE 연결 → 시작 → 증거 펼침의 Compose 의미 계층과 물리 shell tap 9개 확인을 통과했다. 결과는 `TIMED_OUT / CONNECTING_TIMEOUT`, 연결·구독·원격 해제·disconnect 확인 false, 로컬 close true였다. 차량 거리·수면·광고 주소 안정성은 확인하지 않았으므로 원격 연결 실패의 원인을 단정하지 않는다.
+- 중복 enable/disable write callback만으로 원격 해제를 확인하지 않는다. 별도의 CCCD 읽기 성공 및 정확한 두 바이트 `[0, 0]`만 인정한다. 실차 RX 구독·CCCD readback·disconnect 성공은 이번 기기 시험에서 미확인이다.
+- Mobile MCP ref 클릭은 주입된 `mobilecli.so`의 `AgentSpec::Attach` 경로에서 SIGSEGV를 일으켰다. 도구 문제를 보고하고 해당 클릭 경로를 중단했다. 기존 자동화 브리지의 UiAutomation 독점으로 일회성 계측도 충돌했으며, 브리지를 종료한 뒤 native 계측·물리 shell tap으로 실제 화면을 검증했다. `FLAG_SECURE`는 유지했으므로 픽셀 기반 시각 검증은 미완료다.
+- 별도 취소 시험의 실제 화면 조작 11개 확인을 통과했다. UI 취소는 `CANCELED / USER_CANCELED`, HOME 이탈도 `CANCELED`로 종료됐다. 두 경로 모두 로컬 close true·BLE 예약 false였다. 연결 타임아웃 종료에서도 런타임 예약 false를 별도로 단언했다. 실제 차량 연결이 없는 상태의 정리 증거이며 구독된 실차의 원격 해제 성공으로 확대하지 않는다.
+- 검증 뒤 사용자 승인으로 일회성 host 스모크 폴더·시험 AVD(`heytesla_ble_api36`)·S23 시험 패키지 `com.heytesla.gattsmoke`를 삭제했다. 시험 프로세스도 종료했다. 앱 본체·차량 등록·기존 로그·Android SDK 이미지는 삭제하지 않았으며 저장소에는 스모크 코드를 추가하지 않았다.
+
+## 0.13.0-probe — 주말 BLE 반복 시험
+
+2026-10-02, 기존 등록·권한·로그를 보존하여 S23 Android 16(API 36)에 `versionCode=13`을 설치했다. 화면의 **설정 → 개발자 진단 → BLE 연결 → 주말 BLE 시험 시작**을 실제 Compose 의미 계층과 물리 shell tap으로 실행했다. `FLAG_SECURE`는 유지하며 픽셀 레이아웃 검증은 하지 않았다.
+
+- `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug`가 1분 36초에 성공했다. 85개 테스트의 실패·오류·건너뜀 0, Lint 오류 0/경고 13개다. 새 회차 정책 5개·production GATT 소유권 2개·BLE 요약 3개 회귀를 포함한다. 추가 `ApplySharedPref` 경고 2개는 marker 내구성 확인용 동기 `commit()`이며 억제하지 않았다.
+- 업데이트 전 파일 590행·317,361바이트의 전체 prefix가 유지됐다. SHA-256은 `2eef8fed4ca5493fe7b0f3ec1bc237817eae6cae56e1c9cbcc156de09b27c7b7`이다. 새 회차의 스키마 v5·실행/회차 분리·최종 정리 요약·중지 행을 실제 파일에서 확인했다.
+- 계측 실행의 HOME 45초 후 FGS 유지·대기 중 BLE 예약 없음·실제 알림 PendingIntent 중지를 확인했다. 별도로 **계측 없는 앱**에서 HOME 45초 후 `ObservationService`, `isForeground=true`, `types=0x00000010`을 확인했다. 실제 전원 버튼 이후 `mWakefulness=Dozing`, secure keyguard `showing=true`·화면 OFF 상태를 45초 유지한 뒤에도 같은 FGS가 실행 중이었다. 대기 중 `HeyTesla:BleFieldGatt` wake lock은 없었다. 화면 OFF/보안 keyguard 표시의 증거이며 잠금 중 실차 CDM/GATT 수신이나 주말 전체 생존의 증거는 아니다.
+- 합성 CDM 출현/이탈 입력은 실제 Android GATT 요청과 서비스 정리를 사용했다. 첫 회차는 `TIMED_OUT / CONNECTING_TIMEOUT`, 12,137 ms·SDK status null·로컬 close true·예약 잔존 false였다. 중복 출현 및 이탈 없는 재출현은 추가 회차를 만들지 않았다. 실제 이탈에 해당하는 입력 뒤 두 번째 회차를 시작하고 이탈 입력으로 취소했다: `CANCELED / DEPARTED`, 4,058 ms·SDK status null·로컬 close true·예약 잔존 false. 두 회차 모두 연결·서비스·TX/RX·구독·원격 해제·disconnect 확인 false, RX 횟수 0이었다. 차량 거리·수면·주소 안정성을 원인으로 단정하지 않는다.
+- 실제 Bluetooth OFF는 `BLUETOOTH_OFF → BLE_FIELD_STOP_REQUESTED → BLE_FIELD_STOPPED`로 서비스 종료됐다. Bluetooth를 ON으로 복구해도 자동 재시작하지 않았다. 실행 중 앱 강제 종료 후 marker true, 재실행 후 FGS OFF·`BLE_FIELD_PREVIOUS_RUN_UNCLOSED`를 확인했다. 정상 중지는 최종 파일 동기화 후 marker false였다. `MicrophoneService`는 없었으며 OS `RECORD_AUDIO`의 과거 duration `4s91ms`는 그대로이고 새로운 사용은 관측되지 않았다.
+
+### 검증 실행과 현장 실행 분리
+
+아래 검증 실행을 월요일 실차 접근 횟수·실차 연결 성공률에 포함하지 않는다. association ID는 SDK/RAM에서만 사용하고 출력·파일에 기록하지 않았다.
+
+| `trialId` | 구분 |
+| --- | --- |
+| `비공개 회차 ID` | native 계측 HOME 대기·알림 중지 |
+| `비공개 회차 ID` | 합성 출현/이탈 2회차·중복 차단·정리·알림 중지 |
+| `비공개 회차 ID` | 계측 없는 HOME 대기·의도적 강제 종료 |
+| `비공개 회차 ID` | 실제 Bluetooth OFF 종료·ON 복구 |
+| `비공개 회차 ID` | **주말 실제 수집을 위해 켜 둔 실행**. 검증 종료 시 실제 출현 0·회차 0, 화면 OFF/보안 keyguard 대기에서 FGS 유지 |
+
+### 주말 사용과 월요일 회수
+
+1. `0.13` 검증 종료 시 실제 수집 실행을 켜 두었으며 이후 업데이트로 해당 실행은 종료됐다. 현재 실행 상태는 아래 최신 버전 기록을 따른다. 대조 시험은 조건을 선택하여 한 번 시작하고 매 방문마다 다시 누르지 않는다. 지속 알림에서 대기/회차 상태를 확인한다.
+2. Bluetooth·알림을 유지하고 평소처럼 차량에 접근·이탈한다. 서비스는 실제 BLE 출현마다 한 회차를 수행하며 종료 후 실제 이탈을 기다린다. 마이크·키 등록·인증·차량 명령은 사용하지 않는다.
+3. 중지는 진단 화면 **주말 BLE 시험 중지** 또는 알림 **시험 즉시 중지**를 사용한다. 권한/등록/Bluetooth/로그 조건 상실·시스템/사용자 종료·재부팅 후에는 자동 복원하지 않는다. 알림이 사라졌으면 앱에서 로그 건강·중지 코드를 확인하고 필요할 때 다시 명시적으로 시작한다. 새 실행은 새 `trialId`다.
+4. 파일은 2 MiB 한도이며 자동 삭제·회전하지 않는다. 30분 heartbeat는 CPU 절전 중 지연될 수 있으므로 공백만으로 서비스 종료나 미접근을 판정하지 않는다.
+5. 월요일 USB로 `no_backup/field-diagnostics/events.jsonl`을 회수한다. 기존 파일을 삭제·초기화하지 않고 위 검증 ID를 제외한다. 실행별 `START/RUNNING/STOPPED`, 실제 `APPEARED/DISAPPEARED`, `attempt`별 단계/최종 요약과 원 SDK status, 원격 해제·disconnect·close·예약 잔존, 로그 건강·미정상 marker를 분리하여 분석한다. `BLE_FIELD_PREVIOUS_RUN_UNCLOSED`는 원인 불명이며 OS가 종료했다고 단정하지 않는다.
+
+실차 출현/구독·잠금 중 GATT·장기 반복 자원/배터리·권한 철회·등록 상실 실측과 픽셀 시각 검증은 남는다. JVM 회귀 및 합성 출현은 이 항목들의 대체 증거가 아니다.
+
+검증용 임시 산출물 정리 후 실제 주말 FGS 유지·등록 1대·기존 전체 로그 prefix 보존을 확인했다. 앱 본체와 현장 로그는 삭제하지 않았다.
+
+## 0.14.0-probe — BLE 감지 대조 시험
+
+2026-10-06, S23 Android 16(API 36)에 기존 데이터 보존 설치로 `versionCode=14`를 적용했다. **기준 방식**은 CDM 출현당 한 회차, **개선 방식**은 BT 보조·주소 필터 스캔·제한 재시도다. 감지만/GATT 수행과 `autoConnect=true`는 독립 옵션이며 실행 중 고정한다. 후보 순번은 방문 횟수가 아니다.
+
+- 전체 `:app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon`가 4분 54초에 성공했다. 110개 테스트의 실패·오류·건너뜀 0, Lint 오류 0/경고 13개다. 후보 evidence 기록 중 로그 실패가 동기 stop을 유발하는 회귀를 수정 전 실패로 재현했고, stop 뒤 GATT 발급/재무장 금지를 적용한 뒤 전체 회귀에서 통과했다. GATT START 기록 중 취소와 늦은/중복 callback·close 실패·예산 경계도 포함한다.
+- 설치 전 932행·666,825바이트의 전체 prefix는 실기기 smoke 뒤에도 유지됐다. SHA-256은 `11214f754e51f780b214d0ba0dfcfdadf62e89afb6113adb6b84633bc5dbeaf1`이다. 스캔/GATT 재개 포함 최종 회수는 1,156행·939,837바이트이며 `0.14`의 v6 행 224개였다. 시험 패키지 삭제 뒤에도 전체 파일 바이트가 같았다. 이전 기록·등록·앱 데이터를 초기화하지 않았다.
+- 실제 Compose 접근성 계층의 설정→개발자 진단→BLE 연결에서 기준 시작, 감지만+BT 보조 선택/시작, 합성 BT 입력 뒤 후보 1·GATT 0·예약 없음, 화면 중지를 확인했다. 개선 선택 뒤 SCAN 요청 버튼 표시도 확인했으며 승인 버튼은 조작하지 않았다. 초기 스모크의 접근성 캐시/좌표 입력 실패는 검증 도구를 수정했고 앱 UI 성공으로 세지 않았다. `FLAG_SECURE`는 유지하여 픽셀 레이아웃 검증은 하지 않았다.
+- 합성 CDM 출현 2회와 BT 연결 입력을 하나의 후보로 처리했다. 실제 Android GATT 첫 회차는 `CONNECTING_TIMEOUT` 12,150ms, 제한 재시도 두 번째도 `CONNECTING_TIMEOUT` 12,155ms였다. 후보 1·발급/완료 2 뒤 추가 발급 없음, 두 회차 모두 `localClosed=true`·`leaseRetained=false`였다. 본시험/정리 SDK status·첫 RX는 모두 null, 연결 false·RX 0이었다. 실제 차량 접근/구독 성공이나 원인을 만들어내지 않는다.
+- 독립 백그라운드 연결 조건은 실제 GATT 요청 대기 뒤 사용자 중지로 취소됐다. `backgroundConnect=true`, 5,176ms·`USER_STOP`·로컬 close true·예약 잔존 false였다. 백그라운드 연결 성공의 증거는 아니다. 실제 지속 알림의 **시험 즉시 중지** PendingIntent는 `BLE_FIELD_NOTIFICATION_STOP`으로 종료됐다.
+- 감지만+BT 보조 실행은 HOME 후 유지됐고 화면 OFF 15초 뒤에도 active true·후보 1·GATT 0·예약 없음이었다. 중지 뒤 active false·`USER_STOP`을 확인했다. 이는 계측 프로세스에서의 짧은 OFF 관측이며 `0.13`의 계측 없는 45초/보안 keyguard 관측이나 주말 장기 생존과 구분한다.
+- 실제 `BLUETOOTH_SCAN=false`에서 스캔 선택 시작은 `BLUETOOTH_SCAN_PERMISSION_REQUIRED`로 차단됐고 서비스/GATT가 시작되지 않았다. 등록 주소 대문자 단일 `ScanFilter`의 SDK 생성도 성공했다. 이어 사용자가 권한을 직접 허용한 뒤 실제 LOW_POWER 필터 스캔 running true·실패 null을 확인했다. 40초 창 뒤 42초 관측에서 running false, 120초 주기 재개에서 true, 최종 중지에서 false·active false·GATT 0이었다. 실행 전체는 120,153ms였다. 광고 match/후보는 0이므로 실차 감지 성공이 아니다. 권한 자동 승인·무필터 fallback은 없었다.
+- 스캔+GATT 별도 실행은 최초 scan running true에서 합성 CDM 출현으로 GATT 1회·scan false로 전환했다. HOME에서도 시험/예약이 유지됐고 최종 중지 뒤 완료 1·scan false·active false·예약 없음이었다. 2.5초 뒤에도 스캔/새 GATT가 재개하지 않았다. 해당 GATT는 `USER_STOP` 5,146ms·로컬 close true·예약 잔존 false였다.
+- 정상 대기 재개를 따로 검증했다. 실제 GATT 1회는 `CONNECTING_TIMEOUT` 12,074ms 뒤 `localClosed=true`·`leaseRetained=false`였다. 스캔은 cooldown 중 false를 유지한 뒤 최초 SDK 시작으로부터 120,018ms 후 재개했고 GATT/예약은 추가 발급하지 않았다. 최종 중지에서 scan false·active false를 확인했다. 일회성 실기기 스모크 10개 시나리오가 PASS였다. 잠금 중 스캔/실차 match는 별도다.
+- OS `RECORD_AUDIO`의 과거 duration `4s91ms`는 유지됐고 새 마이크 사용은 관측되지 않았다. TX·키·인증·명령·UWB ranging은 실행하지 않았다. 모든 시험 실행은 종료했으며 실차 수집을 자동으로 켜 두지 않았다.
+
+### 0.14 검증 실행 제외 목록
+
+아래 실행은 실제 방문·실차 감지율 분모에서 제외한다. 권한 거절과 SDK 필터 생성은 새 실행을 발급하지 않았다.
+
+| `trialId` | 구분 |
+| --- | --- |
+| `비공개 회차 ID` / `비공개 회차 ID` / `비공개 회차 ID` | UI 입력 도구 조정 중 기준 시작/정상 중지 |
+| `비공개 회차 ID` / `비공개 회차 ID` | 초기 UI 스모크 실패로 정상 중지 미기록; 실차/자발적 OS 종료로 해석하지 않음 |
+| `비공개 회차 ID` | 수정된 UI 스모크의 기준 시작/중지 |
+| `비공개 회차 ID` | UI 감지만+합성 BT 후보·화면 중지 |
+| `비공개 회차 ID` | 합성 중복/자기 BT 억제·실제 GATT 제한 재시도 2회 |
+| `비공개 회차 ID` | 백그라운드 연결 요청 취소·close |
+| `비공개 회차 ID` | 실제 알림 중지 |
+| `비공개 회차 ID` | 계측 HOME·화면 OFF·감지만·중지 |
+| `비공개 회차 ID` | 수동 SCAN 승인 후 실제 필터 스캔 40초 종료/120초 재개·감지만·중지 |
+| `비공개 회차 ID` | GATT 중 스캔 정지·HOME·최종 중지 후 재개 없음 |
+| `비공개 회차 ID` | 실제 GATT 타임아웃/close·예약 반환 뒤 최소 120초 스캔 재개·최종 중지 |
+
+일회성 native 스모크는 저장소 밖에서 실행했다. 사용자 명시 승인 후 `com.heytesla.bleimprovementsmoke`와 `heytesla-ble-improvement-3oki1875/native-smoke/`만 삭제했다. 본 앱은 유지됐고 시험 패키지는 사라졌으며 전체 현장 로그 바이트와 업데이트 전 두 백업을 보존했다. 정리 뒤 `ObservationService`·`MicrophoneService`·`HeyTesla:BleFieldGatt` wake lock 없음과 과거 녹음 duration `4s91ms` 유지를 확인했다. 실차 왕복 대조·광고 match·잠금 스캔·유효 UWB 거리·장기 전력 비용·픽셀 시각 검증은 남는다.
+
+## 0.15.0-probe — 차량 방문 전 준비
+
+### UWB 지원 조회 실측
+
+- 기존 1,156행·939,837바이트의 JSONL을 설치 전에 보존하고 `adb install -r -t`로 데이터 유지 업데이트했다. APK·110개 JVM 회귀에서 실패/오류/건너뜀 0, Lint 오류 0·경고 13개다. 외부 UWB dependency·거리 권한 선언/승인·기본 비서 변경은 없다.
+- 실제 MainActivity와 UI 의미 노드로 **설정 → 개발자 진단 → UWB 지원 → UWB 지원 확인 → 상세 보기**를 조작했다. 상태 `COMPLETE`, hardware feature true, framework backend true, `RANGING`/`UWB_RANGING` 권한 false를 확인했다. 별도 공개 SDK callback 조회의 모든 nullable scalar/list와 앱의 RAM metadata가 일치했다.
+- 가용 코드 `3 / ENABLED`; 거리·방위각·고도각·background capability 지원 보고 true, 최소 간격 100 ms다. 원시 지원 코드는 channels `6,8,9,10,12,13,14`, config IDs `1,2,3,4,5`, preambles `9,10,11,12,25,26,27,28,29,30,31,32`, slot enum `2,1`, update-rate enum `1,2,3`이다. 공개 지원 보고이지 실제 거리·차량과의 채널 합의·인증 성공이 아니다.
+- slot getter의 SDK Javadoc에는 microseconds가 적혀 있으나 반환 annotation은 `@SlotDuration`이고 `UwbRangingParams.DURATION_1_MS=1`/`DURATION_2_MS=2`다. 실제 반환도 `2,1`이어서 시간값으로 임의 변환하지 않고 **SDK enum 원시 코드**로 표시한다.
+- 실제 capability를 받은 뒤 같은 Main looper에서 취소·취소 후 늦은 callback·새 generation에 이전 응답을 주입해 이전 요청이 복원되지 않음을 확인했다. deadline 경계는 앱 소유 요청의 deadline을 지난 값으로 주입한 검증이며 실제 10초 무응답 OEM 장애를 관측한 결과가 아니다.
+- 실제 Activity 재생성에서 이전 요청/manager/callback 해제와 새 상태 `IDLE`·metadata null을 확인했다. HOME 이동 뒤 표시 상태 false·UWB 예약 없음, 종료 전 로그 pending 0·마이크/오디오 세션 없음도 확인했다.
+- 앱 runtime의 정리 실패 예약을 주입한 별도 시험에서 Activity 재생성 뒤 `CLEANUP_FAILED` 유지, metadata null, 재조회·BLE·관찰·자동 마이크·STT 예약 차단과 실제 조회 버튼 비활성을 확인했다. **OEM register/unregister 예외를 실제 발생시킨 시험은 아니다.**
+- `FLAG_SECURE`는 유지했다. 실제 UI 조작·의미 노드·runtime/SDK 값 검증이며 보호 화면의 픽셀 가독성·TalkBack·큰 글꼴 검증은 아니다. 공식 Tesla 앱은 GMS backend이므로 이 framework 결과를 동일한 경로의 성공으로 취급하지 않는다. 우리 앱은 ranging session·peer/address/STS·TX·차량 명령을 만들지 않았다.
+
+### 휴대폰 단독 일반 배경·조건 상실·중지
+
+- 별도 UI 실행기는 자기 패키지를 target으로 종료했고 본 앱은 일반 프로세스의 개선 감지만 FGS로 남았다. 2,100.014초 동안 중간 ADB 조회/깨우기 0회로 대기했고 종료 때 FGS 생존·동일 process·30분 heartbeat 1개·GATT 회차 0·오디오 세션 없음·원본 prefix 보존을 확인했다.
+- **35분 화면 OFF/잠금 유지는 입증되지 않았다.** 처음 shell sleep 명령은 요청됐지만 heartbeat의 실제 환경은 interactive true·deviceLocked false·배터리 100%였다. USB 충전 일반 배경 생존 결과이며 비충전 deep Doze·장기 잠금·배터리 비용으로 확대하지 않는다.
+- 최초 일회성 실측 스크립트는 주기마다 `SCAN_STARTED`가 기록된다고 가정하고 마지막 로그 시각을 35분 경과로 판정해 `FAIL`을 남겼다. 실제 코드는 최초/명시적 resume만 기록하고 정상 창 전환은 기록하지 않는다. 마지막 행은 30분 heartbeat다. 이 관측 한계를 숨기거나 스크립트 실패를 새 정상 로그로 덮어쓰지 않았다.
+- 자기 앱의 OS 스캔 통계는 LOW_POWER 시작 누계 26회·활성 누계 880,028 ms·수신 결과 0이었다. 누계에는 이전 시험이 포함되므로 35분 동안의 새 창 수로 세지 않는다. 창별 40초/120초 실측은 앞선 0.14 결과와 구분한다.
+- 별도 일반 앱 실행에서 시스템 잠금 동작 후 65.349초 동안 양 끝 `Dozing`과 FGS 생존을 확인했다. target 앱은 계측 프로세스가 아니었다. 짧은 화면 꺼짐 결과이며 35분 잠금/주머니 성공이 아니다.
+- Bluetooth OFF 뒤 `BLE_FIELD_STOP_REQUESTED`/`BLE_FIELD_STOPPED`, FGS/스캔/오디오 해제를 확인했다. ON 복원 뒤 자동 재시작은 없었다. 정상 중지 후 프로세스 재생성도 실행 OFF였으며 새 시험은 명시적 UI 시작으로만 실행됐다.
+- 잠금 상태 앱 접근은 `PHONE_LOCKED`로 거부했다. 잠금 알림의 중지 자동 조작도 완료되지 않았으므로 합격 처리하지 않았다. 사용자 직접 잠금 해제 후 기존 진단 화면의 **주말 BLE 시험 중지**를 실제 조작해 `USER_STOP`과 두 종료 event를 확인했다. 마지막에는 Bluetooth ON·FGS/마이크 서비스 없음·GATT wake lock 없음·자동 마이크/세션 false였다.
+
+다음 UUID는 휴대폰 단독 검증 실행이며 실제 방문 분모에서 제외한다.
+
+|실행 UUID|구분|
+|---|---|
+|`비공개 회차 ID`|일반 배경 35분·Bluetooth OFF 종료|
+|`비공개 회차 ID`|별도 65초 Dozing·잠금 UI 차단·조건 상실 종료|
+|`비공개 회차 ID`|사용자 잠금 해제 후 실제 UI 시작·USER_STOP|
+
+원본 1,156행·939,837바이트 전체 prefix를 보존한 최종 파일은 1,277행이다. 앞선 0.14 제외 14개와 위 3개를 실제 CLI에 전달해 214행 제외·1,063행 분석·오류 0을 확인했다. 원본 JSONL·백업·실측 보고서는 보존했다. 사용자 승인으로 `com.heytesla.prevehiclesmoke`와 저장소 밖 `native-smoke/`, `standby-measure.py`만 제거했다.
+
+### v1~v6 분석기 실행 검증
+
+- Python 표준 라이브러리의 `tools/analyze_field_log.py`와 행동 회귀 19개를 실행해 모두 통과했다. 최종 요약만 회차로 집계하고 status `0`·null, 본시험/정리 status, 중복/충돌 최종 요약, clock/process/reboot 경계, typed 후보와 실제 방문 분모를 분리한다.
+- 보존 원본 1,156행에 실제 CLI의 JSON 출력과 기본 한국어 출력을 실행했다. 전체 1,156행 분석·파싱/미지원/계약 오류 0, 최종 GATT 회차 11·COMPLETE 1이다. 실행 후 SHA-256이 같았다. `attempt=0`의 `IDLE/BLOCKED` 시작/대기 스냅샷은 실제 GATT 회차가 아니며 오류도 아니다.
+- 앞선 0.14 검증 UUID 14개를 반복 제외하면 182행 제외·974행 분석, 최종 회차 6·COMPLETE 1이다. 남은 종료 회차에는 이전 수동 BLE 진단 2회와 `비공개 회차 ID`의 0.13 회차 4회가 포함된다. **최종 회차 6은 실제 방문 6회가 아니다.** 과거 COMPLETE 1도 차량 인증·거리 성공으로 승격하지 않는다.
+- 헤더만 있는 `tools/field_visits.csv`를 실제 CLI에 전달해 유효 방문 기록 0, clockAligned false, 두 비율 null을 확인했다. 이는 물리 방문 0회가 아니라 기록 분모 없음이다. 유실 수는 null·writer health는 schema 밖·완전성은 `not_proven`으로 남는다.
+- 실제 파일 실행에서 발견한 미시작 회차 오인과 legacy trial의 내부 set 직렬화 실패를 수정했다. 단일 UTF8 손상/절단은 해당 행에 고정 코드와 행번호만 남기고 정상 앞뒤 행은 분석한다. unknown/private 값·입력 경로를 오류에 반영하지 않으며, 잘못된 CLI 인수의 고정 `ARGUMENT_ERROR`·exit 2도 실행 확인했다.
+- 종료 코드는 정상 분석 0, 파싱/계약 또는 CSV 경고가 있는 부분 분석 1, 인수/입력 읽기 실패 2다. stdout 보고서와 stderr 고정 오류를 구분한다. 보고서를 만들 수 없는 입력을 빈 정상 결과로 대체하지 않는다.
+
+
+## 0.16.0-probe — 수동 차량 키 등록·읽기 진단
+
+### 차량 방문 전, 차량 없는 범위의 검증
+
+- APK와 계측 APK 빌드, JVM 132개(신규 프로토콜 회귀 22개), Lint 오류 0·경고 13개를 확인했다. S23에 데이터 유지 업데이트로 `versionCode=16` / `0.16.0-probe`를 설치했다.
+- 응답 암호화 flag를 enum 값 `1`로 보내던 결함은 실제 한 회 조회 회귀에서 먼저 실패했다. 공식 비트 마스크 `1 shl 1`로 수정한 뒤 전체 회귀가 통과했다. 실제 차량 응답을 받은 결과가 아니라 독립 JCA 상대 키와 protobuf 응답을 사용하는 host 검증이다.
+- S23의 실제 AndroidKeyStore에서 키 재사용과 ECDH 세션키 일치 2개 계측을 통과했다. 별도 회귀 alias를 사용하며 생산 키를 삭제/교체하거나 차량에 등록하지 않았다. 회귀 키는 보존한다.
+- S23 실제 화면에서 **설정 → 개발자 진단 → 차량 키**를 조작했다. 합성 VIN 입력으로 조회 버튼 활성화·등록 동의 미선택·등록 버튼 비활성화를 확인하고, HOME 이탈과 사용자 재실행에 해당하는 복귀 뒤 VIN 비움·조회 버튼 비활성화를 확인했다. 등록 동의·등록/조회 버튼은 실행하지 않았다. 위 2개와 UI 1개를 함께 실행한 최종 계측은 **3개 모두 통과**했다.
+- 초기 모바일 도구의 `UiAutomation` 연결 점유는 S23용 `com.mobilenext.mobilecli.DeviceServer` 프로세스만 종료해 해소했다. 화면 회귀 도우미의 창 선택·배경 복귀·이미 선택된 탭 재클릭 문제도 수정했다. 앱 삭제·데이터 초기화·권한 자동 수락·보호 화면 해제는 하지 않았다.
+- 설치 전 1,278행 전체의 바이트 prefix를 보존한 최종 로그는 1,308행이다. 합성 VIN은 로그에 없으며 별도 백업과 원본을 보존했다. 실제 로그 분석 CLI는 exit 0·오류 목록 비움이었다. 종료 상태는 Bluetooth ON, 자동 마이크·오디오 세션·관찰·주말 BLE 실행 OFF이며 자기 앱의 활성 서비스 0개다.
+- Lint의 `LocalContext` → Activity 직접 변환 오류 2개는 `LocalLifecycleOwner` 관측으로 수정했다. 보호 화면 `FLAG_SECURE`는 유지한다. 픽셀 가독성·TalkBack·큰 글꼴 검증은 수행하지 않았다.
+- 실물 키카드 승인, 실제 Tesla TX/MTU/응답, 차량 키 저장·BLE 인증·암호 상태 수신은 아직 검증하지 않았다. 프렁크·잠금·주행 명령이나 UWB ranging을 실행하지 않았다.
+
+### 차량 방문 당시 안내 — 현재 재방문·재등록 권고 아님
+
+**아래는 0.16 방문 전에 전달한 절차의 기록이다. 실제 방문은 5회 전송 시도 모두 결과 불명이며, 지금 같은 절차를 다시 실행하도록 권하지 않는다. 수정과 검증 한계는 다음 0.17 기록을 따른다.**
+
+1. **휴대폰과 실제 키카드**를 준비한다. 차량을 안전하게 주차하고 운전 중 조작하지 않는다. 공식 Tesla 앱과 기존 폰키를 유지한다. 앱의 상태 조회는 P를 읽지 않으므로 주차 상태는 사람이 확인한다.
+2. 다른 관찰·주말 BLE·음성 진단을 중지한다. 휴대폰을 잠금 해제하고 Bluetooth ON 상태에서 **설정 → 개발자 진단 → 차량 키**로 이동한다. VIN 17자리는 차량/공식 앱에서 확인해 현장에서 입력하며 채팅이나 로그에 붙여 넣지 않는다.
+3. **우리 앱 키 추가와 차량 키카드 직접 승인에 동의**를 직접 선택하고 **키 추가 요청 · 카드 승인 후 상태 1회 조회**를 한 번 누른다. 카드 대기 표시가 나면 차량 화면이 안내하는 실제 카드 리더 위치에 키카드를 대어 승인한다. 특정 연식의 센터콘솔 위치를 이 차량의 리더 위치로 추정하지 않는다.
+4. 카드 대기는 최대 120초, 전체는 최대 180초다. 화면을 유지하고 등록 응답 관측과 암호 상태 수신을 구분한다. **인증·상태 조회: 인증 검증 후 암호화된 읽기 전용 상태 수신**과 실제 잠금/프렁크 수신 값을 확인한다. 미수신 필드는 미확인이며 프렁크 개방·제어 준비로 해석하지 않는다. 차량 키 목록도 확인해 새 키와 기존 폰키를 구분한다.
+5. 등록과 암호 상태 수신이 확인된 경우에만 VIN을 다시 입력하고 **우리 앱 키로 인증·상태 1회 조회**를 한 번 실행해 동일 키의 새 세션을 확인한다. 등록 버튼을 다시 누르지 않는다.
+6. 실패·취소·시간 초과·등록 불명에서는 자동 재전송하지 않는다. 화면의 **단계·고정 실패 이유·시각**만 기록한다. VIN·키·원시 응답은 보내지 않는다. 기존 키를 삭제하지 말고 귀환 후 보존 로그와 차량의 실제 키 목록을 대조한다. 로컬 연결 종료는 등록 철회 증거가 아니다.
+
+당시 안내한 성공 기준은 **우리 앱 키 추가와 읽기 전용 암호 상태 1회 수신**이었다. 이번 방문에서 이 기준의 통과를 확인하지 못했다. 잠긴 주머니 자동 접근·호출어·프렁크·차량 UWB 인증은 별도 실차 검증이다.
+
+## 0.17.0-probe — 차량 키 자기 예약 오류 표시 수정
+
+### 실제 방문 결과와 원인
+
+- 사용자가 VIN 입력 후 등록 시작 버튼을 눌렀을 때 다른 관찰·오디오·BLE·UWB 진단을 종료하라는 빨간 문구가 표시됐다. UI가 시작 전 입장 검사 `teslaKeyBlockedReason()`를 진행 중에도 호출하여 자기 예약을 외부 충돌로 오인했다. 실제 외부 예약 충돌과는 별개의 표시 결함이다.
+- 보존 로그의 방문 5회는 각각 `STARTED → CREDENTIAL_READY → SUBSCRIBED → TX_ATTEMPTED → RESULT_UNKNOWN → LOCAL_CLOSED`다. 따라서 시작 자체가 차단됐다고 해석할 수 없으며, 전송 시도는 차량 수신·키 등록의 증거가 아니다. 등록 완료 보고와 검증된 암호 상태 수신은 확인하지 못했다.
+- 수정 전 마지막 RAM 화면은 취소·등록 요청·결과 불명과 고정 이유 `UI_PAUSED`를 표시했다. 이는 마지막 실행이 앱 배경 전환으로 취소됐다는 근거이며, 앞선 5회 모두의 종료 이유로 일반화하지 않는다. 로컬 종료는 등록 철회·미등록의 증거가 아니다.
+- 0.16 휴대폰 검증은 버튼 활성화·입력 지움까지만 확인하고 실제 시작을 실행하지 않았다. 이를 차량 방문 준비의 충분한 근거로 안내한 검증 공백이다. **지금 재방문·등록 반복을 권하지 않는다. 기존 키·앱 데이터·로그를 삭제하거나 초기화하지 않는다.**
+
+### 수정과 휴대폰 단독 검증
+
+- 정리 실패를 먼저 표시하고, 정상적인 자기 예약/진행 중에는 시작 전 충돌 문구 대신 진행 단계를 표시한다. 취소 버튼을 시작 버튼 바로 아래로 옮겼으며 VIN·동의·두 시작 버튼은 계속 비활성화한다. 실제 외부 진단 예약의 오류 표시와 runtime 입장·전송 안전 검사는 바꾸지 않았다.
+- APK·계측 APK 빌드, JVM 132개·실패 0, Lint 오류 0·경고 13개를 확인했다. S23에 데이터 유지 업데이트로 `versionCode=17` / `0.17.0-probe`를 설치했다.
+- S23 최종 계측 **5개 모두 통과**: 실제 AndroidKeyStore 재사용/ECDH 2개, HOME 이탈 시 VIN 비움·등록 미승인 1개, 자기 예약의 재진입 비활성화·충돌 오류 없음과 외부 UWB 예약의 오류 표시 1개, 실제 읽기 진단의 키 준비 중 취소·로컬 정리·예약 해제 1개다. UI 회귀의 오래된 접근성 캐시는 매 탐색 전 `UiAutomation.clearCache()`로 갱신했다.
+- 읽기 진단은 같은 Main 실행 안에서 시작 후 즉시 취소하여 IO 준비 반환 전에 전송을 봉인했다. 실제 `PREPARING_KEY`, 취소 결과, 로컬 종료, 전송 시도 없음, UWB 예약 복구를 확인했다. 차량 연결·등록 동의·NFC 승인·차량 TX는 실행하지 않았다.
+- 설치 전 1,364행 전체의 바이트 prefix를 보존한 최종 로그는 1,400행이다. 휴대폰 취소 검증 3회는 각각 `TESLA_KEY_STARTED → TESLA_KEY_CANCELED → TESLA_KEY_LOCAL_CLOSED`이며 새 키 전송 event는 없다. 합성 VIN은 로그에 없고 설치 전·최종 백업을 보존했다. 실제 분석 CLI는 exit 0·1,400행 분석·파싱/미지원/계약 오류 0이며 입력 SHA-256도 유지됐다.
+- 종료 로그의 자동 마이크·오디오 세션·관찰·주말 BLE·스캔은 OFF였고, 기기 조회에서 Bluetooth ON·자기 앱 활성 서비스 0개를 확인했다. `FLAG_SECURE`는 유지했으며 픽셀 가독성·TalkBack·큰 글꼴은 검증하지 않았다.
+- **이 수정은 잘못된 충돌 표시의 수정이지 실차 등록 성공의 증거가 아니다.** 차량 카드 승인·키 저장·새 세션 인증·암호 상태 수신·실차 제어는 여전히 미확인이다.
+
+## 0.18.0-probe — 인증 ACK 처리와 실패 근거 분리
+
+### 실차 관측과 수정 근거
+
+- 0.17의 추가 읽기 시도 2회는 전송 뒤 각각 293ms·282ms에 결과 불명과 로컬 종료로 끝났다. 마지막 RAM 실패 이유는 고정 문구 `차량 키 인증 응답이 올바르지 않습니다`였다. `UI_PAUSED`는 로컬 종료 이후라 이번 조기 실패의 원인으로 해석하지 않는다. 등록 완료 보고·검증된 상태 수신은 없다.
+- 해당 문구는 당시 session info 이외 payload 또는 서명/태그 누락 분기였다. 원시 RX는 보관하지 않아 어느 경우였는지 복원할 수 없다. 따라서 아래 ACK 호환성 결함을 발견했어도 **실차 실패 원인이 ACK였다고 확정하지 않는다.**
+- 고정한 공식 [session dispatcher](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/internal/dispatcher/dispatcher.go)는 무오류 응답 뒤 인증 세션을 기다린다. 앱도 요청에 대응하는 명시적 `OK`·무오류·payload 없는 ACK에서는 기존 기한 안에 대기하도록 수정했다. ACK는 인증 성공이 아니며 재전송·기한 연장은 없다.
+- 공식 [응답 오류 판정](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/protocol/error.go)에 맞춰 키 미등록 fault/session status 보고를 구분한다. 서명 없는 부정 보고를 인증된 키 부재로 승격하지 않는다. 정상 session info는 서명·태그 길이·파라미터·HMAC 검증을 모두 통과해야 암호 상태 요청을 보낸다.
+- ACK·요청 거부·미등록 보고·작업 거부·예상 밖 payload·미지원 status·서명/태그 누락·태그 길이·파라미터·HMAC·session info 오류를 12개 고정 `TESLA_KEY_AUTH_*` 코드로 분리했다. 종료의 일반 결과 불명보다 먼저 기록하며 원시 응답·VIN·키·주소·예외 원문은 저장하지 않는다.
+
+### 실행 검증과 한계
+
+- 수정 전 컴파일된 실제 protocol에 독립 peer의 정상 ACK를 넣어 즉시 `Failed`를 재현했다. 수정 후 같은 실제 protocol의 **OK ACK → Waiting → HMAC 검증된 세션 → 암호화된 읽기 전용 요청 → 인증된 상태 Complete** 경로를 실행했다. 요청을 peer에서 복호화해 정보 조회임을 확인하고 잠금 1·프렁크 0 응답을 검증했다. 이는 독립 가상 peer 검증이지 실차 성공이 아니다.
+- APK·계측 APK 빌드 성공, JVM **139개·실패/오류/건너뜀 0**, Lint 오류 0·경고 13개다. S23에 기존 데이터를 유지해 `versionCode=18` / `0.18.0-probe`를 설치하고 실제 MainActivity 전경 실행을 확인했다.
+- 최초 계측은 모바일 자동화 서버의 `UiAutomationService already registered` 충돌로 UI 3개가 실행되지 못했다. 해당 서버만 종료한 뒤 **5개 모두 통과**했다. 실제 AndroidKeyStore 재사용/ECDH, HOME 이탈 시 VIN 비움·미승인, 자기/외부 예약 UI, 읽기 준비 중 즉시 취소·로컬 정리·예약 해제를 검증했다. 차량 연결·등록 동의·NFC 승인·차량 TX는 실행하지 않았다.
+- 설치 전 로그 1,429행 전체의 바이트 prefix가 유지된 최종 로그는 1,450행이다. 추가 키 이벤트는 `STARTED → CANCELED → LOCAL_CLOSED`뿐이며 전송 시도와 합성 VIN 기록이 없다. 기존 분석 함수에 실제 로그를 입력해 1,450행 분석·파싱/미지원/계약 문제 0을 확인했다. 이는 로그 손실이 전혀 없다는 증명은 아니다.
+- `FLAG_SECURE`는 유지하며 네이티브 UI 동작만 검증했다. 픽셀 가독성·TalkBack·큰 글꼴은 미검증이다. **실차 키 저장·새 세션 인증·암호 상태 수신·제어는 여전히 미확인이다. 추가 차량 방문·등록 반복을 권하지 않으며 기존 키·데이터·로그를 삭제하거나 초기화하지 않는다.**
+
+## 0.19.0-probe — 조회 결과를 큰 문구와 색으로 구분
+
+- 이미 종료된 조회를 사용자가 3분 더 기다렸다는 관찰에 따라 상단과 조회 버튼 바로 아래에 큰 결과 문구와 종료 근거를 표시했다. 진행·정리는 파랑, 검증된 조회 성공은 초록, 실패·시간 초과·시작 불가·정리 실패는 빨강, 취소는 노랑이다. 종료 문구는 더 기다릴 필요가 없음을 알린다.
+- 기존 probe 상태에서 결과를 파생한다. 결과 불명을 성공으로 바꾸지 않고 정리 실패를 우선하며 프로토콜·기한·재시도·등록 동의·차량 조작은 변경하지 않았다.
+- APK와 계측 APK 빌드, JVM 139개(실패·오류·건너뜀 0), S23 기존 계측 5개를 통과했다. 일회성 native smoke로 실제 화면에 조회 전·진행·성공·실패·시간 초과·취소·시작 불가·정리 실패·정리 중 9종의 합성 RAM 상태를 표시해 보이는 제목, polite live region, 실패·시간 초과 이유 노출을 확인했다. 합성 상태는 복원했고 일회성 검사 코드는 제거했다.
+- 기존 데이터를 유지해 `versionCode=19` / `0.19.0-probe`를 설치하고 MainActivity 실행을 확인했다. 기존 로그 1,451행의 전체 바이트 prefix가 1,465행 로그에 유지됐으며 추가 전송 이벤트는 없다. 실제 차량 연결·등록·NFC 승인·차량 명령을 실행하지 않았다.
+- `FLAG_SECURE`를 유지했다. 네이티브 접근성 표면은 검증했지만 픽셀 색·큰 글꼴·TalkBack 실제 낭독은 미검증이다. **실차 인증·암호 상태 수신 성공의 증거는 아니다.**
+
+## 0.20.0-probe — 설정에서 차량 앱 키 등록
+
+- 설정의 **차량에 앱 키 등록**에서 VIN·명시적 동의·시작·차량 키카드 승인 안내로 직접 이어진다. 기존 실제 등록·인증 프로토콜을 공유한다. 등록 보고와 앱 키 확인을 구분하며 기술 상세는 접고 읽기 전용 조회는 진단에 유지한다.
+- APK·계측 APK 빌드, JVM 139개(실패·오류·건너뜀 0), Lint 작업과 S23 계측 8개를 통과했다. 실제 네이티브 화면에서 설정 진입·VIN만으로 등록 불가·동의 후 활성화·뒤로 이탈 후 VIN/동의 초기화를 확인했다. 등록 준비 중 즉시 취소가 전송·등록 보고 없이 예약을 해제하는 것도 확인했다.
+- 합성 RAM 상태를 실제 화면에 표시해 키카드 승인 대기 → 앱 키 확인 중 → 등록 보고 수신·앱 키 확인 실패를 확인했다. 인증된 상태 완료만 확인 성공으로 표시하고 정리 실패가 이를 우선한다. 합성 상태는 시험 종료 시 복원한다.
+- 데이터를 유지한 설치로 `versionCode=20` / `0.20.0-probe`와 MainActivity 실행을 확인했다. 기존 1,490행 전체 바이트 prefix가 1,511행에 유지됐고 추가 TX 이벤트·합성 VIN 기록은 없다. 실제 차량 연결·등록·NFC 승인·차량 명령은 실행하지 않았다.
+- `FLAG_SECURE` 유지. 접근성 표면만 검증했으며 픽셀 색·큰 글꼴·TalkBack 실제 낭독은 미검증이다. **실차 등록·인증·암호 상태 수신 성공의 증거는 아니다.**
+
+## 0.21.0-probe — 승인 후 인증 응답 대기 수정
+
+- 사용자가 차량 디스플레이의 휴대폰 키 페어링 요청을 직접 승인했다고 보고했다. 방문 로그의 네 번 시작 중 한 번은 `TESLA_KEY_REGISTRATION_REPORTED`를 기록했고 92ms 뒤 `TESLA_KEY_AUTH_TAG_LENGTH_INVALID`로 종료했다. 등록 보고는 영구 저장 증거가 아니며 실차 인증·암호 상태 완료는 없었다. 다른 세 번은 결과 불명이고 상세 RX 원문은 기록하지 않아 실패 원인을 확정하지 않는다.
+- [공식 규격](https://github.com/teslamotors/vehicle-command/blob/main/pkg/protocol/protocol.md#response-authentication)의 HMAC-SHA256 32바이트와 [공식 signer](https://github.com/teslamotors/vehicle-command/blob/main/internal/authentication/signer.go)의 전체 태그 비교를 유지한다. [dispatcher.checkForSessionUpdate](https://github.com/teslamotors/vehicle-command/blob/main/internal/dispatcher/dispatcher.go)는 검증되지 않은 세션 응답을 버리고 요청을 계속 기다린다. 우리 앱의 즉시 종료를 이 처리에 맞췄다. 실제 잘못된 태그의 길이·발생 이유나 뒤따를 정상 응답의 존재는 기존 로그로 알 수 없다.
+- 수정 전 실제 protocol의 등록 보고 → 짧은 태그 경로가 즉시 `Failed`가 되는 것을 회귀 시험으로 재현했다. 수정 후 독립 JCA peer로 짧은 태그·잘못된 HMAC을 거부하고 정상 HMAC 응답에서만 암호화된 GET_STATUS를 만드는 것을 직접 JVM 실행했다. peer가 요청을 복호화해 읽기 조회임을 확인했고 인증된 암호 상태 응답으로 잠금 1·프렁크 0을 완료했다. 14,999ms에는 대기하고 15,000ms에는 종료하는 것도 실행했다. 일회성 실행 진입점은 제거했다.
+- APK·계측 APK 빌드, JVM 141개(실패·오류·건너뜀 0), Lint 작업과 S23 계측 8개를 통과했다. 데이터 유지 설치로 `versionCode=21` / `0.21.0-probe`와 MainActivity 실행을 확인했다. 기존 1,555행 전체 바이트 prefix가 1,576행에 유지됐고 추가 TX·합성 VIN 기록은 없다. 실제 차량 통신·등록·NFC 승인·차량 명령은 실행하지 않았다.
+- 새 요청·자동 재등록·재전송·기한 연장·검증 우회는 없다. 제외 근거는 화면과 기존 고정 event에 남긴다. 설치 당시에는 실차 후속 응답·암호 상태 수신을 미확인으로 남겼고, 이후 결과는 아래에 구분한다. 이미 승인·등록 보고를 받은 키의 재시험은 키 추가 반복이 아니라 기존 읽기 전용 조회로 진행했다.
+
+### 실차 앱 키 인증·재연결 조회 통과
+
+- 같은 v21에서 사용자가 두 차례 차량에 방문해 읽기 전용 조회를 완료했다. `2026-10-07T13:56:23.838+09:00` 시작 회차는 423ms에 `STATUS_VERIFIED`·`COMPLETE`, 429ms에 `LOCAL_CLOSED`를 기록했다. `2026-10-07T14:56:28.327+09:00` 시작 회차는 395ms에 `STATUS_VERIFIED`, 396ms에 `COMPLETE`, 398ms에 `LOCAL_CLOSED`를 기록했다.
+- **앱 키 인증·암호화 상태 조회·이전 연결 종료 후 같은 키를 이용한 새 BLE 연결 조회는 통과**로 판정한다. 두 회차는 같은 앱 프로세스이며 프로세스 종료·휴대폰 재부팅 후 키 재사용까지 검증한 것은 아니다. 이를 다음 개발의 필수 조건으로 추가하지 않는다.
+- 주차 기어 P 읽기 구현을 다음으로 진행한다. 그 뒤 실제 프렁크 제어보다 **차량 감지 개선을 먼저** 진행한다. 이전 BLE 단독 감지가 잘 안 됐다는 사용자 관찰을 유지하며 연결·인증 성공과 접근 감지 성공을 구분한다. UWB는 Tesla 차량과의 측정 세션 구성 가능성을 별도로 확인하고 BLE와 함께 평가한다.
+
+## 0.22.0-probe — 주차 기어 읽기
+
+- 기존 키 등록·VCSEC 잠금/프렁크 조회와 별개로 **주차 기어 상태 1회 조회**를 추가했다. 같은 앱 키로 Infotainment 새 세션을 검증하고 암호화된 `GetDriveState`만 한 회 요청한다. Fleet API·키 추가·차량 깨우기·제어·자동 재전송은 없다.
+- HMAC·AEAD·domain3 UUID/route·request hash를 유지하며 실제 DriveState 없이 완료하지 않는다. P·R·N·D와 UNKNOWN을 구분하고 원본 Timestamp 부재·오류는 null로 둔다. 최종 GATT fragment 수신 monotonic을 보존하되 처리 지연/오래된 수신 시각으로 기한을 늘리지 않는다. 화면의 결과는 지난 관측이며 현재 P·접근 감지·제어 허가가 아니다.
+- 실제 production conversation을 독립 JCA 차량 피어로 직접 JVM 실행했다. 피어가 암호 요청을 복호화해 GetDriveState임을 확인했고 P·R·UNKNOWN 응답을 AEAD로 왕복했다. UUID 생략 응답은 대기/거부하고 정상 대응 응답만 완료했으며 원본·수신 시각을 보존했다. DriveState 누락은 실패했고 P fallback은 없었다. 임시 실행 메서드는 제거했다.
+- APK·계측 APK 빌드, JVM 160개(실패·오류·건너뜀 0), Lint 오류 0·경고 13, S23 네이티브 계측 10개를 통과했다. 실제 화면에서 과거 P·시각 없는 P·R/N/D·UNKNOWN·기어 데이터 누락·정리 실패의 의미를 구분했다. DRIVE 키 준비 중 onPause는 IO 반환 전에 취소했고 자동 재개·TX 없이 예약을 반환했다. RAM 화면 합성과 키 준비 취소를 실제 차량 응답으로 세지 않는다.
+- 데이터 유지 설치로 `versionCode=22` / `0.22.0-probe`와 MainActivity 실행을 확인했다. 기존 1,602행의 전체 바이트 prefix가 1,634행에 유지됐고 추가 TX·합성 VIN 기록은 없다. 설치 후 홈 → 설정 → 개발자 진단 → 차량 키 → 스크롤 경로에서 새 조회 버튼과 빈 VIN일 때 비활성화를 실제 접근성 표면으로 확인하고 홈으로 복귀했다. 기존 키 재사용·하드웨어 ECDH 계측도 통과했다.
+- `FLAG_SECURE`를 유지했으며 픽셀·큰 글꼴·TalkBack 실제 낭독은 미검증이다. **v22 실제 차량의 기어 수신·Infotainment 수면 호환성·실행 직전 신선한 P는 미확인**이다. P 조회 다음은 이전 BLE 단독 감지 실패를 반영한 BLE·UWB 차량 감지 개선이며 프렁크 제어는 선행하지 않는다.
+
+## 0.23.0-probe — 차량 광고명 감지
+
+- 기존 등록 chooser에서만 사용하던 [공식 `VehicleLocalName`](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/connector/ble/ble.go)을 반복 스캐너에 연결했다. 이름과 등록 주소를 AND하지 않고 실제 광고명 exact 일치·최신 일치 batch 표본만 소비한다. 과거 실차 실패가 주소 회전 때문이었다는 증거는 없으며 이 변경의 실제 감지 개선은 미확인이다.
+- 새 모드는 **차량 광고명 감지 · GATT 없음**이다. VIN과 산출명/hash는 RAM 전용이며 token·현재 서비스/association 소유권 확인 후 한 회 handoff한다. 실행 중 HOME·잠금에는 서비스 타깃을 유지하지만 중지·실패·파괴 때 제거한다. 잘못된 이름 모드 옵션은 보정 없이 거부하고 GATT·TX·마이크·BT 보조·연결 재시도·UWB는 실행하지 않는다.
+- 호스트에서 실제 production 이름 산출·타깃·후보 정책을 직접 JVM 실행했다. 같은 이름의 서로 다른 주소를 수용하고 다른/누락 이름은 거부했다. batch의 더 최신인 비일치 표본을 제외하고 최신 일치 표본을 골랐다. BT 입력은 후보를 만들지 않았고 스캔 후보의 만료/재무장, GATT 회차 0, 중지 후 입력 거부를 확인했다. 임시 실행 진입점은 제거했다.
+- APK·계측 APK 빌드, JVM 172개(실패·오류·건너뜀 0), Python 분석기 24개, Lint 오류 0·경고 13을 통과했다. v7 Boolean만 추가했으며 v1–v6 입력·바이트 보존·임의 식별 문자열 비노출·새 실행 옵션 미승계 회귀를 포함한다. USB 분리 전에 회수한 RAM의 기존 1,634행을 새 분석기로 실행해 파싱/미지원 오류 0을 확인했다. 방문 CSV 분모가 없어 감지율은 산출하지 않는다.
+- USB 재연결 후 `adb install -r`로 v23 앱·계측 APK를 설치하고 패키지 `0.23.0-probe`를 확인했다. S23 계측 **21개 통과**: 스캐너 9개, 감지 화면 2개, 키 보관 2개, 기존 키/기어 화면 8개다. Android 실제 `ScanFilter`/`ScanResult`·production callback을 합성 transport로 실행해 주소 독립 이름 일치·최신 batch·권한 철회·offload/start/stop 실패·세대/창 경계·중지 후 타깃 정리를 확인했다. 실제 무선 스캔·차량 match 증거로 쓰지 않는다.
+- 초기 실행은 Mobile MCP의 `com.mobilenext.mobilecli.DeviceServer`가 UiAutomation을 소유해 충돌했다. 확인한 도구 프로세스만 종료했다. 이후 새 화면 계측의 접근성 캐시와 비활성 chip 탐색 경계를 기존 화면 검증 방식에 맞췄으며 앱의 안전 조건을 완화하지 않고 전체 21개를 통과했다. VIN 길이·입장 차단·실행 중 조건 잠금·탭 이탈/pause/파괴 시 RAM 입력 제거·진단 자동 재시작 없음과 기존 키/기어 경계를 검사했다.
+- 설치된 앱의 홈 → 설정 → 개발자 진단 → BLE 연결을 실제 조작했다. 광고명 감지 선택, 안전 옵션 고정, 빈 RAM VIN 입력, 스캔 권한 허용 표시와 시작 버튼 비활성을 확인했다. 실제 감지 시작·GATT·TX·키 추가·마이크·UWB는 실행하지 않았다. 등록됨 표시를 유지했고 검증 중 확보한 기존 1,704행의 전체 바이트 prefix가 이후 1,794행에도 보존됐다.
+- 실제 이름 offload/광고 match·잠금/주머니 전달·전력·픽셀·큰 글꼴·TalkBack은 미검증이다. `FLAG_SECURE`를 유지하며 화면 계층과 실제 조작만 확인했다.
+- UWB 공식 조사에서 Android 공개 ranging API는 확인했으나 Tesla 상대와 peer/channel/session ID/STS를 합의하는 완결 공개 계약은 확인하지 못했다. 공식 VCSEC schema의 reserved 필드나 임의 peer/key를 추측해 송신하지 않는다. 플랫폼 세션 시작·지원 보고를 Tesla 거리/감지 성공으로 쓰지 않는다. v21 키 인증 통과를 다시 미확인으로 되돌리거나 키 재등록을 요구하지 않는다.
+
+## 0.24.0-probe — 공통 VIN 등록·암호화 재사용
+
+- 개발자 진단 상단에 공통 VIN 등록·변경을 추가하고 키 등록·BODY 인증/상태·DRIVE_STATE 기어·광고명 감지 및 명시적 CDM 차량 선택의 중복 입력을 제거했다. 형식은 trim/ROOT 대문자 정규화·17자리·I/O/Q 제외이며 기본 표시는 뒤 네 자리만 남긴다. 편집 입력은 RAM에만 두고 제출·탭/화면 이탈·pause/destroy 때 비운다.
+- 독립 AndroidKeyStore AES-256/GCM alias와 noBackupFilesDir의 암호문을 사용한다. 고정 길이/version/AAD/GCM 인증을 검사하며 평문 저장·복호화 fallback·기존 키 자동 교체는 없다. pending/이전 유효암호문 commit 복구용 `.previous`/파일·디렉터리 sync와 원자 rename을 사용한다. `.previous`는 Android 백업이나 정상 복원 fallback이 아니다. 손상된 활성 파일·키 누락/불일치는 실패로 유지하며 자동 초기화하지 않는다.
+- 저장·복원만으로 작업을 시작하지 않는다. READY 외에는 차량 시작을 차단하고 실행·관찰·서비스·오디오·UWB·키 예약·chooser pending·정리 불명 동안 변경을 막는다. 각 작업은 시작 VIN을 확정한다. 검토 중 스캔 실패의 이차 stop 실패가 `SCAN_STOPPED/accepted=false`로 전달되는 경계를 보강해 기록/publish 전에 sticky 변경 차단을 설정했다.
+- APK·계측 APK 빌드, 전체 JVM **175개**(실패·오류·건너뜀 0), Python 분석기 **24개**, Lint **오류 0·경고 13**을 통과했다. 첫 빌드의 공개 SDK에 없는 `O_DIRECTORY` 사용은 실제 SDK 36 `javap` 확인 후 공개 `Os.open(O_RDONLY|O_CLOEXEC)`·`fstat/S_ISDIR`·`fsync`로 수정했다. 동기화를 생략하거나 오류를 숨기지 않았다.
+- 호스트의 컴파일된 production `VehicleVin` → `TeslaBleAdvertisement` → `BleScanTarget`을 JShell에서 직접 실행했다. 정규화·마스킹·redacted 출력·잘못된 입력 거부, 같은 이름의 주소 차이 허용, VIN이 다른 새 이름/누락 이름 거부, 타깃 clear 후 재사용 거부를 확인했다. 비ASCII 입력이 대문자 변환으로 영문 VIN이 되는 경계는 수정 전 수용을 재현하고, 정규화 전 ASCII 형식 검사로 수정한 뒤 거부를 확인했다. 임시 소스·실행 파일은 생성하지 않았다. 이 실행은 AndroidKeyStore 저장/복원·runtime 예약·실제 UI 증거가 아니다.
+- 재연결 후 S23에 APK·계측 APK를 `adb install -r`로 설치했다. 전체 계측은 **37개 발견, 35개 통과, 프로세스 단계 전용 2개는 예상된 assumption 건너뜀**이었다. 건너뛴 두 메서드는 prepare → 앱 force-stop → 새 프로세스 restore로 각각 실행해 **각 1개 통과**를 확인했다. 단말 저장·복원/손상/잘못된 키/쓰기 실패/실행 중 변경/대상 고정·공통 Compose UI를 검증했으며 별도 VIN 파일·AES/P-256 alias·runtime 로그/marker로 생산 데이터를 격리했다.
+- 최초 전체 계측의 UI 두 건은 상단 공통 VIN·탭이 전체 스크롤 안에 들어간 뒤 탐색 helper가 시작 위치를 복원하지 못해 실패했다. 테스트 helper의 상단 복원 및 탐색 기한 시작 위치만 수정했고 production 코드·시간 제한·동작 단언은 완화하지 않았다. 계측 APK 재빌드·재설치 후 전체 실행은 `OK (37 tests)`였다.
+- 설치 패키지에서 `versionCode=24`, `versionName=0.24.0-probe`를 확인했다. 기존 로그 1,797행/1,637,348바이트 전체가 설치·계측 후 1,881행/1,735,865바이트의 접두부로 그대로 보존됐다. 추가 행에서 합성 VIN 세 값의 평문과 `TESLA_KEY_TX_ATTEMPTED`는 없었다. 홈 UI에서 기존 차량 등록 유지·권한 허용·진단 OFF를 관찰했다. 생산 VIN 저장소에는 합성 값을 등록하지 않았다.
+- 재연결·사용자 잠금 해제 후 설치 앱에서 설정 → 개발자 진단 상단의 공통 VIN 등록, 빈 편집 입력의 비활성 암호화 저장 버튼, 차량 키 탭 이동 시 편집 종료 및 미등록 동의 차단, BLE 탭의 감지 OFF·0/0 회차를 확인했다. 생산 VIN에는 합성 값을 저장하지 않았다. 공통 등록 후 P·BLE 재입력 불필요는 격리된 실제 Compose UI 계측에서 확인했으며 실차 동작 증거는 아니다. 물리 재부팅·OEM 기기 전송·픽셀/큰 글꼴/TalkBack은 미검증이며 `FLAG_SECURE`를 유지한다.
+- 실제 차량 VIN은 사용자가 공통 UI에 한 번 등록한다. 통과한 v21 키 재등록은 요구하지 않으며 실제 P·광고 감지·프렁크·UWB는 각각 별도 검증이다. 이번 작업에서는 실제 차량 GATT/TX·키 추가·프렁크·마이크·UWB ranging을 시작하지 않았다.
+
+### 프로젝트 점검 — 정리 실패 재진입·분석 시각 경계
+
+- 수정 전 설치 앱에 새 회귀를 실행해 스캔 정리 실패 뒤 UWB 예약이 허용되는 문제를 재현했다. 공통 정리 불명 표식을 VIN 변경뿐 아니라 모든 새 진단 입장에 적용했고, 스캔 stop 실패 뒤 scanner/callback을 새 스캔으로 덮거나 정상 종료 marker를 남기지 않도록 수정했다. 지원 조회 destroy 실패도 Activity 재생성 뒤 입장이 차단된다.
+- 수정 APK·계측 APK를 데이터 보존 설치한 뒤 런타임/스캐너 **17개**, 공통 VIN·BLE·차량 키 Compose **12개**가 통과했다. 스캔 stop 예외는 실제 Android 필터/callback과 RAM transport로, 정리 실패 입장은 격리된 Android runtime으로 검증했다. 실제 무선 stop 예외를 유발하거나 차량에 전송한 시험은 아니다. 최초 UI 계측은 화면 조회 도구의 `UiAutomation` 연결 충돌로 실패했고 해당 도구 프로세스 종료 후 코드·단언 변경 없이 통과했다.
+- 분석기는 잘못된 수신 시각을 record wall로 대체해 방문 감지율 100%로 계산하던 경로와, 제외 trial이 시계 불일치를 숨기거나 정상 회차를 분할하던 경로를 수정했다. 수정 전/후 메모리 입력 실행, 실제 CLI의 오류 종료·시각 경고, Python **27개** 회귀를 확인했다. 기존 단말 로그 **1,888행**은 v1~v7 모두 읽혔고 파싱 경고는 없었다. 실제 방문 분모 없이 물리 감지율은 산출하지 않았다.
+- 설치·계측 뒤 기존 **1,743,429바이트**가 **1,819,678바이트** 로그의 접두부로 보존됐다. 추가 68행에 차량 TX 이벤트나 합성 VIN 평문은 없었다. 설치 앱 홈 → 설정 → 개발자 진단 → 지원 확인에서 실제 메타데이터 응답을 받았고 화면 이탈 뒤 앱 실행 서비스는 없었다. 기존 등록·권한은 유지하고 차량 키 재등록·실차 명령·마이크 캡처·UWB ranging은 실행하지 않았다.
+- 최종 `:app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug`가 성공했다. JVM **175개**의 실패·오류·건너뜀은 0이고 Lint는 **오류 0·경고 13**이다. 첫 통합 실행은 Lint 분석 중 600초 제한으로 중단됐고, 실행 기한을 늘려 같은 명령을 완료했다. 경고는 동기 SharedPreferences commit 2개·SDK/의존성 버전 권고 7개·`AccessServices.kt` UI 문자열 4개이며 무조건 apply로 바꾸거나 의존성을 업데이트해 숨기지 않았다.
+- 화면 검증은 실제 Compose 조작·UI 계층 기준이다. `FLAG_SECURE`를 유지했으며 픽셀·큰 글꼴·TalkBack·물리 재부팅·실차 P/광고 감지·장기 전력은 이번 점검 범위에서 미검증이다.
+
+### v24 실차 귀환 로그 — VIN 유지·P 조회·감지 분리
+
+- 2026-10-08 귀환 후 로그를 읽기 전용으로 분석했다. 10:20:47 시작한 DRIVE_STATE 조회는 `CREDENTIAL_READY → SUBSCRIBED → TX_ATTEMPTED → DRIVE_STATE_VERIFIED → COMPLETE → LOCAL_CLOSED`였고 로컬 종료까지 841ms였다. 기어 값 자체는 파일 로그에 없어 새 조회 없이 남아 있는 앱 UI의 **P · 지난 조회에서 관측**을 확인했다. 공통 VIN의 마스킹 저장 표시도 유지됐다.
+- 10:22:15부터 72.675초의 광고명 감지만 실행은 후보 1·GATT 0·`USER_STOP`이었다. CDM 출현/이탈/재출현은 있었으나 `SCAN_MATCH`는 0이었다. 이탈 후 28.354초의 재출현은 30초 유예 안이라 같은 후보로 병합됐다. 재출현은 UI 재개 뒤여서 잠금/주머니 재접근 성공으로 판정하지 않는다.
+- VIN·광고명·원시 응답은 문서에 보관하지 않는다. 키 추가·프렁크·마이크·UWB 시험은 실행하지 않았다.
+
+## 0.25.0-probe — OS 전달 기반 BLE 감지
+
+- 기존 `connectedDevice` FGS를 유지하고 callback 스캔을 비공개 명시 receiver의 mutable PendingIntent 전달로 교체했다. 단일 exact 필터·LOW_POWER·5초 배치·40초 창 예약/최소 120초 시작 간격이다. offload/filter/batch 미지원, SDK 시작 반환 오류, 비동기 오류, 중지 실패는 명시 실패하며 무필터·고빈도 fallback은 없다. 광고명 모드는 GATT·차량 TX·마이크·UWB를 시작하지 않는다.
+- 창별 고유 token·RAM session·기한으로 늦은/다른 세대 전달을 봉인한다. noBackupFilesDir에는 고아 정리 전용 무작위 token만 동기 저장하며 앱 시작은 이전 OS 등록 정리만 수행한다. stopScan 동일 handle·취소 순서·정리 실패 latch를 유지한다. 공개 SDK의 void 반환은 radio ACK가 아니며 Handler 절전 지연 동안 엄격한 40초 상한도 보장하지 않는다.
+- 최종 `:app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug` 성공. JVM **175개** 실패/오류/건너뜀 0, Python **28개** 통과, Lint **오류 0·경고 13**이다. 첫 Lint에서 registry의 Context 정적 보관 경고를 발견해 Application만 보관하도록 타입/소유권을 고쳤고 suppress하지 않았다. 기존 의존성·SDK 권고와 동기 설정 commit·UI 문자열 경고는 유지했다.
+- 최종 APK/계측 APK의 `adb install -r` 후 전체 계측은 **57개 발견·55개 통과·별도 프로세스 VIN 단계 2개 assumption 건너뜀**이었다. 이 변경에서는 두 VIN 단계의 별도 force-stop 시퀀스를 다시 실행하지 않았다. 스캐너 **18개**, PendingIntent **10개**는 실제 Android 필터/PI API와 RAM IO로 세대·만료·중지 예외·동기 evidence 재진입·journal 실패·고아 정리를 검사한다. 실제 RF 오류/프로세스 사망을 강제로 만든 증거와 구분한다.
+- 계측 없는 설치 앱에서 공통 VIN 재입력 없이 **차량 광고명 감지 시작**을 눌렀다. 실제 `ObservationService`의 foreground 상태·OS LOW_POWER 스캔 등록을 확인했고 HOME 뒤에도 유지됐다. 첫 창은 **40,016ms** 뒤 종료, 다음 시작은 최초 시작으로부터 **120,018ms**, 둘째 창은 **39,991ms** 뒤 종료였다. OS 누계는 32/32에서 34/34 시작/종료로 바뀌었고 앱 스캔 등록 시간 증가는 **79,980ms**였다. 이는 RF 실제 송수신 시간이나 배터리 소비량이 아니다.
+- 이 휴대폰 단독 실행은 후보 0·광고 match 0·GATT 0·`USER_STOP`이었다. 중지 후 foreground service 없음과 token 메타데이터 0바이트를 확인했다. 실제 BLE 화면의 고정 옵션·중지/재시작 가능 상태·PendingIntent/배치/절전 한계 설명을 UI 계층으로 확인했다. `FLAG_SECURE`는 유지했으며 픽셀·큰 글꼴·TalkBack 검증은 하지 않았다.
+- shell UID에서 receiver에 명시 broadcast를 보냈고 OS broadcast 이력의 **SKIPPED / Permission Denial / not exported**를 확인했다. 명령의 `result=0`만으로 전달 성공이나 차단을 판정하지 않았다.
+- 홈 ref 클릭 요청 뒤 새 명시 시작 행이 관측돼 두 번째 감지만 실행이 생겼다. 시스템 알림에 따른 ref 변동과 외부 입력 중 정확한 원인은 확정하지 못했다. 좌표로 확인한 중지 버튼으로 정상 종료했다. 두 실행 모두 차량 연결/명령은 없었고 현장 방문 분모에서 제외한다: `비공개 회차 ID`, `비공개 회차 ID`.
+- 실제 차량 광고의 OS 배치 전달·잠금/주머니 재접근·비충전 deep Doze·장기 배터리 절감·Tesla FiRa OOB/UWB 거리는 미검증이다. USB 충전 중의 HOME 시험을 그 증거로 사용하지 않는다.
+- 최종 중지 168초 뒤 새 스캔 시작이 없었고 OS 누계는 시작/종료 **35/35**였다. 감지 FGS·마이크 서비스·GATT wakelock이 없고 정리 token은 0바이트였다. 기존 로그 **1,884,967바이트**는 최종 **2,009,644바이트·2,117행**의 접두부로 그대로 보존됐으며 전체 로그 분석기는 문제 0건을 반환했다. 파일 삭제 없이 확인했으며 2MiB 한도의 **95.8% 사용·87,508바이트 잔여**이므로 다음 장시간 실차 시험 전 로그 보존 및 정리 승인이 필요하다.
+
+### v25 장시간 실행 뒤 실차 귀환 로그
+
+- 사용자 귀환 후 기기의 JSONL 144행·197,817바이트를 읽기 전용 분석했다. 한 프로세스·한 감지 실행이며 11:36:13~13:25:46(KST), 약 109분 33초였다. 사용자는 설치 후 약 2시간 서비스 유지 뒤 실차 시험을 진행했다고 보고했다. 로그 실행 시간과 사용자 체감 대기 시간을 임의로 맞추지 않는다.
+- 후보 1개·광고명 `SCAN_MATCH` 1건·GATT 시도 0·`USER_STOP` 정상 종료다. 광고 표본은 13:20:07 관측, 13:20:29 앱 처리였고 전달 지연 21,478ms·RSSI −76dBm이었다. 마지막 UI_PAUSED 뒤 다음 UI_RESUMED 전에 처리되어 앱 화면이 내려간 상태의 전달은 확인됐다.
+- 12:06/12:36 heartbeat는 화면 꺼짐·잠금을 보고했다. 감지 순간의 잠금 값은 v7 evidence에 없으므로 그 순간 잠금/주머니 성공은 확정하지 않는다. 별도 방문 시각/분모가 없어 감지율·접근부터 감지까지 지연도 계산하지 않는다.
+- 스캔 시작/종료 각 52회였고 등록 창은 최장 165,725ms, 시작 간격은 최장 285,822ms였다. 40초 종료 예약이 절전 중 지연된 양상이며 무광고 구간의 radio 먹통 여부는 판별할 수 없다. 등록 성공을 실제 수신 정상으로 해석하지 않는다. 배터리 표본 100%만으로 소비·절감을 판단하지 않는다.
+- 분석기 문제 0건·시계 불일치 없음이며 귀환 후 감지 FGS/마이크 서비스 없음도 확인했다. 이는 로그 완전성·모든 접근 수신 보장이 아니다. VIN·광고명·주소·원시 응답은 회수 문서에 넣지 않았다. 이번 튜닝 전에 이 144행을 보존 기준으로 확보했으며 삭제/회전하지 않는다.
+
+## 0.26.0-probe — 장시간 BLE 감지 안정화
+
+- LOW_POWER·단일 exact 필터·PendingIntent·5초 배치·40초 종료 예약/최소 120초 시작 간격을 유지한다. 기존 5초 readiness 실행 기회에서 elapsed 만료를 조정하고, 폐기된 timer가 새 예약을 지우지 못하도록 소유권을 검사한다. CPU 절전 해제·엄격한 40초 RF 상한을 보장하는 변경은 아니다.
+- SDK 오류 2/3/5만 동일 등록 정리가 정상 반환한 뒤 사용자 시작당 최대 2회·오류 후 120초/240초 cooldown과 기존 시작 기한 중 늦은 시각에 복구한다. 정상 창·빈 결과·광고 수신·pause/resume으로 예산을 초기화하지 않는다. 오류 1/4/6·불명 코드·권한/기능/전달/정리 실패는 종료한다. 무광고 watchdog·새 wake lock·정확 알람·자동 GATT·UWB는 추가하지 않았다.
+- JSONL v8은 1초 이상 예약 지연·스캔 복구와 광고 전달 **처리 시점**의 interactive/deviceLocked를 기록한다. 화면·알림에는 제한복구 대기를 표시하고 상세에는 복구 사용 횟수·최근 SDK 오류·예약 지연을 표시한다. GATT 연결 재시도 옵션과 스캔 오류 복구는 별개다. 화면/잠금 조회를 위해 불필요한 배터리·전체 회차 요약을 생성하지 않는다.
+- 최종 `:app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug` 성공. JVM **176개** 실패/오류/건너뜀 0, Python **33개** 통과, Lint **오류 0·기존 경고 13**이다. 실제 CLI에서 v25 귀환 로그의 후보 1·SCAN_MATCH 1·잠금 null·문제 0을 유지했고 v8 예약 지연/복구 입력이 GATT 완료·후보로 집계되지 않는 것도 확인했다.
+- 데이터 보존 설치 후 기기 계측은 **77개 발견·75개 통과·별도 프로세스 VIN 단계 2개 assumption 건너뜀**이다. 스캐너 **37개**, PendingIntent **10개**, BLE UI **3개**를 포함한다. 스캐너는 실제 Android 필터와 RAM transport/clock으로 늦은 예약·reconcile·오류 선택/예산/쿨다운·pause/stop·정리 실패·구 Runnable·동기 재진입을 검사했다. 실제 Bluetooth 컨트롤러 오류나 비충전 deep Doze를 강제한 검증은 아니다.
+- 첫 계측은 기존 화면 조회 서버 `com.mobilenext.mobilecli.DeviceServer`의 UiAutomation 연결 점유로 UI 검사들이 실행되지 못했다. 조회 서버 프로세스만 종료한 뒤 위 전체 계측을 완료했다. 권한·앱 데이터·VIN·키는 초기화하지 않았다. 계측 뒤 연결 재시도/스캔 복구를 구분하는 설명 한 문장만 정리했고 최종 APK를 다시 빌드·설치해 실제 UI 계층에서 확인했다. 마지막 문구 APK에 전체 계측을 다시 실행하지는 않았다.
+- 계측 없는 v26 설치 앱에서 공통 VIN 재입력 없이 광고명 감지를 명시 시작하고 HOME으로 이동했다. 감지 FGS를 확인했고 첫 창 **40,005ms**, 다음 시작 간격 **120,000ms**, 둘째 창 **40,010ms**를 기록했다. 후보 0·SCAN_MATCH 0·GATT 0·스캔 오류 복구 0·1초 이상 예약 지연 기록 0이며 `USER_STOP` 정상 종료였다. 실제 SDK 오류 복구는 위 합성 계측으로만 검증했고 이 휴대폰 단독 실행을 실차 감지율·배터리 절감 근거로 사용하지 않는다.
+- 문구만 변경한 최종 `0.26.0-probe`/versionCode 26을 데이터 보존 설치했다. 실제 설정 → 개발자 진단 → BLE 화면에서 마스킹 VIN 유지·명시 시작·스캔 복구와 GATT 재시도의 구분·상세 복구 예산·절전 한계를 확인했다. `FLAG_SECURE`를 유지했으며 픽셀·큰 글꼴·TalkBack은 미검증이다. 새 프로세스는 감지를 자동 시작하지 않았고 감지 FGS·마이크 서비스·GATT wake lock 없음·정리 token 0바이트를 확인했다.
+- 중지 뒤 최종 앱 재실행으로부터 173초 후에도 새 감지 시작·감지 FGS·마이크 서비스가 없었고 로그 바이트도 변하지 않았다. 최소 120초 시작 간격을 지난 뒤 자동 재개 없음까지 확인했다.
+- 기존 실차 **144행·197,817바이트**는 최종 **237행·308,395바이트** 로그의 접두부로 보존됐다. 전체 분석기 문제 0이며 잔여 용량은 **1,788,757바이트**다. 파일 삭제·회전·앱 데이터 초기화 없이 확인했다. 휴대폰 단독 회차 `비공개 회차 ID`는 현장 방문 분모에서 제외한다.
+- 다음 실차는 시작 뒤 1~2시간 잠금 유지 → 안전한 차량 접근/이탈 → 앱을 열기 전 광고 전달 여부를 비교한다. 실제 접근 시각은 별도 기록하고 VIN 원문은 전달하지 않는다. v26의 잠금/주머니 전달·배터리 비용·OEM 조용한 먹통 판별·Tesla FiRa/UWB 거리는 아직 미확인이다. 차량 키 추가·P 조회·프렁크·마이크·UWB는 이번 시험에서 제외한다.
+
+## 0.27.0-probe — AltBeacon FGS 전환
+
+- AltBeacon 2.21.2 배포 소스·`ForegroundServiceScanStrategy`로 교체했다. 최초 검증은 기본 foreground 1,100/0ms·background 30,000/300,000ms였으며 아래 후속 무공백 설정으로 background 대기를 제거했다. native 정확한 이름/주소 필터와 원 ScanResult timestamp 어댑터의 출처·패치 범위는 [아키텍처](Native-Architecture.md#v27-altbeacon-배포-소스-전환)를 따른다.
+- APK·계측 APK 빌드와 전체 JVM unit test 작업이 성공했다. Python 분석기 36개와 S23 스캐너/legacy receiver/감지 설정 계측 18개가 통과했다. 입력에는 합성 ScanResult·RAM transport가 포함되며 실제 Tesla RF·잠금 수신을 증명하지 않는다. 이 버전에서 Lint는 실행하지 않았다.
+- S23 Ultra Android 16/API36에 두 APK를 `adb install -r`로 설치했다. 기존 키·VIN·등록·앱 데이터 초기화는 없다. 기존 `events.jsonl` 2,096,884바이트를 그대로 보존하고 새 `events-v2` 파일만 기록한다. 사용자가 정확한 위치 권한을 직접 승인했으며 실제 홈·설정·BLE 진단에서 권한 상태·기본 기간·감지만 조건을 확인했다. `FLAG_SECURE` 유지로 픽셀 기반 검증은 미완료다.
+- 로그 실패 분리·512KiB×4/큐512 순환, ON/OFF 지속, 원 수신/전달 시각·역순/중복/이전 세대, pause/stop 소유권과 기존 재무장 정책은 자동 테스트 대상이다. background FGS 거절·사용자 종료·미정상 marker는 성공으로 숨기지 않는다.
+- 계측 없는 설치 앱에서 **차량 광고명 감지 시작**을 직접 실행했다. `dumpsys activity services`에서 BeaconService `isForeground=true`, notification102, type `0x8/location`, `startCommandResult=1/START_STICKY`를 확인했다. ObservationService는 `startForegroundCount=0`·bound-only였다. 새 로그의 `SCAN_STARTED`는 native 등록 반환 뒤 `scanRunning=true`였고 이는 차량 광고 수신 증거가 아니다.
+- HOME 전환 뒤 약 34.5초의 짧은 배경 유지 구간에서 BeaconService FGS·bound ObservationService 유지와 복귀를 확인했다. **감지 끄기 · 자동 복원 해제** 뒤 `SCAN_STOPPED`·`BLE_FIELD_STOPPED`, OS 서비스 목록 `(nothing)`과 다시 시작 버튼을 확인했다. 실차 match·화면 OFF·잠금·5분 대기 후 재스캔·프로세스 종료 복원은 이 smoke에서 실행하지 않았다. 최종 감지는 OFF다.
+
+### 후속 변경 — 화면 전환 시 스캔 대기 제거
+
+- 사용자 후속 요청으로 foreground/background betweenScanPeriod를 모두 명시적으로 0ms로 변경했다. 기간 1,100ms/30,000ms·longScanForcing 기본값은 유지한다. `:app:assembleDebug :app:testDebugUnitTest` 통과 후 데이터 보존 설치했고 실제 BLE 화면의 두 공백 0초를 확인했다.
+- 광고명 감지를 다시 시작해 BeaconService location FGS·알림102·native `SCAN_STARTED`를 확인했다. HOME 전환 로그 뒤 OS는 동일 등록의 ongoing 스캔 **63,325ms**·단일 필터·`LOW_LATENCY`를 보고했다. 30초 이후에도 설정상의 5분 대기로 넘어가지 않았다. 라이브러리 자동 무선 모드에서 이 설정은 LOW_LATENCY로 관측됐으므로 전력 비용을 기존 LOW_POWER와 같다고 가정하지 않는다.
+- 최종 감지 ON·백그라운드 실행·로그 기록 상태로 남겼다. 차량 RF 결과는 0이며 실차/잠금 장기 수신·배터리는 미검증이다. 소프트웨어 대기 제거를 무선 duty cycle·OS/OEM 지연 제거 보장으로 설명하지 않는다.
+
+### 미실행 실차·장시간 검증 절차
+
+1. 광고명 감지만 명시 시작하고 OS BeaconService location FGS·알림 하나·native 스캔 상태를 확인한다. 원 광고 일치·수신/전달 monotonic 시각을 앱 상태 이벤트와 대조한다. 광고명/주소/원문은 공개 보고에 남기지 않는다. 별도 관찰자의 방문 시각으로 실측과 합성 입력을 구분한다.
+2. 비충전 실제 잠금 1시간 이상 후 재접근, 접근·이탈 최소 10회, 별도 강제 Doze를 각각 시행한다. 현재 두 모드의 설정상 대기는 0ms이며 OS/OEM 지연·실제 수신 누락을 구분한다. 후보 만료를 실제 차량 이탈로 단정하지 않는다.
+3. 일반 프로세스 종료·Bluetooth OFF→ON·재부팅·앱 업데이트·권한 철회를 별개로 시험한다. ON 설정/실행 상태/새 token/후보 초기화/FGS 시작 거절/중복 스캔·구독·명령 없음·사용자 OFF 유지를 기록한다. 설정 force-stop은 일반 종료와 별개이며 앱을 다시 열기 전 복원을 기대하지 않는다.
+4. Tesla 공식 폰키 앱 동시 사용 ON/OFF, 차량 없는 곳/옆에 장기 체류를 나누고 48~72시간 소비·발견 지연을 측정한다. 삼성 배터리 제한·충전·권한·Bluetooth 상태를 함께 기록한다. 측정 전 배터리 절감이나 실차 장애 해결을 주장하지 않는다.
+5. 로그 회수는 active와 `.3`→`.2`→`.1`→active 순서를 사용한다. 기존 `events.jsonl`과 새 순환 파일을 따로 보존하고 분석기에 복수 파일을 전달한다. 실제 방문 분모 없이 감지율을 계산하지 않는다.
+
+## v27 후속 실차 로그 — 반복 감지 확인
+
+- 10월12일 한국 시간 11:08:48 시작한 동일 프로세스/회차에서 12:27:49와 15:53:31에 FILTERED_SCAN 후보 1·2가 발생했다. 앱 처리 시점은 두 번 모두 화면 OFF·잠금이며 원 광고 수신→처리 지연은 12ms·19ms였다. 이는 실제 접근 시작→발견 지연이 아니다.
+- 후보 1은 12:32:39에 만료됐고 이후 후보 2를 만들었다. 후보 2는 16:00:41에 만료됐다. 만료는 관측 부재 정책이며 실제 이탈 시각과 같다고 단정하지 않는다. BT 연결은 shadow였으며 GATT/마이크/제어 회차는 없었다.
+- 16:02 확인에서 FGS·동일 프로세스 약 4시간54분, 11:09:01부터 동일 단일 native 등록 약 4시간54분을 관측했다. 해당 ongoing 등록 결과873개·화면 OFF85개였고 활성 회차에 스캔 실패/중지 기록은 없었다. 배터리96~100% 표본은 충전/사용 조건이 섞여 소비율로 환산하지 않는다.
+
+## 0.28.0-probe — 접근 기반 인증·읽기 조회
+
+- 새 **접근 시 인증·상태 조회** preset은 신선한 광고의 현재 기기로 연결한다. native pause 이후 기존 키만 읽고 동일 GATT에서 BODY→새 DRIVE 인증/조회, 실제 자원 해제·예약 반환 이후 스캔 재개를 수행한다. 40초 총기한·접근당1회·재시도 없음이며 키 등록·프렁크 제어·마이크·UWB는 없다.
+- 기존 키·VIN·등록·설정·실차 로그를 보존해 APK28을 설치했다. 기존 `events.jsonl`2,096,884바이트 기준을 유지했고 수집한 `events-v2`126,983바이트 prefix가 새 로그에 남은 것을 확인했다. native smoke에서 기존 키 공개키 동일성도 확인했다.
+
+|검증|실제 결과|한계|
+|---|---|---|
+|APK·계측 APK·JVM|JDK21 빌드 성공, JVM199개 실패/오류/skip0|최초 JDK17 Lint의 List.removeLast 오류는 JDK21 명령으로 해결; 전역 설정 변경 없음|
+|Lint|작업 성공|기존 deprecation 경고를 숨기지 않음|
+|Python 분석기|54개 통과, 실제 CLI 합성 v9 전체완료1·문제0|합성 자료이며 실차 성공 아님|
+|S23 비UI 회귀|스캐너19·기존키3·runtime10, 총32개 통과|광고/transport에는 합성·RAM 입력 포함|
+|Native lifecycle smoke|합성 광고→실제 FGS pause→native connectGatt→HOME 유지→신선도 만료 취소→close/lease 반환→스캔 재개;1회 통과|가상의 비차량 기기 대상. BODY/DRIVE 응답 성공·실차 RF 수신 증거 아님|
+|UI 회귀|초기35개 실행 중 UI 탐색1개 실패; 물리 터치 대체에서는3개 모두 탐색 실패|호스트 composition 준비 경계 보강·원래 접근성 입력 복원 후 계측 빌드 성공. 사용자 퇴근/USB 해제로 재실행 미완료|
+|실차 인증·BODY/DRIVE·잠금 재접근|미실행|사용자 테스트 및 다음 USB 로그 분석에서 판정|
+
+- native smoke 행의 `trialId=비공개 회차 ID`은 실차 분모에서 제외한다. 단계는 PAUSING_SCAN→PREPARING_KEY→CONNECTING→CLEANING_UP→CANCELED(SCAN_RESULT_STALE)→RESUMING_SCAN→FINISHED, localClosed=true·leaseRetained=false였다. 첫 임시 smoke의 VIN snapshot Main 스레드 호출 오류는 fixture만 수정한 뒤 통과했다.
+- 임시 native smoke 클래스는 검증 후 소스에서 제거했다. 사용자 USB 해제 뒤에는 테스트 APK 제거·수정된 UI 회귀 재실행이 불가능했으므로 다음 연결에서 정리/재검증한다. 실제 앱 APK에는 smoke 코드가 포함되지 않는다.
+- 사용자에게 APK 설치 완료와 수동 시작 경로를 안내했다. 마지막 도구 조작은 BLE 탭 진입까지였고 인증 모드 시작/ON은 관측하지 못했다. 사용자 시작 이후 상태를 켜졌다고 추정하지 않는다.
+
+### 이번 사용자 실차 절차
+
+1. **설정 → 개발자 진단 → BLE 연결 → 접근 시 인증·상태 조회 → 접근 인증·상태 조회 시작**을 선택한다. 새 키 등록 버튼은 누르지 않는다. 앱을 내려놓고 잠금 상태에서 접근한다. USB 없이도 내부 v2 순환 로그에 v9 행이 기록된다.
+2. 한 접근의 후보/회차, BODY 검증, DRIVE 검증/부분 실패, 원본/수신 시각, 로컬 자원 해제·예약 반환·스캔 재개를 확인한다. 차량 옆에 계속 있어도 같은 후보에서 조회가 반복되지 않아야 한다.
+3. 이탈·후보 만료 후 재접근을 시험하고 실제 접근/이탈 시각을 별도 기록한다. 프렁크 제어·새 키 등록·마이크·UWB는 이번 시험에 포함하지 않는다. 지난 P를 실행 허가로 사용하지 않는다.
+4. 다시 USB 연결하면 먼저 실차 로그를 읽기 전용 회수·분석하고 smoke 회차를 제외한다. 이후 남은 UI 회귀와 테스트 APK 정리를 진행한다. 프로세스가 재시작됐다면 감지만 복원되므로 인증 조회는 다시 직접 시작한다.
+
+## 0.29.0-probe — 첫 쓰기 거절 원인 분리
+
+- v28 실제 조회 모드 ON 회차에서 10월13일 10:46:56 화면 OFF·잠금 광고를 처리했다(원 수신→앱 처리43ms). native 스캔 정지, 기존 키 로드, GATT 연결·서비스 발견·MTU·RX 구독 이후 10:46:58 첫 BODY HANDSHAKING 쓰기가 `GATT_WRITE_REJECTED`로 끝났다. BODY/DRIVE 검증0, 전체2.457초. 로컬 정리·lease 반환·스캔 재개와 10:50:55 후보 만료는 확인했다.
+- 기존 코드가 SDK non-success와 Exception을 Boolean false로 합친 정보 손실은 확인한 결함이다. 실제 SDK busy/stack/예외·차량 인증 거절의 구체 원인은 v28 로그로 확정할 수 없다. AOSP API36은 descriptor callback 전에 busy를 해제하지만 삼성 런타임 원인 증거가 아니므로 app delay/retry/NO_RESPONSE 전환은 넣지 않았다.
+- v29는 `TeslaBleKeyProbe`, `TeslaApproachReadSummary`·작은 관측 병합 함수, 이벤트 whitelist/v10, Python 분석기·회귀, 접힌 조회 상세를 수정했다. nullable 숫자 반환과 GATT 완료 status를 분리하고 고정 예외 category만 기록한다. 기존 키·VIN·등록·설정·안전 조건·무공백 FGS는 유지한다.
+
+|검증|실제 결과|한계|
+|---|---|---|
+|APK·계측 APK·JVM|JDK21 빌드 성공, JVM202개 실패/오류/skip0|실차 GATT 쓰기 재현 아님|
+|Python 분석기|56개 통과; 기기 JSONL331행 실제 CLI exit0·오류0|합성 trialId replay의 SDK0/callback133은 failed·전체완료0; 실제 차량 status 아님|
+|S23 계측|비UI 스캐너19·UI3·로그 smoke1, 총23개 통과|이전 UI 탐색 실패는 이번 host 경계 적용 후 3개 통과; 픽셀 검증은 보안 정책으로 미완료|
+|실제 파일 로그 smoke|REQUESTED는 null/null, RESULT는 SDK0/callback null, CALLBACK·최종은 SDK0/callback133; v10 실제4행 확인|합성 관측, attempt900001·trialId=null. GATT/API status 발생을 검증한 것이 아니며 실차 집계에서 제외|
+|데이터 보존 업데이트|APK29 설치 성공; legacy 로그2,096,884바이트 동일, 기존 v2 426,799바이트 prefix 보존|키 생성·등록·사용자 데이터 초기화 없음|
+|실차 첫 쓰기·BODY/DRIVE·잠금 재접근|미실행|사용자 재시험·USB 로그로 판정|
+
+- 설치 후 실제 UI에서 인증 preset과 시작 버튼을 선택했다. 활성 회차 `비공개 회차 ID`의 `bleFieldAuthenticatedRead=true`, `BLE_FIELD_RUNNING`, native `SCAN_STARTED/scanRunning=true`, BeaconService FGS 알림102·location type0x8을 확인했다. `versionCode=29`·SDK36도 기기에서 확인했다. 사용자 재시험을 위해 조회 ON으로 두었다.
+- 임시 로그 smoke 소스·계약·작업자 결과 파일은 검증 후 제거했다. 실제 앱 APK에는 smoke 코드가 포함되지 않는다. 실차 TX/GATT status 생성·쓰기 성공·장기 잠금·배터리 측정은 이번 합성 로그 smoke로 대체하지 않는다.
+
+### v29 사용자 재시험
+
+1. **접근 시 인증·상태 조회** 모드로 시작한다. 감지만 모드와 다르며 앱 프로세스가 재시작되면 인증 조회는 다시 직접 시작해야 한다. 새 키 등록·프렁크·마이크 버튼은 누르지 않는다.
+2. 홈으로 나가 휴대폰을 잠그고 차량에 접근한 뒤 20~40초 머문다. 접근/이탈 시각을 기록한다. USB가 없어도 v2 순환 로그는 기록된다.
+3. 충분히 멀어져 **마지막 광고 이후 3분 만료 기준**을 넘기고 다시 접근한다(시험에서는 약5분 여유). 후보 만료는 거리만으로 확정되지 않으므로 실제 로그의 `CANDIDATE_EXPIRED`를 확인한다.
+4. USB를 다시 연결해 첫 쓰기의 SDK 반환·고정 예외·완료 callback, BODY/DRIVE 검증 여부, close/lease 반환·스캔 재개 및 두 번째 후보/회차를 분석한다. 성공했다고 먼저 다음 단계로 넘어가지 않는다.
+
+## 0.30.0-probe — DRIVE 응답 수신·제외 진단
+
+### 이전 v29 실차에서 확인한 범위
+
+- 10월13일 12:46:14·12:57:10의 정확 광고 처리 시점 모두 화면 OFF·잠금이었다. 원 수신→앱 처리112ms·5ms. BODY 응답은 12:46:17·12:57:13에 무결성 검증됐고 잠금1 보고, 프렁크 필드 없음이었다.
+- 각 BODY handshake·BODY 읽기·DRIVE handshake 총6번 SDK/native 쓰기0/0·예외없음. DRIVE는 HANDSHAKING에서 약10초 뒤 DEADLINE_EXPIRED, 최종 PARTIAL로 끝났다. 전체13.113초·12.550초이며 정리/lease 반환/스캔재개는 두 번 확인했다.
+- 첫 후보12:55:28 만료 뒤 두 번째 새 후보/회차가 생성됐고 두 번째도13:01:13 만료됐다. 최신 회차99행 실제 CLI exit0·오류0. 과거 78바이트 archive2개의 잘못된 JSON 행은 해당 실차 회차 밖이며 실차 실패 원인으로 해석하지 않았다.
+
+### 구현·검증
+
+- BODY→DRIVE fresh 대화·기존 매칭/암호/ACK 조건에서 동작을 바꿀 확정 결함은 찾지 못했다. v30은 기존 정책 그대로 native RX·완성 프레임·protocol receive·고정 응답 분류를 추가한다. logger 이벤트 재진입 취소 후 송신하지 않고 미전달 RAM 입력을 정리한다.
+- RX count는 회차 누적이며 마지막 처리 `responseQuery`는 현재 query와 별개다. BODY 결과 뒤 DRIVE 응답이 없으면 마지막 BODY STATUS_VERIFIED가 남을 수 있다. 미관측은 null, 실제 초기화된 count0은0이다. 원문·UUID·route·키·VIN·주소·hash·예외는 기록하지 않는다.
+
+|검증|실제 결과|한계|
+|---|---|---|
+|빌드·Lint·JVM|JDK21 성공, JVM203개 실패/오류/skip0|기존 deprecation 경고는 유지; 실제 차량 응답 아님|
+|Python|58개 통과, 실제 기기 v11 합성 응답4행 CLI exit0·문제0|실차 수신·도메인3 호환성 증거 아님|
+|S23 기기 회귀|스캐너19·기존 UI3·protocol smoke1 통과|합성 광고·RAM transport·소프트웨어 임시 피어 포함|
+|새 접힌 진단 상세 smoke|BODY 부분 결과·마지막 처리 BODY와 현재 DRIVE 구분 확인;1개 통과|최초 fixture의 BLE 탭 탐색 실패 후 기존 scroll-top 경계 적용해 통과. 픽셀 검증은 FLAG_SECURE로 미완료|
+|기기 protocol·파일 로그|실제 conversation.receive가 합성 domain/route/UUID 불일치와 명목ACK를 각각 고정 분류하고 Waiting 유지; 실제 runtime v11파일4행 확인|attempt900003·trialId=null. 실제 GATT native RX가 아니라 프로토콜 합성 입력이며 실차 집계 제외|
+|데이터 보존 설치|APK30 설치 성공; legacy2,096,884바이트 동일, 직전 active116,445바이트 prefix와 archive522,881바이트 동일|사용자 키·등록·VIN·데이터 초기화 없음|
+|실차 DRIVE 인증·기어/P·장기 잠금|미실행|다음 사용자 재시험·USB 로그 분석 필요|
+
+- 설치 후 실제 UI에서 인증 preset·시작을 선택했다. 활성 회차 `비공개 회차 ID`의 조회 ON·native SCAN_STARTED와 HOME 이후 `bleFieldTrialActive=true`, `bleFieldAuthenticatedRead=true`, `bleFieldScanRunning=true`, scanFailure=null을 확인했다. BeaconService 알림102/location FGS0x8, versionCode30·SDK36을 실제 조회했다.
+- 임시 smoke 소스·격리 test APK·계약/작업자 보고는 검증 후 정리한다. 제품 APK에는 fixture가 포함되지 않는다. 기기 프로토콜 smoke를 실차 DRIVE 성공으로 보고하지 않는다.
+
+### 사용자 재시험
+
+1. 준비된 조회 ON 상태에서 USB를 뽑고 휴대폰을 잠근 채 차량에 접근해 20~40초 머문다. 별도 버튼·키 재등록·차량 제어를 하지 않는다.
+2. 충분히 멀어져 마지막 광고 이후3분 후보 만료 기준을 넘긴다(약5분 여유). 다시 접근해 같은 시험을 한다. 접근·이탈 시각과 공식 Tesla 앱 사용 여부만 기억한다.
+3. USB를 다시 연결하면 DRIVE 요청 이후 RX/프레임/protocol count 변화·마지막 실제 처리 query·고정 제외 사유·ACK/session 진행·정리/스캔재개를 분석한다. 차량 송신 부재와 앱 관측 부재는 구분한다.
+4. 앱 프로세스가 재시작됐다면 감지만 복원되므로 설정→개발자 진단→BLE 연결→접근 시 인증·상태 조회→시작을 다시 직접 선택한다. 이번 실차 로그로 원인을 좁힌 뒤 다음 변경을 판단한다.
+
+## 0.31.0-probe — GATT 첫 쓰기 직렬화·native 상태 관측
+
+### v30 사용자 실차 로그
+
+- 10월13일 14:46:18·14:52:53의 광고 처리 시점 모두 화면 OFF·잠금, 원 수신→앱 처리59ms·22ms였다. 첫 회차는 CONNECTING에서 `GATT_CONNECTION_LOST`, 전체263ms. native 연결 status는 기존 로그에 없어 구체 원인은 미확정이다.
+- 두 번째는 연결/발견/MTU247/구독 후 첫 BODY HANDSHAKING 쓰기가 SDK `201=ERROR_GATT_WRITE_REQUEST_BUSY`로 거절됐다. Exception·쓰기 callback 없음, 전체3.056초. 구독 확인 전 RX notification1, frame/protocol0이며 BODY/DRIVE 검증0이다. 차량 키 인증 거절이나 DRIVE 응답 제외의 증거가 아니다.
+- 두 번 모두 로컬 정리/lease 반환/scan재개, 첫 후보14:50:09 만료 뒤 두 번째 회차 생성·두 번째14:56:35 만료를 확인했다. 실차61행 실제 CLI exit0·문제0. 조회·스캔·FGS는 분석 당시 ON이었다.
+
+### 변경·제약
+
+- `TeslaBleKeyProbe`/새 `TeslaGattWritePump`가 첫/후속 쓰기를 callback 밖 동일 single-flight MainHandler 큐로 통일한다. 취소·기한·owner/권한 상실·오래된 runnable·중복 callback이 native 제출/offset 진행으로 이어지지 않게 한다. SDK201 등 nonzero는 재시도 없이 실패·봉인한다.
+- summary/병합/FieldJson v12·Python·접힌 UI 상세에 native 연결 status/state/entry 시각, CCCD SDK/native 결과, 쓰기 예약/dispatch를 추가했다. 새 예약은 마지막 실제 쓰기와 분리하고 최종 결과는 마지막 실제 관측을 보존한다. 예약false는 취소/해제를 포함하며 SDK 성공을 뜻하지 않는다.
+- AOSP36은 descriptor busy를 callback 큐잉 전에 해제하며 SDK 내부에5회/10ms Busy 재시도 경로가 있다. 삼성 기기에서 무엇이 Busy였는지 또는 앱 queue 통일이 해소하는지는 이 근거로 확정하지 않는다. 앱 delay/retry·timeout·암호·키·autoConnect·FGS 감지 정책은 바꾸지 않았다.
+
+|검증|실제 결과|한계|
+|---|---|---|
+|빌드·Lint·JVM|JDK21 성공, JVM216개 실패/오류/skip0|새 회귀의 unused Unit 표현 제거 후 JVM 재실행도 성공; 기존 deprecation 경고 유지|
+|Python/기존 실차 로그|60개 통과; v30 실제61행 CLI exit0·오류0, 새 native 관측은 null|이전 기록의 미관측을0/SUCCESS로 채우지 않음|
+|S23 기존 회귀|스캐너19·기존 UI3 통과|합성 광고·RAM transport 포함|
+|실제 MainHandler pump smoke|callback 안 submit0→반환후1, 합성201뒤 callback IGNORED·retry0; queued seal 뒤 살아남은 runnable 제출0;2개 통과|production helper·실제 Android 실행자지만 SDK 반환은 합성 입력, 차량 GATT 수행 아님|
+|새 진단 상세 smoke|native 연결/CCCD와 Busy201을 미완료로 표시;1개 통과|최초 fixture는 탐색 중 summary가 유실돼 실패, 화면 진입 후 fixture 적용으로 수정·통과. FLAG_SECURE 유지로 픽셀 검증 미완료|
+|실제 v12 파일·CLI|합성 connection/CCCD/QUEUED/RESULT5행, SDK201·callback null 분리; CLI exit0·문제0|attempt900005·trialId=null, 실차 집계 제외|
+|데이터 보존 설치|APK31 설치 성공; legacy2,096,884바이트 동일, 이전 active267,375바이트 prefix·archive522,881바이트 동일|사용자 키·VIN·등록·데이터 초기화 없음|
+|실차 Busy·BODY/DRIVE·잠금 왕복|미실행|다음 사용자 시험·USB 로그로 판정|
+
+- 실제 UI에서 인증 preset과 시작 버튼을 선택했다. 활성 회차 `비공개 회차 ID`의 native SCAN_STARTED, HOME 후 조회 ON/스캔 실행/scanFailure=null, BeaconService FGS 알림102·location type0x8, 기기 versionCode31·SDK36을 확인했다.
+- 임시 smoke 소스·격리 test APK·계약·작업자 보고는 검증 후 제거했다. 실제 앱에는 fixture가 포함되지 않는다. 신규 큐 검증을 실차 Busy 해소·인증 성공으로 보고하지 않는다.
+
+### 사용자 실차 재시험
+
+1. 준비된 조회 ON 그대로 USB를 뽑고 휴대폰을 잠근 채 차량에 접근해20~40초 머문다. 추가 버튼·새 키 등록·프렁크·마이크 시험은 하지 않는다.
+2. 충분히 멀어져 마지막 광고 이후3분 후보 만료 기준을 넘긴다(약5분 여유). 다시 접근해 같은 시험을 한다. 접근/이탈 시각·공식 Tesla 앱 직접 사용 여부만 기억한다.
+3. USB 재연결 후 native 연결 status/state, CCCD SDK·완료, queued→dispatch→SDK→callback, RX/BODY/DRIVE, 정리/scan재개를 함께 분석한다. 이전 쓰기 결과와 취소된 새 예약을 섞지 않는다.
+4. 앱 프로세스가 재시작됐다면 감지만 복원되므로 설정→개발자 진단→BLE 연결→접근 시 인증·상태 조회→시작을 다시 선택한다. 구현→검증/설치→사용자시험→로그분석 순서를 유지한다.
+
+## 0.47.0-probe — Moonshine Tiny Korean STT 전환
+
+> **제거됨(v0.50):** 이 Moonshine/sherpa-onnx 경로는 `0.50.0-probe`에서 제거됐다. 아래는 과거 기록이며 현재 구현이 아니다.
+
+### 구현 계약
+
+- Android `SpeechRecognizer`의 지원 조회·설치/다운로드 승격·재시도·10초 타임아웃 게이트를 제거했다. 진단 음성은 앱에 포함한 sherpa-onnx 1.13.8 Kotlin AAR과 `assets/moonshine-ko`의 `encoder_model.ort`·`decoder_model_merged.ort`·`tokens.txt`를 쓰는 비스트리밍 추론이다. 모델은 `sherpa-onnx-moonshine-tiny-ko-quantized-2026-02-27`이며 **파일 3개 존재는 준비 상태일 뿐 인식 성공이 아니다.**
+- 직접 마이크는 `AudioRecord` 16 kHz·mono·PCM16을 최대 10초 RAM에 모은 뒤 stop/release를 끝내고 native 추론한다. 파일·무음 대조도 같은 엔진과 같은 PCM 경로를 쓰며 스피커나 별도 인식기를 시작하지 않는다. 파일과 무음은 같은 샘플 수를 쓰고 무음만 0으로 채운다.
+- 추론 결과는 최종 단일 후보·문장 일치·명령 판정을 표시하되 일반 진단에서는 원문을 영구 기록하지 않는다. Moonshine은 신뢰도를 제공하지 않으므로 `confidence=null`이고 기존 0.85 안전 조건은 완화하지 않는다. 따라서 정답 문장이 인식돼도 **실차 프렁크 전송은 차단**되며, 현재 비교할 수 있는 것은 마스킹 인식 로그와 차단 사유다.
+- 취소·화면 이탈·오류·시간 초과에서 캡처·추론 객체·RAM·오디오 예약을 정리한다. 해제 불명은 `RESTART_REQUIRED`로 새 시험을 막고 성공으로 숨기지 않는다. **PCM은 파일로 저장하거나 전송하지 않는다.**
+
+### 빌드 준비와 라이선스
+
+- Python 3.11 이상에서 `python3 -B tools/prepare_moonshine.py`를 먼저 실행한다. `.local-models`는 Git 제외이며 스크립트는 AAR upstream 배포물과 모델 archive의 고정 SHA-256을 검증하고 기존 다른 파일을 덮어쓰지 않는다. 모델 archive SHA는 이 저장소의 실측 pin이며 **공식 서명 검증 주장이 아니다.**
+- 모델 자산 수십 MB가 APK에 포함되어 debug APK가 그만큼 커진다. 모델 파일 누락·빌드 실패를 모델 로딩 성공으로 해석하지 않는다.
+- UI에는 "Powered by Moonshine AI"를 표시한다. 한국어 모델은 **Moonshine AI Community License**(개인 평가 무료, 상업 등록 및 연 매출 합산 USD 1,000,000 초과 시 별도 조건)이며 MIT·Apache-2.0으로 표기하지 않는다. 런타임 sherpa-onnx는 Apache-2.0, ONNX Runtime은 MIT이고 `app/src/main/assets/licenses/`의 LICENSE·NOTICE를 함께 배포한다.
+
+### 검증 상태
+
+- 앱·계측 APK 빌드, JVM337개(실패/오류/skip0), Lint 오류0/경고14, Python 분석기94개를 통과했다. 모델 준비 스크립트의 고정 SHA 검증·자산 준비를 실제 실행했다. debug APK는238,276,380바이트이며 모델3개 비압축·JNI4개 ABI·라이선스5개 동봉을 ZIP에서 확인했다. PCM 전송 바이트는 native `acceptWaveform`이 반환한 뒤에만 집계하며 캡처 바이트와 구분한다.
+- S23에 앱·계측 APK를 데이터 보존 설치하고 code47/name0.47.0-probe를 확인했다. VIN/설정/XML4개 지문·legacy/archive3개는 동일하고 활성 로그 기존 접두부도 보존됐다. 앱 실행·홈→설정→개발자 진단→음성의 실제 접근성 요소에서 비교용 안내·동의 체크박스·동의 전 시작 비활성을 확인했다. 감지 OFF·앱 서비스 없음이다. 보안 화면의 픽셀 캡처 검증은 하지 않았다.
+- 실제 native 합성 PCM71,098바이트를 입력해 `▁헤이 테슬라 브렁크 열어줘.`를 얻었다. 같은 길이 무음은 빈 문자열이었다. 두 입력 모두 native 수락 바이트71,098·오류 없음·스트림 해제 실패 없음이며 모델 로드는 두 실행에서744ms/466ms였다. 지연 벤치마크나 정답 인식 합격이 아니다. 선두 SentencePiece 표식과 “프렁크” 오인식을 결과 그대로 기록하며 점수·문장을 정답으로 교정하지 않았다.
+- 일회 native smoke와 기존 실차 입장 거부 계측2개가 통과했다. 최초 계측은 모바일 자동화 helper의 UiAutomation 점유로 실패했고 helper 종료 후 재실행했다. 임시 smoke 메서드는 검증 후 제거했다. 사용자 마이크·GATT·차량 명령은 실행하지 않았다.
+
+### v47 비교 시험 절차
+
+1. 감지를 OFF로 두고 화면 잠금을 해제한다. 설정→개발자 진단→음성에서 모델 파일 3개 준비·마이크 권한·화면 표시·기존 캡처 없음 상태를 확인한다.
+2. 파일 입력을 먼저 시험한다. 고정 TTS 파일을 선택해 시작하고 수음이 끝난 뒤 추론 결과·문장 일치·`null` 신뢰도·차단 사유를 확인한다. 같은 길이의 무음 대조와 진행 중 취소를 각각 실행한다.
+3. 직접 마이크를 선택해 시작하고 “헤이 테슬라 프렁크 열어줘”를 한 번 말한다. 최대 10초 수음이 끝난 뒤 추론 결과와 판정을 확인한다. 실패·무음·허용 외 문장을 성공으로 표시하지 않는다.
+4. 실차 동의를 명시적으로 선택한 경우에만 같은 문장을 시험한다. 인식 결과가 정답이어도 신뢰도 조건을 통과할 수 없어 전송 전에 차단되어야 하며 프렁크 개방을 기대하지 않는다. 차단 사유와 마스킹 로그만 비교한다.
+5. 최소 3종을 확인한다: 정답 발화, 부정 또는 허용 외 발화, 무음, 중도 취소 중 3종 이상. 회차마다 수음 종료·추론 시작·결과 표시·자원 해제를 구분해 기록한다.
+6. USB 로그에서 마스킹 저장이 실차 동의 회차에만 있는지, 일반 진단 원문·PCM 파일이 없는지 확인한다. 실제 인식 정확도·지연·배터리는 별도 측정 전 합격으로 선언하지 않는다.
+
+- **미검증**: 실제 사용자 한국어 발화 정확도·지연 분포·메모리·배터리, 직접 마이크의 음향 조건, 잠금/주머니, 차량 접근, 사용자 실차 성공. v46의 과거 실차 실패도 그대로 남는다.
+
+## 0.46.0-probe — 실차 음성 진행 위치 즉시 표시
+
+- 음성 대기·마이크 반환·키 준비·BLE 연결/서비스 준비·차량 인증·현재 상태/P 확인·신선한 P·SDK 접수·차량 ACK·열림 보고를 실제 상태로 표시한다. 시간 경과로 진행률이나 성공을 만들지 않는다. 실패·결과 불명에서는 마지막 실제 단계와 사유를 유지한다.
+- ACK와 후속 BODY OPEN을 모두 관측해야 “열림 보고 확인”이다. 물리 개방 완료와 구분하며 기존 동의·입장 차단·40초 기한·전송 후 자동 재전송 금지는 변경하지 않았다. 마스킹 인식 로그도 유지한다.
+- JDK21 APK·계측 APK 빌드, JVM338개(실패/오류/skip0), Lint 오류0/경고14를 확인했다. S23에서 생산 Compose 영역에 합성 RAM 상태를 전달해 연결→상태/P→전송→ACK 표시 전환·전송 후 중단 동작·실패 시 마지막 ACK/사유 유지·ACK만으로 완료 표시 금지·정리 불명 우선을 확인했다. 기존 실차 입장 차단과 함께 계측2개를 통과했다. 실제 마이크·GATT·차량 제어를 시작하지 않은 화면 smoke다.
+- 앱·계측 APK를 `install -r`로 설치해 code46/name0.46.0-probe와 실제 앱 실행을 확인했다. VIN/설정/XML4개 지문·archive/legacy 전체·활성 로그 접두부가 동일하다. 감지/관찰/세션은 OFF·앱 서비스 없음이다. 추가 이벤트는 앱 수명주기와 합성 입장 거부뿐이며 실제 실차 명령은 없다.
+- 최초 계측은 기존 모바일 자동화의 접근성 점유로 실패했다. 해당 `DeviceServer` 검증 연결만 종료한 뒤 계측2개를 통과했다. 화면 증거는 실제 Compose 접근성 계층이며 픽셀 검증은 미실행이다. 사용자 발화·실차 개방·실차 중 실패 위치는 다음 시험 후 USB 로그로 판단한다.
+
+## 0.45.0-probe — 실차 시험 한정 마스킹 인식 로그
+
+- 지침의 원문 저장 금지에 명시 동의한 실차 시험의 마스킹 로그만 예외로 추가했다. 동의 행에 저장 범위·앱 내부 순환 보관·시험 어휘 밖 마스킹·녹음 미저장을 고지한다. 세션 RAM 동의·시작 후 해제·기존 차량 안전 조건을 유지한다.
+- schema22의 `FRUNK_VOICE_RECOGNITION_RESULT`에 유효 최종 후보 최대3개·각160자·유한한0..1 신뢰도 또는null·고정 허용/차단 사유를 기록한다. 전체 토큰이 시험 어휘와 일치할 때만 보존하며 저장 인코더에서도 다시 마스킹한다. 일반 STT·부분 결과·취소/기한 후 콜백에는 저장 훅이 없다. 마스킹 문장을 실행 판정에 사용하지 않는다. 이전 schema 분석 호환을 유지한다.
+- APK·계측 APK 빌드, JVM335개(실패/오류/skip0), JDK21 Lint(오류0/경고14), Python 분석기94개를 통과했다. 생산 클래스 JShell→실제 파일 sink→분석기 CLI smoke에서 합성 인정/차단2건·비대상 이벤트 첨부 제외·미지 어휘 마스킹·분석 문제0건을 확인했다. 실제 음성/기기/차량 입력이 아니다.
+- USB 재연결 후 S23에 앱·계측 APK를 `install -r`로 설치하고 code45/name0.45.0-probe를 확인했다. 실차 입장 안전 경계 계측1개를 통과했으며 앱을 실행했다. 암호화 VIN/설정/XML4개 지문·기존 archive/legacy 전체·활성 로그 접두부가 같고 앱 서비스는 없다. 동의·시험 시작·마이크·차량 명령은 실행하지 않았다. 화면 계층 도구가 이동 뒤에도 같은 설정 화면을 반환하고 직접 계층 조회는 종료137로 실패해 새 동의 UI 재확인은 미완료다. 실제 발화·차량 개방은 사용자 시험 후 판단한다.
+
+## 0.44.0-probe — 별도 음성 확인 제거
+
+- RAM 실차 동의·직접 시작 후 정확한 최종 명령이 인정되면 입력을 정상 해제하고 차량 인증·신선한 P 검사로 바로 전달한다. 추가 “확인” 발화는 없다. 명령10초·handoff5초·명령 인정부터 차량 작업40초, 신뢰도0.85·단일 최종 후보·취소·중복 방지·결과 불명 재전송 금지를 유지한다.
+- 인식 인정·차량 전송·명령 응답·후속 열림 상태를 구분해 기록한다. 녹음·발화 원문은 저장하지 않는다. 주변 사람·재생 음성의 위험을 안내하며 실패·결과 불명은 화면에 남긴다. 기존 문법 차단의 허용 표현이나 신뢰도는 완화하지 않았다.
+- APK·계측 APK·JVM326개(실패/오류/skip0)·Java21 Lint 성공. 생산 정책 JShell 실행에서 단일 명령 직후 handoff와 중복·입력 해제 실패·handoff 만료 차단을 확인했다. 합성 입력이며 실제 발화·차량 통신의 증거는 아니다.
+- S23에 데이터 보존 업데이트(code44)를 설치하고 실차 입장 안전 경계 계측1개를 통과했다. 동의 없음/모델 미확인 시 차량 전송을 만들지 않았다. 암호화 VIN·설정·주말 시험 XML 지문, 기존 로그 전체/활성 접두부를 보존했다. 앱 서비스는 실행하지 않았다.
+- 실제 설치 앱의 화면 계층에서 “추가 확인 없이 안전 조건을 검사해 개방 요청” 안내·명령10초/신뢰도0.85·미선택 동의·시작 비활성을 확인했다. 지원 메타데이터 요청/응답 각1건이며 동의·시작을 대신 누르지 않았다. 새 로그에 명령 인정·차량 전송은 없고 감지·오디오 서비스도 없다.
+- 실제 차량 개방은 미검증이다. 보안 화면(`FLAG_SECURE`)은 검정으로 캡처되므로 픽셀 검증은 하지 않았다. 사용자 재시험 후 USB 로그로 실제 결과를 판단한다.
+
+## 0.43.0-probe — 음성 화면 진입 시 지원 자동 조회
+
+- 음성 진단 화면 진입·HOME 복귀 시 한국어 지원 메타데이터를 자동 조회한다. 다른 작업이 진행 중이면 기존 차단 조건이 해제된 뒤 조회하며 실패·취소를 자동 반복하지 않는다. 화면 이탈 시 활성 조회를 취소한다. 정상 설치 확인이면 수동 조회 버튼을 숨기고, 실패·미설치 상태에는 재시도를 제공한다.
+- 실차 동의·직접 시작·음성 확인·신선한 P·차량 인증 경계는 변경하지 않았다. 메타데이터 조회는 마이크 녹음·모델 다운로드·차량 명령을 시작하지 않는다. VIN UI 시험 호스트도 실제 메타데이터 조회에 연결하되 라디오·오디오 시작 차단은 유지했다.
+- APK·계측 APK 빌드 성공, JVM326개 실패/오류/건너뜀0. Java17의 Lint는 `List.removeLast()` 도구 오류로 실패했으며 설치된 Android Studio Java21로 실행해 오류0·경고14로 완료했다.
+- 연결 S23의 실제 화면 계층에서 버튼 입력 없는 메타데이터 응답·정상 상태의 재시도 버튼 없음·동의 미선택을 확인했다. HOME 복귀까지 지원 요청/응답 각2건이며 실제 음성 시험은 시작하지 않았다. 기존 실기기 안전 경계 시험1개 통과로 동의 없음/모델 미확인 시 예약·차량 전송 차단을 확인했다. 해당2건의 거부 이벤트는 합성 계측이며 사용자 실차 로그와 구분한다.
+- `adb install -r`로0.43.0-probe(code43)를 설치했다. 암호화 VIN·설정·주말 시험 XML 지문과 최초 설치 시각이 같고 기존 활성 로그 접두부도 보존됐다. 감지·관찰 서비스·오디오 세션은 OFF다. `FLAG_SECURE`로 앱 영역 캡처가 검정이어서 픽셀 검증은 하지 못했다.
+- 이번 변경은 이전 사용자 시험의 `FRUNK_VOICE_GRAMMAR_BLOCKED`를 해결한 것이 아니다. 실제 발화·프렁크 개방·실행 중 조회 취소·권한 변경·timeout은 이번 기기 검증에서 미실행이다. 아래 시나리오로 사용자 재시험 후 USB 로그를 분석한다.
+
+## 0.42.0-probe — 화면 표시 음성 프렁크 실차 시험
+
+### 구현·유지한 경계
+
+사용자 승인으로 실제 BLE 프렁크 제어와 foreground 직접 마이크·별도 음성 확인을 연결했다. 기존 합성/TTS/PCM 진단은 dry-run이며 실차 capability를 얻지 못한다. 같은 차량 작업의 신선한 P→fresh VCSEC 프렁크1회→후속 BODY를 사용하고 SDK 접수·차량 응답·열림 보고를 구분한다. ACK와 명시 OPEN을 모두 확인해야 전체 완료다. SDK0 이후 결과 불명 명령은 자동 재전송하지 않는다. 구현과 실제 개방 성공은 별개다.
+
+명령10초·확인8초·handoff5초·확인부터 차량 작업40초, 두 발화의 신뢰도0.85 이상은 보수적 시험 정책이다. P의 수신 monotonic5초·원 wall10초, 차량/폰 wall 미래차2초를 검사하며 원본 시각은 보정하지 않는다. 초기 시험은 화면 표시·잠금 해제·감지 정상 중지를 요구한다. 기본 비서 변경은 이 foreground 시험의 요구가 아니며 잠금 주머니 자동 음성은 아직 미지원이다.
+
+### 실제 검증
+
+|항목|결과|한계|
+|---|---|---|
+|APK·계측 APK·JVM·Lint|최종 빌드 성공, JVM326개 실패/오류/skip0, Lint 오류0/경고14|실제 차량 명령 성공 아님|
+|Python 로그 분석기|87개 통과|v21의 실차 이벤트는 BLE 시험 ID 없이도 분석하며 요청/응답을 열림으로 승격하지 않음|
+|생산 정책 JShell smoke|직접 마이크 명령/확인·중복 handoff 차단·201 미접수·SDK0 UNKNOWN·중복 쓰기 차단·ACK≠물리 개방 확인|음성 신뢰도·P·SDK 반환은 합성, 실제 인식/무선 입력 아님|
+|S23 기기 검증|31개 통과. 새 실차 동의 없음/ko-KR 모델 미확인 입장에서 오디오 예약·차량 전송을 만들지 않음|기존 감지·MainHandler·합성 주소 SDK lab 포함, 실제 차량 명령/개방 아님|
+|실제 화면·지원 조회|설정→개발자 진단→음성의 실차 영역·모델 미확인 차단·ko-KR 조회·동의 기본 OFF·HOME/재진입 확인|실차 동의를 대신 선택하거나 실제 제어 버튼을 실행하지 않음. 픽셀 기반 시각 검증 미실행|
+|실제 기존 합성 입력|TTS_PCM COMPLETE, 문장 후보 일치·신뢰도0.0·dry-run PROCESSED, 입력/출력/포커스 반환, 실차 COMMAND_SENT0건|녹음된 사용자 발화가 아니며 실차 실행 근거 아님|
+|로그·데이터 보존|설치 후1007행 CLI exit0·문제0, legacy/archive 동일·active prefix 보존, 암호화 VIN 지문·최초설치 이력 유지|실차 로그는 다음 사용자 시험에서 확보|
+|사용자 발화·실제 개방·잠금 주머니|미실행|사용자 차량 시험/USB 분석 전 성공·다음 단계 합격을 선언하지 않음|
+
+설치 전 원본은 `비공개 로컬 보관 경로`, 설치 후 준비 로그/분석은 `비공개 로컬 보관 경로`에 보존했다. 현재 v42·min/target36이며 감지는 정상 중지/OFF, 실차 동의는 미선택, 앱의 마이크/감지 서비스는 실행하지 않는다. 실제 차량 명령은 아직 보내지 않았다.
+
+### 0.42 당시 사용자 실차 시나리오(v46 기준)
+
+이 절차는 v46까지의 시스템 음성 인식기·실차 개방 시험 기록이다. v47은 신뢰도가 `null`이라 전송 전에 차단되므로 현재 절차는 위 [v47 비교 시험 절차](#v47-비교-시험-절차)를 따른다.
+
+1. 차량 P·프렁크 앞 안전을 확인한다. 휴대폰 화면을 켜고 잠금을 풀며 감지는 OFF로 둔다. 키·VIN을 재등록하지 않는다.
+2. 설정→개발자 진단→음성에서 자동 지원 조회가 끝나면 **실제 차량 동작 · 프렁크 1회** 영역으로 간다.
+3. **실차 시험·마스킹 로그 저장 동의 체크 → 실차 음성 시험 시작 →10초 안에 “헤이 테슬라 프렁크 열어줘” 한 번** 말한다. 별도 “확인”은 말하지 않는다. 인정되면 즉시 안전 검사·개방 요청으로 진행한다.
+4. 최대40초 동안 같은 영역의 현재 단계(연결·인증·P 확인·전송·차량 응답)와 실제 프렁크를 확인한 뒤 USB를 연결한다. 실패하면 마지막 실제 단계·사유를 확인하고 반복하지 않는다. 최종 인식 문장(시험 어휘 밖 마스킹)·신뢰도·허용/차단 사유와 차량 전송/응답/열림 관측을 함께 분석한다. 전송 후 취소는 차량 동작을 철회하지 못할 수 있으며, ACK만으로 개방 성공이 아니다. 잠금·주머니 시험은 아직 아니다.
+
+## 0.41.0-probe — 쓰기 BUSY 제한 복구·BODY 절전 관측
+
+### v40 실차에서 확인한 경계
+
+- 보존 로그의 조회5회는 모두 연결 status0·MTU247·CCCD0이었다. 첫 회차는 첫 HELLO SDK201·callback/RX 없음으로 종료했다. 나머지4회는 BODY 암호 응답 검증 뒤 DRIVE HELLO114바이트 SDK0/callback0까지 진행하고 SessionInfo 없이 약10초 HANDSHAKING timeout이었다. GetDriveState 자체는 아직 송신하지 않았다.
+- 후반 domain2·route/UUID 불일치6프레임은 관련 없는 응답으로 제외됐다. 인증 거부·차량 sleep·UWB 요청이라고 확정할 수 없다. 새133은0건이므로 v40의2초 기존 handle 재접속 효과도 미검증이다.
+- 각 종료에서 localClosed·lease 반환·스캔 재개를 관측했고 후보3개는 마지막 광고 후10001ms에 만료됐다. 첫201의 광고 처리 시점은 화면 OFF/잠금이었지만 후반 BODY 성공은 화면 ON/잠금 해제였다. 잠금 중 인증 성공으로 보고하지 않는다.
+
+### 수정·선행 조사
+
+Tesla의 쓰기 큐·전송 실패/reset, online gate·별도 wake, domain별 세션을 먼저 확인했다. [조사 근거](Tesla-Integration.md#v41-busyinfotainment-선행-조사)를 따른다. SDK36의201 미접수만100ms/최대2회 추가 발급하며 원 쓰기5초·전체40초 기한·새 Request·취소·마지막 SDK 관측을 유지한다. SDK0 이후 결과 불명 쓰기의 재전송은 금지한다.100ms/2회는 Tesla 확정값이 아닌 우리 제한값이다.
+
+검증된 BODY의 절전 원 코드(`bodyVehicleSleepStatus`)·당시 수신 시각과 실제 추가 발급 횟수(`writeBusyRetryCount`)를 로그v20·분석기·진단 상세에 연결했다.0 UNKNOWN·1 AWAKE·2 ASLEEP·미지원 코드를 구분하되 현재 Infotainment 준비를 보증하지 않는다. HELLO·domain/route/UUID·암호 검증은 완화하지 않았고 자동 차량 깨우기는 추가하지 않았다.
+
+### 실제 실행한 검증·설치
+
+|검증|결과|한계|
+|---|---|---|
+|JDK21 APK·계측 APK·Lint|빌드 성공·Lint 오류0/경고14|실차 무선 입력 아님|
+|JVM / Python|297개 실패/오류/skip0 /85개 통과|201 경계·취소·기한·원 관측·인증된 절전 값·새 회차/부분 결과·파서 검증. 합성 입력|
+|생산 펌프 독립 실행|JShell accepted2회/추가1, exhausted3회/추가2, canceled1회/추가0·성공 완료 중복 거절|SDK status·시계는 합성, JVM 테스트 호출이 아닌 생산 클래스 실행|
+|S23 감지·화면·MainHandler|30개 통과. 실제 Handler의201→0·연속201 한도·예약 취소 검증 포함|201은 합성 SDK 반환, 실제 차량에서201을 강제로 재현한 시험 아님|
+|S23 실제 SDK lab|같은 handle·autoConnect=true·2003ms 뒤 connect Boolean true·local close·이전 generation 거절|합성 주소, callback0건. 실제133·RF·MTU/CCCD/TX·차량 인증 성공 아님|
+|로그 CLI|보존 설치 전923행·설치 후965행 exit0·문제0|구버전 호환·실제 기록 확인이며 v41 차량 접근0건|
+|v41 보존 설치·실제 화면|versionCode41·min/target36·최초설치 이력 유지. 설정→진단→인증 프리셋→시작→HOME 뒤 감지/인증 조회/스캔 ON·scanFailure=null·BeaconService FGS 알림102/type0x8|UI 의미 계층·실제 조작 확인. 새 상세 값의 실차 표시·픽셀 기반 시각 검증은 미실행|
+|실차·장기 잠금·배터리|미실행|201 복구 효과·domain3 무응답·공식 폰키 동시 사용은 다음 사용자 시험/USB 로그로 판단|
+
+설치 전 원본은 저장소 제외 `비공개 로컬 보관 경로`에 보존했다. legacy·archive3개는 동일하고 기존 active는 설치 후 active의 prefix로 유지됐으며 암호화 VIN 지문·최초설치 이력도 동일했다. 키 재등록·등록/설정 초기화·권한 자동 승인은 하지 않았다.
+
+준비회차 `비공개 회차 ID`의 v20·8행 및 분석은 `비공개 로컬 보관 경로`에 보존했다. 이 회차의 후보/조회는0건이다. SDK lab·합성 시험과 실차를 섞지 않는다.
+
+### 사용자 실차 재시험
+
+1. 현재 v41 감지·인증 조회 ON 그대로 추가 설정 없이 USB를 뽑고 휴대폰을 잠근다. 차량 옆에서30~40초 머문다. 프렁크·마이크·키 등록 버튼은 누르지 않는다.
+2. 충분히 멀어진 곳에서20~30초 머문 뒤 재접근해30~40초 머문다.60초 고정 대기는 없지만 광고가 계속 수신되면 같은 후보다. 방문 시각과 휴대폰 잠금 유지 여부를 기억한다.
+3. 가능하면 별도 비교에서 사용자가 주차된 차량의 중앙 화면이 이미 깨어 있음을 확인한 조건도 기록한다. 휴대폰 화면을 켠 것과 차량 Infotainment awake는 다르다. 공식 Tesla 앱을 직접 열거나 사용했다면 그 시각도 구분한다. 우리 앱은 자동 wake를 보내지 않는다.
+4. USB 재연결 후201의 실제 재발급 횟수/최종 SDK·callback, BODY 절전 코드/수신 시각, DRIVE SESSION_READY/GetDriveState 송신 여부, close·스캔 재개·이탈/재무장을 함께 분석한다. 프로세스가 재시작되면 감지만 복원되므로 설정→개발자 진단→BLE 연결에서 인증 조회를 직접 다시 시작한다. 실차 로그 분석 전 개선 성공·다음 단계 합격을 선언하지 않는다.
+
+## 0.40.0-probe — Tesla 연결 모드·기존 GATT 재접속
+
+### 구현 경계
+
+- 지원 OS(minSdk36)는 모두 Tesla APK의 SDK34+ 조건에 해당하므로 실제 `connectGatt`에 autoConnect=true를 전달한다. 접근 읽기의 전송 전 초기133은2초 후 같은 NativeTransport·owner·handle에서 `connect()`를1회 호출한다. 기존 close→1초→새 handle 경로와 그 전용 정리 상태를 제거했다.
+- 최종 취소·기한/권한/BT/OFF 상실·SDK 거절/예외에는 기존 disconnect+close·예약 반환/보존 경로를 사용한다. 최초500ms·광고10초·원40초 예산, v39의3.5초/최대2회 상위 읽기 복구·AltBeacon/FGS·키·암호·제어 금지를 유지한다.
+- 대기 중 중복133은 예약을 유지하고 CONNECTED0은 예약을 취소해 초기화를1회만 진행한다. callback 진입의 generation을 MainHandler 처리에서 검사한다. SDK에 연결 요청ID가 없으므로 재발급 이후 진입한 callback의 원래 RF 시도까지 식별한다고 주장하지 않는다.
+- 로그v19는 handle 생성 autoConnect·CREATE/RECONNECT·SDK Boolean 접수와 연결 status·인증 결과를 분리한다. 이전 로그는 새 관측을 null로 유지하며 v18/v19 상위 제한 복구와 v17 반복 위반을 구분한다.
+
+### 실제 실행한 검증·설치 상태
+
+|검증|실제 결과|한계|
+|---|---|---|
+|JDK21 APK·계측 APK·Lint|빌드 성공, Lint 오류0·경고14|최초 빌드의 불필요 SDK 분기 경고는 minSdk36 근거로 분기를 제거한 뒤 재검증. 경고 억제 없음|
+|JVM / Python|278개 실패/skip0 /83개 통과|미래 스키마 거부 시험1건의 구버전 기대를 수정 후 Python 전체 통과. 실제 무선/차량 입력 아님|
+|독립 생산 owner 실행|JShell exit0. 같은 handle 재접속1회·이전 generation 거절·성공중복 차단·disconnect/close 각각1회·SDK false 가정 뒤 SEALED/반복 거절|테스트 메서드 호출이 아닌 생산 클래스 실행이지만 handle/SDK 반환은 합성 입력|
+|보존 실차·설치 후 로그 CLI|교체 전1162행·설치 후1202행 모두 exit0·문제0. 새 준비회차는v19·8행·접근0건|구버전 하위 호환과 실제 기록 확인이며 v40 실차 성공 근거 아님|
+|S23 감지·화면·MainHandler·취소|감지/화면23개·MainHandler 재접속3개·settle 취소1개 통과|합성 광고/상태 포함. 실제 설정→진단→인증 조회 시작·HOME 조작 확인. 픽셀 기반 시각 검증은 미실행|
+|S23 실제 SDK lab|생성/취소/close와 기존 handle 재접속2개 통과. autoConnect=true·같은 handle·2003ms 뒤 connect Boolean true·로컬 close·이전 generation 거절|합성 주소 대상의 실제 SDK 호출. native callback0건이므로 실제133·무선 연결·MTU/CCCD/TX·차량 인증 성공 시험이 아님|
+|v40 보존 설치·감지 ON|versionCode40·min/target36·최초 설치 이력 유지. 실제 앱에서 감지/인증 조회/스캔 ON·scanFailure=null, HOME 뒤 BeaconService FGS 알림102/location type0x8 확인|기존 키 재등록·권한 자동 승인·VIN/등록 초기화 없음. 최종 prepared 회차의 차량 접근은0건|
+|실제 차량·장기 잠금·배터리|미실행|새로운133·첫 쓰기 개선과 공식 폰키 동시 사용은 사용자 실차 및 USB 로그로 판단|
+
+USB 분리 전 원본 사본은 저장소 제외 `비공개 로컬 보관 경로`에 보존했다. 재연결 직전 추가 사본은 `비공개 로컬 보관 경로`다. 설치 후 legacy·회전3개는 동일하고 직전 active469285바이트는 새 active511059바이트의 prefix로 보존됐으며 VIN 암호문 지문도 동일했다.
+
+현재 준비회차 `비공개 회차 ID`의 v19·8행과 분석 결과는 `비공개 로컬 보관 경로`에 보존했다. 합성 SDK lab을 이 실차 회차에 섞지 않는다. 설치 APK는 `app/build/outputs/apk/debug/app-debug.apk`다.
+
+### 사용자 실차 시험
+
+1. 현재 v40 설치·감지/인증 조회 ON 준비가 끝났다. 추가 설정·키 재등록 없이 USB를 뽑고 휴대폰을 잠근다. 프로세스가 재시작돼 인증 조회가 꺼졌다면 설정→개발자 진단→BLE 연결에서 직접 다시 시작한다.
+2. 차량 옆30~40초 머문다. 초기133의2초/같은 handle 재접속과 상위3.5초/새 조회를 로그에서 구분한다.
+3. 충분히 멀어진 곳에서20~30초 머문 뒤 재접근30~40초.60초 고정 대기는 없지만 계속 광고가 들어오면 같은 후보로 유지된다.
+4. USB 재연결 후 CREATE/RECONNECT·SDK 접수/거절·native callback·CCCD/첫 쓰기/RX·BODY/DRIVE·close·스캔 재개를 회차별 분석한다. 공식 Tesla 앱 사용 여부를 기록하고 분석 전 실차 성공·다음 단계 합격을 선언하지 않는다.
+
+## 0.39.0-probe — 60초 이탈 대기 제거·제한 재조회
+
+### 변경·유지한 경계
+
+- 접근 인증 모드의60초 무수신 재무장 제한을 제거했다. 광고 유효/부재는 기존10초 기준을 사용한다. GATT/정리 중 스캔 중단은 이탈로 세지 않고 정리 완료 후10초 재관측 유예를 둔다. 비인증 감지/등록 주소 비교 정책은 유지한다.
+- 명시적 일시 GATT 실패·단계/쓰기 타임아웃에만 localClosed·예약 반환 확인→3.5초 대기→완료 이후 수신한 새 광고에서 같은 후보의 두 번째 조회를 허용한다. 원래40초 기한·최대2회·잔여 연결/정리 예산을 유지한다. 성공·BLOCKED/CANCELED·보안/프로토콜 오류·OFF·정리 불명은 자동 반복하지 않는다.
+- Tesla APK의 연결 상태 기반 reset/disconnect 흐름을 참고했지만 전체 재인증 정책 복제나133/첫 쓰기 해결을 주장하지 않는다. 초기133 내부1초/새 handle1회,500ms 준비,AltBeacon2.21.2·FGS·스캔 공백0,기존 키/VIN·암호 검증·차량 제어 금지는 유지한다.
+- 로그v18과 분석기는 허용된 두 번째 복구와 정책 위반 반복을 구분한다. 과거 v1~v17 판정과 미관측 null을 유지하며 복구 자체를 BODY/DRIVE 성공으로 세지 않는다.
+
+### 실제 실행한 검증
+
+|검증|실제 결과|한계|
+|---|---|---|
+|JDK21 APK·계측 APK·Lint|빌드 성공, Lint 오류0·경고14|기존 경고 유지. 최초 JVM 실행의 진단 시험2건에 남은60초 만료 가정을 수정한 뒤 전체 재실행|
+|JVM / Python|271개 실패/skip0 /80개 통과|실제 차량/RF/인증 성공 시험 아님|
+|독립 생산 정책 실행|JShell exit0. 같은 후보에서 close 후3500ms에 회차2, 최초 deadline41000 유지, 성공 중복0·부재 후 후보2·OFF 차단|테스트 메서드 호출이 아닌 생산 클래스 실행. 가상 단조 시계·합성 종료 상태|
+|S23 Android consumer·UI|23개 통과. 새 smoke는 합성 ScanResult→필터/세대 봉인→close 후3501ms에 같은 후보 회차2·성공 미반복 확인|합성 광고/RAM transport이며 실제 GATT·Tesla 응답 아님. FLAG_SECURE 유지, 픽셀 검증 미완료|
+|실제 앱·CLI|설정→진단→인증 조회 시작·HOME 조작, 감지/인증 조회/스캔 ON·scanFailure=null·BeaconService FGS 알림102 확인. 회수1160행 CLI exit0·문제0|준비회차의 차량 접근0건. 실차 복구·잠금 장기/배터리 미검증|
+|데이터 보존 설치|versionCode39·min/target36·최초 설치 이력 유지. VIN 암호문 지문 동일, legacy/회전3개 동일·직전 active402962바이트 prefix 보존|키 재생성·등록/권한 초기화·원 로그 삭제 없음|
+
+설치 전 자료는 저장소 제외 `비공개 로컬 보관 경로`에 보존했다. 준비회차 `비공개 회차 ID`는 로그v18·8행·접근0건이며 별도 prepared 사본과 분석 결과를 보존했다. 계측 합성 입력을 실차 분모에 섞지 않는다.
+
+### 사용자 실차 시험
+
+1. 현재 인증 조회ON 그대로 USB를 뽑고 휴대폰을 잠근다. 키 재등록·설정 변경·프렁크·마이크·UWB 시험은 하지 않는다.
+2. 차량 옆에30~40초 머문다. 첫 조회가 일시 통신 오류로 실패하면 멀어지지 않아도 정리·3.5초·새 광고 조건에서 제한 재조회가 가능하다. 성공하면 같은 후보에서는 반복하지 않는다.
+3. 충분히 멀어진 곳에서20~30초 머문 뒤 다시 접근해30~40초 머문다. 무조건60초 대기하는 절차는 없으며10초는 마지막 광고/정리 후 재관측 기준이다. 가까운 곳에서 계속 광고를 받으면 새 후보로 바뀌지 않는다.
+4. 접근·이탈 시각과 공식 Tesla 앱 직접 사용 여부를 기억하고 USB를 다시 연결한다. 같은 candidate의 attempt1/2·예약/실제 대기·첫 쓰기 callback/RX·BODY/DRIVE·close·스캔 재개를 분석한다. 사용자 실차 로그 분석 전에는 개선 성공·다음 단계 합격을 선언하지 않는다.
+
+## 0.38.0-probe — 직접 GATT 전환
+
+### 변경·유지한 경계
+
+- **Nordic만 제거:** Gradle 의존성, `TeslaNordicConnection`, package-private `NordicGattAccess`, 해당 전용 테스트를 제거했다. AltBeacon2.21.2·BeaconService FGS·스캔 공백0·기존 알림·감지 복원은 변경하지 않았다.
+- `TeslaBleKeyProbe`의 수동 등록/읽기·접근 읽기는 직접 `BluetoothGatt`를 사용한다. 연결→서비스/TX/RX/CCCD 검증→실제 MTU callback→CCCD 접수/성공 callback→기존 프로토콜 순서다. 앱 자체 단일 pending/쓰기 pump와 MTU-3 분할을 사용하며 legacy 쓰기 API나 임의의 HELLO sleep을 추가하지 않는다.
+- SDK 접수 Int·고정 예외 종류·발급/반환과 실제 SDK callback 진입 시각을 각각 기록한다. callback 함수 진입은 RF/controller 발생 시각이 아니다. SDK0·구독·첫 RX는 차량 인증 성공이 아니다.
+- 기존 키·VIN·암호/route/domain·BODY→새 DRIVE·총40초·원 광고10초·후보60초·500ms 준비·전송 전 초기133의 close 확인→1초→새 handle1회는 유지한다. 새 키 등록·프렁크·UWB·마이크·차량 깨움·무제한 재시도는 추가하지 않는다.
+- Service Changed는 기존 요청을 봉인·정리하며 이전 handle/pending callback을 새 회차에 붙이지 않는다. 할당 불명/close 예외는 예약을 유지한다. 검토에서 찾은 stop+finally의 중복 cleanup 가능성은 준비/할당 대기가 끝난 뒤 op별1회 시작 guard로 막았다. 이 할당 실패 경로의 실물 null/예외 재현은 미실행이다.
+- 로그v17은 `NATIVE`를 기록하며 library 전용 생산 필드를 제거한다. 분석기는 과거 v14~v16의 원 library 필드를 읽되 native status/시각으로 변환하지 않는다. 기존 `-3`라는 이름이 사라지는 것만으로 원인 해결을 선언하지 않는다.
+
+### 실제 실행한 검증
+
+|검증|실제 결과|한계|
+|---|---|---|
+|JDK21 빌드·Lint|APK·계측 APK 빌드 성공, Lint 오류0·경고14|SDK/의존성 갱신 안내·동기 설정 기록 등의 경고는 남김. 이번 범위에서 무관한 업그레이드나 경고 억제 없음|
+|JVM|268개, 실패/오류/skip0|소유권·요청 순서·거절 뒤 late callback·중복 MTU·취소·close 실패·기존 프로토콜/상태 회귀. 무선 입력 아님|
+|Python 분석기|72개 통과, v1~v17 처리|SDK 접수와 실제 완료·구버전 미지원/null·원문 차단 소비자 계약|
+|S23 비UI·native 경계|스캐너19·MainHandler retry1·실제 native GATT 생성/취소/close1 통과|lab 연결은 서비스/CCCD/TX를 발행하지 않음. native callback 수0이므로 실제133·연결 성공·늦은 무선 callback 재현 증거 아님|
+|S23 화면·예약|settle 취소1·기존 키 화면8·새 native 결과 UI/파일 smoke1 통과|실제 Compose 접근성 조작. 합성 SDK0/callback133을 조회 미완료로 표시. FLAG_SECURE 유지, 픽셀 기반 검증 미완료|
+|실제 파일·CLI|test-owned 로그v17의3행 CLI exit0·문제0. 합성 trial replay도 SDK0/callback133·완료 조회0|attempt900038·원 trialId=null. 합성 replay UUID는 `비공개 회차 ID`이며 실차 분모에서 제외|
+|보존 설치|versionCode38·min/target36·기존 UID/최초 설치 이력 유지. legacy 로그·VIN 암호문 지문 동일, 회전3개·직전 active prefix 보존|기존 키 삭제/재생성·association 변경·VIN 재등록·초기화 없음|
+|v38 실제 차량|구현 당시 미실행. 이후 아래 실차 후속 분석에서 두 접근 모두 조회 실패 확인|직접 GATT 전환만으로133·첫 HELLO 문제가 해결된 것은 아님|
+
+첫 기기 실행은21개 통과 뒤 `UiAutomationService already registered`로 화면 계측9개가 실패했고 일회 smoke 클래스 미포함1건도 있었다. 모바일 도구의 임시 UI 자동화 서버만 중지하고, AGP9 built-in Kotlin의 추가 소스를 `AndroidSourceSet.kotlin`으로 지정해 실패한10개만 다시 실행했으며 모두 통과했다. 앱 오류를 숨기거나 assertion/권한을 완화하지 않았다. 일회 smoke 소스와 init script는 검증 후 제거했다.
+
+업데이트 전 로그 사본은 저장소 제외 `비공개 로컬 보관 경로`에 보존했다. 기존 `events.jsonl`2,096,884바이트·회전3개가 그대로였고 직전 active73,354바이트도 새 active의 prefix로 남았다. 계측 fixture는 별도 VIN 파일·키 alias·runtime 로그를 사용하며 원본 APK·현장 로그·차량 키를 정리 대상으로 삼지 않는다.
+
+최종 설치 앱에서 인증 조회 preset·시작을 직접 선택하고 HOME 이후 상태를 확인했다. 준비회차 `비공개 회차 ID`의 로그v17은8행·CLI exit0/문제0, `bleFieldTrialActive=true`·`bleFieldAuthenticatedRead=true`·`bleFieldScanRunning=true`·scanFailure=null·native `SCAN_STARTED`다. BeaconService FGS 알림102/location type0x8을 확인했고 당시 접근 시도0건이다. 현재 이 준비 상태 그대로 사용자 실차 시험을 수행한다. 일회 클래스가 없는 계측 APK도 다시 빌드·보존 갱신했다.
+
+### 사용자 실차 시험
+
+1. **접근 시 인증·상태 조회가 실행 중인 준비 상태**에서 USB를 뽑고 휴대폰을 잠근다. 키 재등록·설정 변경·프렁크·마이크·UWB 시험은 하지 않는다.
+2. 차량에 접근해30~40초 머문다. 접근 시각과 공식 Tesla 앱 직접 사용 여부를 기억한다.
+3. 충분히 멀어진 뒤 약90초 대기하고 다시 접근해30~40초 머문다. 만료 기준은 마지막 유효 광고 이후60초이므로 차량 가까이서 기다리면 재무장되지 않을 수 있다.
+4. USB를 다시 연결한다. 두 접근 각각 native 연결→MTU/CCCD→첫 HELLO의 SDK 원 반환/예외→write callback/RX→BODY/DRIVE→close·예약 반환·스캔 재개를 분석한다.
+5. 프로세스가 재생성돼도 이전 인증 조회는 재생하지 않는다. 감지 복원도 사용자 설정·권한·OS 시작 조건에 따른 시도일 뿐이다. 설정 앱에서 강제 종료했다면 앱을 다시 열고 인증 조회를 직접 시작한다. 일반 화면 이탈/HOME은 명시적으로 시작한 서비스 조회를 끄지 않는다.
+
+### v38 실차 후속 분석
+
+2026-10-16 USB 회수1123행 중 준비회차 `비공개 회차 ID`의109행을 분석했다. CLI exit0·문제0이며 두 접근 모두 광고를 감지하고 조회를 시작했다.
+
+|관측|14:03 접근|14:06 접근|
+|---|---|---|
+|연결·쓰기|GATT0→MTU247·CCCD0→HELLO114바이트 SDK0|초기133→close 후 약1초·새 연결→다시133|
+|조회 결과|수용·기록된 write 완료 callback/RX 없이5231ms 후 타임아웃|연결 실패·TX0·BODY/DRIVE 미검증|
+|정리·재무장|로컬 close·예약 반환·스캔 재개|로컬 close·예약 반환·스캔 재개, 새 후보 조회 확인|
+|후보 만료|마지막 광고부터77297ms,60초 예약보다17297ms 지연|마지막 광고부터85675ms,60초 예약보다25675ms 지연|
+
+첫 쓰기 callback이 실제 미도착인지 검증 gate에서 제외됐는지는 미확정이다. 플랫폼 logcat에 남은 두 번째 접근은133 두 번을 뒷받침하지만 첫 접근의 저수준 기록은 확보하지 못했다. 후보 만료 지연을 절전으로 단정하거나 재무장 실패로 두 번째 GATT 실패를 설명하지 않는다. 이후 v39의 정책 변경과 이 실차 결과를 혼합하지 않는다.
+
+## 0.37.0-probe — 무광고60초 이탈·재무장
+
+- `BleFieldTrialPolicy.SIGNAL_FRESH_MS`를60,000ms로 변경했다. 인증 읽기의 원 광고10초 최신성·후보당 조회1회·전체40초·초기133의1초 대기/1회 재접속은 유지한다. 광고가 계속 오면 마지막 수신 기준으로 만료가 연장된다. 짧은 수신 공백이 이탈로 오판되는 위험은 실차 로그로 확인한다.
+- JDK21 APK/계측 빌드·Lint 오류0·JVM261개 실패/오류/skip0. 기존180초 기대값이 남은 회귀2건을60초 경계로 수정한 뒤 전체 통과했다. S23 감지/예약22개도 통과했다. 실제 스캐너 전달 경로에 합성 광고를 넣어59,999ms에는 후보 유지,60,000ms에 만료,다음 광고는 후보2 생성·스캐너 재등록 없음까지 확인했다. 가상 단조 시계를 사용한 기기 smoke이며 실제60초 무선 대기나 실차 성공은 아니다.
+- 데이터 보존 설치·인증 조회ON·HOME 뒤 BeaconService FGS/SCAN_STARTED/로그를 확인했다. 준비 시점 회차 `비공개 회차 ID`는8행·차량 접근0건이었다. 이후 같은 회차의 실차 결과는 아래에 구분한다.
+- 시험: 설정 변경 없이 USB 분리→휴대폰 잠금→차량 옆30~40초→충분히 멀어진 곳에서 약90초 대기→재접근30~40초. 마지막 광고 이후60초가 기준이므로 가까운 곳에서 기다리면 재무장되지 않을 수 있다. 접근·이탈 시각과 공식 Tesla 앱 사용 여부를 기억하고 USB 재연결한다. 강제 종료·재부팅 후에는 인증 조회를 다시 직접 시작한다.
+
+### v37 실차 후속 분석
+
+2026-10-16 USB 회수 로그915행 중 위 v37 회차700행을 분석했다. 약16시간6분·앱 프로세스1개이며 분석기 exit0·`issues=[]`였다. 이전 v35의 BODY 성공과 혼합하지 않는다.
+
+|관측 항목|10월15일17:03 접근|10월16일06:53 접근|
+|---|---|---|
+|광고·연결|원 광고 age1040ms, settle511ms, GATT status0/state2|원 광고 age828ms, settle538ms, GATT status0/state2|
+|구독·전송|MTU247·CCCD0, 첫 HELLO114바이트→약69ms 뒤 Nordic `-3`|MTU247·CCCD0, 첫 HELLO114바이트→약68ms 뒤 Nordic `-3`|
+|인증 결과|`GATT_WRITE_FAILED / UNKNOWN`, BODY/DRIVE 암호 검증 없음|`GATT_WRITE_FAILED / UNKNOWN`, BODY/DRIVE 암호 검증 없음|
+|종료·재개|로컬 close 확인·예약 반환·스캔 재개|로컬 close 확인·예약 반환·스캔 재개|
+|후보 만료|마지막 광고17:56:27.336→17:57:27.337,60,001ms|마지막 광고07:35:51.503→07:36:51.505,60,002ms|
+|기기 상태|interactive=true·locked=true|interactive=true·locked=false|
+
+- 두 접근 모두 감지·연결·구독 이후 첫 쓰기에서 실패했다. native133·제한 재접속 이벤트는0건이므로 이번 로그는133 대응 효과를 검증하지 않는다.
+- RX notification은 각1건이지만 완성 protocol frame은0건이다. 첫 RX를 인증 성공으로 취급하지 않는다.
+- 60초 후보 만료와 다음 후보 생성은 관측했다. 가까이 머물러 광고가 계속 수신되는 동안에는 후보가 유지됐다. 짧은 광고 누락의 오이탈 위험, 잠금·화면OFF 장기 시험,10회 반복을 통과한 것은 아니다.
+- `-3`는 Nordic의 축약 오류여서 원 SDK 반환·예외·invalidation 원인을 이 로그만으로 확정할 수 없다. [Tesla APK와 Nordic 코드 대조·수정 후보](Tesla-Integration.md#우리-앱-대조와-다음-개발-우선순위)를 기록했으며 추가 코드 변경은 아직 하지 않았다.
+
+## 0.36.0-probe — 초기133 제한 재접속
+
+### 실차 근거와 공식 조사
+
+- v35 회차 `비공개 회차 ID`: 10월15일14:45와14:52 두 접근 모두 화면OFF/잠금 상태에서 감지됐다. 첫 연결은 약502ms 준비 후 큐 진입97ms 만에133·TX0, 두 번째는31ms 뒤 연결0·MTU247·CCCD0·BODY 암호 검증 성공 후 DRIVE HELLO 무응답으로 끝났다. 두 광고 모두 connectable=true였다. 후보 만료·다음 후보 재무장·정리·스캔 재개를 확인했으며 스캐너 먹통으로 단정하지 않는다.
+- BODY 후 domain2·UUID/route 불일치 응답은 DRIVE 성공으로 수용하지 않는다. 실제 DRIVE HELLO write 완료14:52:13.668→종료14:52:23.667은 약10초다. Probe 단계 제한10초가 Conversation 내부15초보다 먼저 적용되는 기존 계약을 유지했다. 이번에는 무조건 대기 시간을 늘리지 않았다.
+- 조회 시 [Nordic 최신 안정 release](https://github.com/nordicsemi/Android-BLE-Library/releases/tag/2.11.0)는 현재 사용 중인2.11.0이다. [유지관리자 설명](https://github.com/nordicsemi/Android-BLE-Library/issues/170#issuecomment-693442033)은133의 다양한 원인과 제한 재접속을 설명하지만 라이브러리의 완전 해결은 보장하지 않는다. 삼성 Android14 반복133 사례는 발견했으나 원문403으로 확인이 제한됐고 S23 Ultra/Android16 동일 원인으로 취급하지 않았다.
+- 공식 [BODY 상태 조회](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/vehicle/state.go)는 인포테인먼트 수면 중에도 가능하다. 따라서 BODY 성공≠DRIVE 준비 완료다. 수면·기동 지연·키 동기화·연결 경쟁은 미확정이며 차량 깨움 명령이나 domain/UUID/route/HMAC/AEAD 검사 완화를 추가하지 않았다. 공식의 HELLO 반복 요청과 달리 앱의 단발 요청 정책은 이번133 연결 수정과 분리해 유지했다.
+
+### 구현과 실제 검증
+
+- `TeslaBleKeyProbe`·`TeslaGattConnectRetry`: 접근 읽기·전송 전 초기133만 같은 조회 내1회. 기존 native GATT close 확인 실패 시 lease 보존·추가 연결 금지. 1초 elapsed 대기 후 OFF/권한/광고 최신성/기존 기한 재검사. retiring manager 콜백 격리. 등록·수동조회·연결 후 오류·인증/조회 요청은 재시도하지 않는다.
+- 최초 실패와 재접속 예약/대기 종료/취소를 기존 schema16의 별도 단계로 보존한다. STARTED는 실제 enqueue가 아니며 이전133·연결 시각을 비운다. UI 안내와 분석기 계약을 갱신했다. AltBeacon 공백0·초기500ms·후보TTL180초·전체40초·MTU·차량제어 경계는 유지한다.
+
+|검증|실제 결과|한계|
+|---|---|---|
+|APK·계측 APK·Lint|JDK21 빌드 성공, Lint 오류0|실차 성공 증거 아님|
+|JVM / Python|261개 실패/오류/skip0 / 71개 통과|133·1회 한도·정리 실패·OFF/최신성/기한 상실·늦은 예약·진단 재진입은 합성 입력|
+|S23 감지·복구 경계|22개 통과|새 재접속 helper를 실제 Handler에서1초 대기/취소 실행. native133·무선 재접속 재현은 아님|
+|S23 화면 안전|11개 통과, 실제 제품 설정→진단→인증 조회 시작 조작|FLAG_SECURE 유지, 픽셀 기반 검증 미완료|
+|보존 설치·HOME smoke|version36·조회ON·BeaconService FGS 알림102/type0x8·SCAN_STARTED·로그 기록 확인|준비회차 `비공개 회차 ID` 8행 CLI exit0/문제0, 실제 차량 접근0|
+|v36 실제 차량·장기 시험|미실행|133 뒤 재접속 성공률·DRIVE 완료·잠금 장기/배터리는 사용자 시험 필요|
+
+### 사용자 시험
+
+1. 준비된 인증 조회 ON 상태 그대로 USB를 분리하고 휴대폰을 잠근 채 차량에 접근해30~40초 머문다. 앱의 추가 버튼·키 재등록·프렁크·마이크 조작은 필요 없다.
+2. 충분히 멀어져5분 이상 대기한 뒤 다시 접근한다. 마지막 유효 광고 뒤180초가 후보 만료 기준이므로 광고가 계속 수신되는 가까운 곳은 피한다.
+3. 접근/이탈 시각과 공식 Tesla 앱 직접 사용 여부를 기억하고 USB 재연결한다. 첫133→close→예약/STARTED→두 번째 연결, BODY/DRIVE, 만료/스캔 복귀를 분리해 분석한다.
+4. 강제 종료·재부팅·앱 프로세스 재시작 후에는 인증 조회를 다시 직접 시작해야 한다. 구현→보존 설치→사용자 시험→로그 분석 순서를 유지한다.
+
+## 0.35.0-probe — BODY ACK 대기·쓰기 실패 원 코드
+
+### v34 후속 실차 분석
+
+- 회차 `비공개 회차 ID`의771행·같은 프로세스 약16시간39분 기록을 분석했다. 10월14일17:07:32와15일06:59:30 두 광고에서 후보1/2·새 조회1/2를 시작했다. 두 연결 모두status0/state2·MTU247·구독0·SESSION_READY였고 연결133은 없었다. 연속 기록과 두 수신 시점을 밤새 모든 무선 광고를 받았다는 증거로 확대하지 않는다.
+- 첫 후보 유효 광고12801건·마지막18:07:32→실제 만료18:10:32(예정 대비289ms 지연), 둘째8668건·마지막07:41:49→만료07:45:19(29590ms 지연)을 관측했다. count는 앱 수용 광고이며 전체 RF 패킷/방문 수가 아니다. 이번 후보 유지 연장은 실제 반복 광고로 설명되지만 이전 v33 실패 원인을 소급 확정하지 않는다.
+- 저녁은183byte BODY 요청의 Nordic fail에서 GATT_WRITE_FAILED, 아침은 BODY write 완료0 뒤 현재 UUID/route true/true·domain2/payloadUNSET에서 PROTOCOL_RESPONSE_INVALID였다. BODY/DRIVE 검증0·정리 실패0·localClosed/lease 반환/scan 재개를 확인했다. 당시 쓰기 fail code와 signed status가 없어 실제 실패 원인·정상 ACK 여부를 확정할 수 없다. v16 분석기의 기존 v15 회차 재분석도 exit0/문제0이다.
+
+### 변경·공식 근거·안전
+
+- `TeslaBleProtocol`은 BODY STATUS에서 현재 요청 대응·기한 검사 후 명시 status/fault0/operationOK/payload부재/서명부재 ACK만 대기한다. ACK는 성공·BODY timestamp·DRIVE 진입·재송신·기한 연장을 만들지 않는다. status 부재·WAIT/ERROR/unknown·fault·잘못된 payload/서명/AEAD는 기존 실패 경로를 유지한다. 실제 encrypted BODY만 기존 request hash·counter·nonce/tag·AEAD 검증 후 진행한다. DRIVE STATUS ACK 정책은 확장하지 않았다.
+- 공식 고정 [vcsec.go](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/vehicle/vcsec.go)의 parser는 GetError 검사 후 payload 없는 nominal envelope를 허용한다. 하지만 공식 getVCSECInfo는 AuthMethodNone이며 이번 앱의 암호 BODY 후속 대기를 직접 증명하지 않는다. [GetError](https://github.com/teslamotors/vehicle-command/blob/a4b43c1eff0e09d77deb9f2dce97031141fe8c8a/pkg/protocol/error.go)의 ERROR branch도 nil로 떨어지므로 이번 ERROR 거부는 보수적 앱 정책으로 구분한다. VCSEC 내부 empty message 성공과 바깥 envelope payload 부재를 같은 인증 상태로 취급하지 않는다.
+- 로그v16·분석기v1~v16·접힌 상세에 signed status 존재/fault/operation과 Nordic 쓰기 실패 원 Int를 추가했다. 음수 library code는 native GATT status가 아니며 콜백 전달 시각도 SDK/native 진입 시각과 구분한다. 제출 객체/op/GATT/봉인 경계를 유지하고 이전 쓰기 실패를 새 예약/실제 쓰기에 붙이지 않는다. 원문·키·VIN·UUID/route·새 hash는 추가 기록하지 않는다.
+- AltBeacon2.21.2 FGS·between0, Nordic2.11.0·500ms·MTU247/5초·총기한·동일후보1회·180초 TTL·retry0/autoConnect=false는 유지한다. 프렁크·마이크·UWB·클라우드·키 등록을 추가하지 않았다.
+
+|검증|실제 결과|한계|
+|---|---|---|
+|APK·계측 APK·Lint|JDK21 빌드 성공·Lint 오류0|자동 검증은 실차 성공이 아님|
+|JVM / Python|254개 실패/오류/skip0 / 70개 통과|ACK 반복/만료·fault/unknown·잘못된 domain/route/UUID·평문/변조/재생 거부, 쓰기 제출 소유권·봉인 경계는 합성 입력|
+|S23 기존 회귀|감지19개·화면/키11개 통과|최초 잠금 화면에서12개 실패 후 사용자 잠금 해제 상태에서 실행. 안전 게이트는 변경하지 않음|
+|S23 일회 실제 runtime/UI smoke|RAM 합성 peer로 HMAC 세션→ACK2회 대기→암호 BODY1회 검증/DRIVE 미조회→별도fault777 거부·전체 완료 위장 없음,1개 통과|실제 라디오·차량·키 등록/생성·명령 없음. 화면 탐색의 스크롤 반영 대기를 보완 후 통과. FLAG_SECURE 유지로 픽셀 검증 미완료|
+|격리 실제 파일·CLI|trial=null/attempt900035의 v16 3행에서 ACK_WAITING·STATUS_VERIFIED(BODY만)·RESPONSE_REJECTED/fault777 확인. CLI exit0/문제0·실차 trial0|기존 계측 constructor의 파일명이 회전 sink 규칙과 불일치해 미기록이던 문제를 독립 runtime 디렉터리/events-v2.jsonl로 수정. 생산 경로·소유권 제한은 유지|
+|제품 보존 설치·조회 ON|version35·기존 등록/VIN·키 경로/현장 로그 유지·인증 조회 ON·BeaconService FGS 알림102/location type0x8·scan 등록·HOME 뒤 활성 확인|준비 회차 `비공개 회차 ID` 8행 CLI exit0/문제0. 실제 광고·조회0인 준비 상태|
+|실제 Nordic write fail / v35 실차|미실행|실패 원 코드의 실제 radio callback·후속 encrypted BODY/DRIVE 완료는 사용자 시험 로그 필요|
+
+### 다음 사용자 실차 시험
+
+1. 준비된 인증 조회 ON 그대로 USB를 뽑고 휴대폰을 잠근 채 차량에 접근해30~40초 머문다. 새 키 등록·프렁크·마이크·감지 설정 변경은 하지 않는다.
+2. 충분히 멀어져5분 이상 머문 뒤 다시 접근해30~40초 머문다. 기준은 마지막 유효 광고 이후180초이며 광고가 계속 들리면 후보가 유지될 수 있다.
+3. 접근/이탈 시각·공식 Tesla 앱 직접 사용 여부를 기억한 뒤 USB 재연결한다. ACK/fault/operation·Nordic 실패 원 코드·실제 BODY/DRIVE 검증·연결 정리/scan 재개·새 후보를 함께 분석한다. 강제 종료/재부팅이 있었다면 인증 조회는 다시 직접 시작해야 한다.
+4. 구현→검증/보존 설치→사용자 실차→USB 로그 분석→다음 단계 판단을 유지하며 합성 smoke를 실제 차량 성공으로 보고하지 않는다.
+
+## 0.34.0-probe — 반복 접근·현재 요청 대응 진단
+
+### v33 실차 근거와 미확정 원인
+
+- 10월14일 실차 회차 `비공개 회차 ID`의81행을 분석했다. 첫 광고는14:47:27 잠금/화면OFF, 앱 전달 지연26/28ms였다. 스캔 정지 후 실제 settle503ms·연결status0/state2·MTU247·CCCD0·쓰기3회 완료0·BODY 잠금 상태 검증을 확인했다. 프렁크 상태는 미제공이며 제어 명령은 없다.
+- DRIVE 대기 중 from domain2/expected3 메시지2개는 DOMAIN_DIFFERENT로 분류됐고14:47:39 PARTIAL/TIMED_OUT으로 끝났다. localClosed=true/lease=false·스캔 재개를 확인했다. v33에는 현재 UUID/route 대응 근거가 없어 현재 DRIVE 요청에 대한 응답이라고 단정하지 않는다. 이 회차 native133은 없었지만 일반적인133 해결·Nordic/500ms 각각의 효과 분리는 미검증이다.
+- 첫 BT 끊김14:50:31→다음 BT 연결14:53:27 간격은175369ms다. 두 번째 BT 신호 당시 후보1이 유지됐고 새 조회는 없었으며 후보 만료는14:57:32였다. BT/CDM은 인증후보 입력에서 shadowed된다. 기존 로그는 유효 반복 광고를 집계하지 않아 광고로 TTL이 연장됐는지, 두 번째 raw가 누락됐는지, timer가 지연됐는지 확정할 수 없다.
+
+### 구현·안전 조건
+
+- `BleCandidateDiagnostics`·정책 관측·서비스 publisher·로그v15·분석기v1~v15·진단 화면을 연결했다. 유효 광고 누계/후보별 수/조회 억제 수·마지막 원 수신/앱 처리·실제 정책 만료 예정/실제 만료·지연을 분리한다. count는 native 전체 패킷이나 실제 방문 수가 아니다.
+- dirty 반복 광고는 최소10초 간격으로 집계하고 후보/조회/스캔/정지 전이는 강제 기록한다. clean 상태는 계속 polling하지 않는다. timer/getter는 만료나 조회를 실행하지 않으며 OFF/이전 세대의 periodic 전달을 봉인한다. 집계 기록 실패도 정책을 중지시키지 않는다.
+- 수신 header의 UUID 존재/현재 요청 일치·to의 현재 route 일치는 비인증 Boolean 관측이다. 부재/미발급은 null, 다른 값은 false다. DOMAIN_MISMATCH 조기 반환 전 비교하지만 domain→route→UUID·ACK/HMAC/AEAD 검증은 그대로다. malformed/expired·재진입·새 RX 없는 BODY→DRIVE 전환을 구분한다. 원문·주소·VIN·UUID·route·새 hash는 추가 저장하지 않는다.
+- AltBeacon2.21.2·foreground1.1초/background30초·between0, Nordic2.11.0·최소500ms·MTU247/5초·총기한·같은 후보1회·180초 TTL·retry0/autoConnect=false를 유지한다. BT 즉시 재무장·TTL 단축·RSSI cutoff·새 명령/마이크/UWB는 추가하지 않았다.
+
+|검증|실제 결과|한계|
+|---|---|---|
+|APK·계측 APK·Lint|JDK21 빌드 성공; Lint 오류0/경고14|장기/실차 증거 아님|
+|JVM|243개, 실패/오류/skip0|유효 반복/중복/역순/만료 후 재접근·dirty timer/이전 세대·비인증 대응/암호 거부 경계는 합성 입력|
+|Python|68개 통과|v15·null/false·미래 expiry·오래된 스키마/개인정보 차단 경계|
+|S23 감지/화면 회귀|감지19개 통과. 첫 화면 회귀11개 중2개 요소 탐색 실패; 탐색 전 현재 요소 확인·스크롤 반영 대기 보완 후11개 모두 통과|격리 VIN/키·합성 결과. 실차 인증이나 픽셀 검증 아님|
+|실제 서비스·진단 화면 smoke|조회 ON·native SCAN_STARTED·BeaconService FGS 알림102/location type0x8·ObservationService·다음 유효 광고 대기·상세0/미수신·HOME 뒤 활성 확인|실제 광고는 없는 준비 상태. 반복 광고/만료/응답 Boolean의 실제 차량 입력은 미실행. FLAG_SECURE 유지로 픽셀 검증 미완료|
+|파일 로그·CLI|준비 회차 `비공개 회차 ID` v15 8행·진단2행·CLI exit0/문제0. scan unknown→true·원 수신/expiry null·count0 확인|스캔 등록과 광고 수신을 구분. 후보/조회/방문을 만들어내지 않음|
+|설치·데이터|version34·Android16/SDK36·보존 설치, 기존 등록/VIN·키 경로/현장 로그 재사용, 인증 조회 ON·HOME 뒤 FGS/스캔 확인|강제 종료/재부팅 뒤 인증 조회 자동 재개를 보장하지 않음|
+|v34 실차·장기 잠금/배터리|미실행|다음 사용자 시험과 USB 로그 분석에서 판정|
+
+### 사용자 실차 시험
+
+1. 준비된 인증 조회 ON 그대로 USB를 뽑고 잠금·주머니 상태로 접근해30~40초 머문다. 새 키 등록·프렁크·마이크·감지 설정 변경은 하지 않는다.
+2. 충분히 멀어져5분 이상 머문 뒤 다시 접근해30~40초 머문다. 기준은 마지막 유효 광고 이후180초이며 광고가 계속 들리면 시간만으로 재무장을 보장하지 않는다. 가능하면 두 번째 접근 전 진단의 **다음 접근 조회 → 새 접근 대기**를 확인하되 잠금 무터치 시험에서는 확인을 필수로 하지 않는다.
+3. 두 접근·이탈 시각과 공식 Tesla 앱 직접 사용 여부만 기록한다. USB 재연결 후 광고 누계/억제 수·마지막 원 수신·만료 예정/실제 지연·새 후보/조회와 DRIVE UUID/route 대응 Boolean/도메인/인증 결과를 함께 분석한다.
+4. 앱 강제 종료/재부팅 뒤에는 감지만 복원될 수 있다. 개발자 진단→BLE 연결→접근 시 인증·상태 조회→시작을 다시 선택한다. 구현→검증/설치→사용자 실차→USB 분석→다음 판단 순서를 유지한다.
+
+## 0.33.0-probe — Nordic GATT 이관·연결 전 대기
+
+### 근거와 적용 범위
+
+- v32의10월14일12:42:32·12:48:01 접근은 모두 화면OFF/잠금에서 raw 광고를 감지했다. connectable=true, 연결 요청 당시 age247/125ms, native133/state0이 API 발급 뒤518/38ms에 전달됐다. TX/RX0·BODY/DRIVE0이었다. 두 회차 모두 close/lease 반환/스캔 재개, 첫 후보12:46:23 만료 뒤 새 후보, 두 번째12:51:40 만료를 확인했다. 실차62행 CLI exit0/문제0이며 절전·공식 앱·controller 원인은 미확정이다.
+- 스캔 정지 기록→native 연결 발급77/48ms와 [500ms 지연 개선 사례](https://github.com/android/connectivity-samples/issues/18#issuecomment-349509171)를 비교했다. 오래된 다른 기기 사례이며 Tesla/S23 Android16 해결 증거는 아니다. 사용자가 Nordic 이관·중간 지연을 승인했다.
+- `TeslaBleKeyProbe`를 회차별 Nordic `BleManager`로 전환했다. AltBeacon2.21.2 감지/FGS·스캔 사이 대기0, 기존 키/프로토콜/MTU247 요청/5초·접근 총40초·같은 후보1회·retry0/autoConnect=false/PHY1M을 유지한다. 스캔 pause ACK와 키 준비 후 최소500ms를 기다리고 실제 실행 시 owner·권한·기한·원 광고10초 freshness를 재검사한다.
+- 초기 연결 실패에도 정리·재접근을 유지하기 위해 최소 package-local `NordicGattAccess`로 첫 enqueue 직후 native handle을 확보한다. SDK 호출·큐를 대체하지 않으며 reflection·fork는 없다. 실제 handle의 명시 close 반환을 확인한 뒤 manager를 정리한다. 내부 필드·첫 enqueue 동기성·callback/fail 순서 때문에 버전2.11.0을 고정하고 업그레이드 때 이 경계를 재검증한다.
+- 로그v14·분석기v1~v14·접힌 진단 상세는 settle/큐 등록/library 전달 시각과 실제 native 경계를 구분한다. 미제공 native 발급·callback 진입·SDK 반환은 null이다. 초기 ConnectRequest의 양수 실패 코드만 원 GATT status로 취급하며 mapped observer reason/음수 library reason을 native로 변환하지 않는다.
+
+|검증|실제 결과|한계|
+|---|---|---|
+|의존성·APK·계측 APK·Lint|JDK21 성공; Nordic2.11.0 runtime 해석, merged min/target36·기존 BeaconService location/ObservationService connectedDevice 선언 확인|기존 경고 유지; 실차 연결 개선 증거 아님|
+|JVM|229개, 실패/오류/skip0|취소·조기 wake·기한/owner 상실·재진입·이전 회차·원status/library reason 경계 포함|
+|Python|65개 통과|v1~v14·미제공 값·시각 출처·개인정보 차단 경계|
+|S23 기존 회귀|BLE 감지/화면22개·키/읽기 화면8개 통과|합성 transport·격리 VIN/키; 실차 인증 성공 아님|
+|S23 실제 probe 대기 취소|명시 runNordicSettleFixture=true, 키 준비 완료 후 +100ms 취소·늦은 wake 뒤 연결/TX/구독0·localClosed·lease 재획득 확인,1개 통과|실제 probe 대기/취소 경계; 실제 차량 연결 아님|
+|일회 Nordic runtime/surface smoke|비차량 합성 주소로 실제 SDK 연결 시작→즉시 handle 확보→서비스 전 취소→명시 close 확인. 큐/native 시각 구분·미완료 화면 확인,2개 통과|화면 smoke는 runtime 게시·접근성 cache/windows 처리 보완 뒤 통과. 실제 native133 재현/서비스·MTU·CCCD·TX/RX·실차 성공은 아님. FLAG_SECURE 유지로 픽셀 검증 미완료|
+|실제 파일 로그·CLI|trial 없는 합성 attempt900033의 v14 NORDIC/큐 등록/localClosed 행, CLI exit0/문제0|합성 회차이며 실제 차량 방문 분모에 포함하지 않음|
+|제품 보존 설치·조회 ON|version33 확인·기존 VIN/등록/현장 로그 유지·인증 조회 설정/FGS/SCAN_STARTED·HOME 이후 활성 확인. 준비 회차6행 CLI exit0/문제0|짧은 준비 관측; 장기 잠금·배터리·실차 조회는 별도|
+|초기 native133 실기기 fixture·실차|미실행|재현 가능한 비차량 lab133/147 대상 없음. `TeslaNordicConnectionDeviceTest`는 명시 lab주소/기대 status로 실행하도록 준비. 다음 사용자 실차 로그 필요|
+
+- 빌드 중 nullable progress packet·Nordic IntDef 상수/로그 우선순위를 수정했다. 확장 레코드가 작은8KiB 회귀 fixture의 파일당2KiB를 넘은 문제는 실제 최대 행 크기로 회전 시험 용량을 정해 수정했으며 제품2MiB 상한은 바꾸지 않았다. 실제 v14 smoke 행2995bytes/summary1812bytes를 확인해 encoder 초기 버퍼만 조정했다.
+- 앱 소유 키/세션·프레임·수신 큐와 성공한 Nordic packet/Data는 지운다. 실패/취소의 private WriteRequest 복사본까지 즉시 zeroize한다는 보장은 없다. 원시 패킷·주소·키·VIN·예외 원문을 로그에 추가하지 않았다. 일회 smoke 소스·계측 앱/APK는 검증 후 정리하며 제품 APK에는 fixture가 없다.
+
+### 사용자 실차 시험
+
+1. 준비된 인증 조회 ON 그대로 USB를 뽑고 휴대폰을 잠근 채 접근20~40초 머문다. 새 키 등록·프렁크·마이크·권한 변경은 하지 않는다.
+2. 충분히 멀어져 약5분 여유를 둔 뒤 다시 접근20~40초 머문다. 광고가 계속 들리면 후보 만료가 늦어질 수 있어 시간만으로 재무장을 보장하지 않는다.
+3. USB 재연결 후 실제 settle≥500ms·원 광고 freshness·Nordic 초기 연결 결과·명시 close/lease/scanresume·BODY/DRIVE·도메인 분류를 분석한다. 빌드·모의 성공으로133 해결을 선언하지 않는다.
+4. 앱 강제 종료/재부팅 뒤에는 감지만 복원될 수 있다. 개발자 진단→BLE 연결→접근 시 인증·상태 조회→시작을 다시 선택한다. 구현→검증/설치→사용자시험→로그분석 순서를 유지한다.
+
+## 0.32.0-probe — domain 세부·연결 시작 관측
+
+### v31 실차에서 확보한 근거
+
+- 동일 로그 process/회차가 10월13일15:40~14일07:44 약16시간 유지됐다. 13일17:06(화면ON/잠금해제)·20:39(화면OFF/잠금)의 두 회차는 CONNECTING native133/state0으로 끝났고 쓰기는 없었다. RSSI-84/-81만으로 거리·133 원인을 확정하지 않는다.
+- 14일06:50(화면ON/잠금해제) 회차는 연결0/state2·CCCD SDK/native0/0, BODY 인증/읽기·DRIVE handshake의 세 쓰기0/0을 확인했다. BODY는 잠금1·프렁크1 보고, DRIVE는 요청 뒤 완성 프레임 두 개를 DOMAIN_MISMATCH로 제외하고 약10초 뒤 PARTIAL timeout이었다. 기어/P와 프렁크 명령 실행은 증거가 없다.
+- 세 회차 모두 close/lease 반환/스캔 재개·후보 만료를 확인했다. 실제 최신 회차144행 CLI exit0·문제0이었다. source header 값은 v31에 없어 부재/형식/다른 domain 중 어느 경우인지 미확정이다.
+
+### 연결 정책 판단과 변경 범위
+
+- 원 timestamp/원기기·10초 freshness·native scan stop 무예외 반환·서비스 token/candidate/attempt/FGS owner·기존 키·단일 lease·직접 연결(false) 조건을 점검했다. 같은 후보 실패 후 재시도 없이 마지막 광고180초 만료 뒤 새 광고만 재무장하는 것은 현재 계약대로다.
+- `isConnectable` 미사용은 확인했지만 실제 두 광고가 non-connectable이었다는 증거는 없다. 필터·RSSI cutoff·재시도·기한·autoConnect를 바꾸지 않고 원 flag와 실제 connect API 시각/광고 age만 기록한다. stop 무예외 반환은 RF/controller ACK가 아니며 controller/HCI 원인·공식 앱 점유·절전 원인은 미확정이다.
+- v13 summary/JSON·typed protocol observer·Sequence·Probe/Service·분석기·접힌 UI 상세를 갱신했다. 기존 DOMAIN_MISMATCH/route/UUID/ACK/암호 조건을 그대로 두고 expected/from domain, 존재/kind, payload case, 세부 사유를 분리한다. raw packet·주소·route·UUID·키·VIN·hash·예외 원문은 기록하지 않는다.
+
+|검증|실제 결과|한계|
+|---|---|---|
+|APK·계측 APK·Lint·JVM|JDK21 성공, JVM221개 실패/오류/skip0|기존 deprecation 경고 유지; 설치·실차 실행 아님|
+|Python|63개 통과|v1~v13/null/false/실제0·원문 차단 소비자 경계|
+|독립 JVM 실제 protocol 실행|합성 피어에서 from 부재·비DOMAIN·expected3/actual2가 각각 Waiting·세부 사유, 명목 ACK는 대기, malformed는 이전 header 미재사용; Java exit0|기존 테스트 메서드를 호출한 결과가 아니라 별도 실행 프로그램. 실제 차량/RF/Android GATT는 아님|
+|실제 CLI|위 실제 protocol 출력5건의 합성 JSONL replay exit0·문제0·전체완료0|합성 시험 ID로 분리, 실차 성공·차량 identity 증거 아님|
+|S23 runtime 로그·새 UI|기존 기기 회귀22개 통과, 임시 smoke2개 통과. 합성 header 분류3종·connectable false의 실제 파일 로그8행 CLI exit0/문제0. 진단 상세 조작·미검증 응답의 조회 미완료 표시 확인|최초 임시 UI smoke는 전환 후 fixture 덮어쓰기 때문에 실패; 전환 완료 후 주입해 통과. 실제 광고 connectable·실제 connect API 시각은 실차 미검증. FLAG_SECURE 유지로 픽셀 검증은 미완료|
+|새 APK 보존 설치·조회 ON·FGS|v32 데이터 보존 설치 성공. 실제 인증 조회 설정·시작, BeaconService foregroundId102/location FGS, SCAN_STARTED와 HOME 후 활성 회차 유지 확인. 실제 회차6행 CLI exit0/문제0|짧은 준비 관측이며 실차 수신·장기 생존·배터리 증거 아님|
+|실차133·DRIVE 원인/해결|미검증|새 버전 설치 이후 사용자 테스트·USB 로그 분석 필요|
+
+- 임시 `DomainHeaderSmokeDeviceTest`를 실제 S23에서 실행해 합성 헤더 분류/파일 로그·connectable false·진단 상세를 확인했다. 검증 후 임시 소스를 제거했다. 제품 APK에는 fixture가 포함되지 않으며 합성 로그는 trialId 없는 attempt900006/900007로 실제 사용자 회차와 분리한다.
+- 독립 JVM 임시 프로그램은 합성 P256 피어만 RAM에 만들고 앱 키/설정/기기에 접근하지 않았다. observer 없음·immutable callback·기한/예외/reentry·새 RX 없는 BODY→DRIVE 관측 보존도 기존 fixture 기반 행동 회귀로 확인했다.
+
+### 재연결 후 마무리·사용자 시험
+
+1. USB 재연결·잠금 해제 후 기존 로그를 읽기 전용으로 회수하고 감지를 UI에서 중지했다. v32를 데이터 보존 설치하고 runtime/header 로그·진단 상세·기존 기기 회귀를 실행했다.
+2. 실제 인증 preset·시작을 선택해 version32·조회 ON·FGS·native scan 등록과 HOME 뒤 유지를 확인했다.
+3. 이제 USB를 뽑고 잠금 상태 접근20~40초→충분히 이탈/약5분 여유→재접근을 수행한다. 새 키 등록·차량 명령·마이크는 누르지 않는다.
+4. 연결133 때 connectable/발급 시 age·native 상태, DRIVE 때 header 존재/kind·expected/actual domain·payload·세부 제외 사유와 정리/스캔 재개를 분석한다. 인증 조건을 완화하거나 원인 미확정으로 즉시 다음 제어 단계에 진입하지 않는다.
+
+
+
+
+
+
+
+
+
+
+
+
+
+## BLE 개선 실차 대조 절차
+
+2026-10-06 승인된 개선의 효과를 평가하는 절차다. 아래 왕복은 아직 실행하지 않았으며 합성 이벤트·서비스 생존·UWB 세션 start를 실제 방문으로 세지 않는다.
+
+1. 차량 옆에 안전하게 정지하여 **감지만 · GATT 없음**과 GATT 수행 조건을 먼저 비교한다. 동일한 거리·공식 앱 상태·휴대폰 잠금/주머니·차량 상태를 유지하고 한 번에 한 조건만 바꾼다. 연결/close 직후 신호 흔들림을 함께 확인한다.
+2. 기준 방식은 CDM BLE 출현당 한 회차다. 개선 방식은 BT 보조·주소 필터 보조 스캔·제한 재시도다. `autoConnect=true`는 두 프리셋과 별개의 비교 조건이며 기본 false다. 개별 옵션 조합과 실행 시작 시각을 기록한다. 옵션 선택/권한 승인은 시험 시작이 아니며 실행 중에는 조건이 고정된다.
+3. 조건별 최소 6회 왕복한다. 휴대폰은 화면 OFF·잠금·주머니 상태로 두고 별도 관찰자가 실제 접근·핸들 조작·이탈 시각과 비민감 방문 순번을 기록한다. 방문 기록을 위해 시험 휴대폰을 깨우지 않는다. 키카드 등 정상 진입 수단을 준비하고 운전 중 조작하지 않는다.
+4. 방문별 최초 CDM/BT/스캔 후보 시각, 핸들 조작 전 감지 여부·지연, 후보 병합/중복·만료, GATT 회차/재시도·연결/구독/첫 RX·정리·예약 잔존을 대조한다. 후보 수나 BT 연결 수는 실제 방문 분모가 아니다. 10/3 밤의 세 번 연속 시험을 세 번 독립 방문으로 단정하지 않는다.
+5. 공식 앱 ON/OFF 또는 배터리 설정 비교는 다른 조건을 고정한 별도 실행으로 한다. 폰키가 비활성화될 수 있는 조건에서는 대체 진입 수단을 사용한다. 실차 제어·키 등록·마이크는 켜지 않는다.
+6. 정상 중지 후 pending 0·로그 건강·원본 보존을 확인하고 USB로 append 파일을 회수한다. 합성 검증 `trialId`는 실차 실행에서 제외한다. 등록·로그를 삭제하거나 재설정하지 않는다.
+
+판정은 **실제 방문 대비 감지율, 핸들 전 감지율·지연, 중복/거짓 이탈, 연결/구독 및 첫 RX, 종료/예약 해제, 장기 전력 비용**을 분리한다. 감지만 모드의 GATT 0회는 실패가 아니다. 구독 COMPLETE는 0 RX에서도 가능하며 인증·잠금 해제·거리 측정 성공이 아니다. 보조 주소 필터는 주소 변경·비광고 상태에 한계가 있고, 40초/120초 시간 제한 스캔은 절전 지연과 미수신을 배제하지 못한다. 개선 후 실차 감지율·적정 시간값·배터리 비용은 측정 전 미확인이다.
+
+
+### 실행 조건과 관찰자 CSV
+
+`tools/field_visits.csv`는 헤더만 있는 기록 양식이다. 실제로 수행한 접근만 새 행으로 기록하고 로그의 후보/회차를 방문 행으로 변환하지 않는다.
+
+|조건|고정할 옵션|비교 목적|
+|---|---|---|
+|기준 · 감지만|CDM 기준, GATT 없음, 보조 BT/필터 스캔 없음|기준 감지 증거|
+|개선 · 감지만|개선 정책, GATT 없음, 선택한 BT/필터 스캔 조건 고정|정책 묶음의 감지 비교; 개별 옵션의 인과 효과는 아님|
+|기준 · GATT|기준 정책, GATT 수행, `autoConnect=false`|기준 연결/구독/첫 RX와 정리|
+|개선 · GATT|개선 정책, GATT 수행, 제한 재시도, `autoConnect=false`|감지 후보와 연결 복구를 분리한 비교|
+|단일 옵션 대조|나머지는 동일하게 두고 BT/스캔/`autoConnect` 중 하나만 변경|특정 옵션의 대조; 앞선 정책 묶음 비교와 혼합하지 않음|
+
+각 조건의 시작 시각·실행 UUID·권한·공식 앱 상태·배터리 설정·충전 여부를 별도 결과 기록에 남긴다. 시작 전 후보가 이미 있었는지도 기록한다. 같은 안전한 보행 경로를 사용하고 접근 시작/핸들 조작/이탈의 기준을 고정한다. 접근 전에 열린 후보나 관찰창의 로그 부재를 새 방문의 감지 실패로 단정하지 않는다.
+
+```csv
+visitId,trialId,approachAt,handleAt,departAt
+```
+
+- `visitId`: 양의 정수 방문 순번. 파일 안에서 중복하지 않는다.
+- `trialId`: 시작 전에 앱에서 확인한 실제 실행 UUID. 한 실행에 여러 실제 방문을 연결할 수 있다. association ID·주소·VIN이 아니다.
+- 세 시각: 관찰자 시계의 시간대가 포함된 ISO 8601 시각. `approachAt ≤ handleAt ≤ departAt`이며 서로 다른 실행을 포함해 방문 관찰창을 겹치거나 경계에서 맞닿게 하지 않는다. 후보의 핸들 전 판정은 **엄격한 `< handleAt`**이며 같은 시각은 핸들 전이 아니다. 관찰 반응·시각 해상도의 오차도 결과에 기록한다.
+- 시계 정합: 방문 전에 관찰자와 시험 휴대폰의 wall clock 차이를 확인한다. `deviceWall = observerWall + observerOffsetMs`다. 확인하지 않은 `0`을 전달하지 않는다. 재부팅/프로세스/시계 변경을 가로지르는 elapsed 값을 이어 붙이지 않는다.
+- 원문 보존: 원본 JSONL과 실제 CSV를 변경/정리/삭제하지 않는다. 양식에 가상 접근을 채우거나 VIN·주소·폰키·개인 이름·음성 원문을 쓰지 않는다. 합성 검증 UUID는 위 대조 시험의 분모에 포함하지 않는다.
+
+로그 분석은 `tools/analyze_field_log.py`를 사용한다. `--visits` 없이 후보 수를 방문 분모로 만들지 않으며, `--observer-offset-ms`가 없으면 후보 근거율/핸들 전 근거율/접근 지연을 판정하지 않는다. 비율은 로그에 기록된 후보 근거와 관찰 기록의 대조이지 물리 감지의 완전성 증명이 아니다. `--exclude-trial`은 반복할 수 있고 앞선 합성 검증과 휴대폰 단독 검증 UUID를 모두 제외해야 한다. `--json`은 기계 처리용이며 입력 파일을 덮어쓰지 않는다.
+
+수신 monotonic 시각이 음수·기록 시각 이후·정수 범위/타입 위반이면 `INVALID_RECEIVED_TIME`으로 기록하고 시계 정합·감지율·핸들 전 비율·지연을 미판정으로 둔다. 미제공/null 시각의 명시적 `record_wall` 대체와 구분한다. `--exclude-trial`은 시험·방문 집계만 제외하며 같은 프로세스의 wall/elapsed 불일치나 역행 근거를 지우지 않는다. 정상 시각의 제외 행도 기존 회차를 인위적인 시간 경계로 분할하지 않는다.
+
 ## 빌드 전제
 
-현재 Gradle 파일, 소스, APK가 없으므로 실행할 빌드·설치 명령도 없다. 구현을 시작할 때 Android Studio, JDK, Android SDK, Gradle wrapper의 호환 조합을 실제 환경에서 확인한 뒤 고정한다. SDK와 라이브러리 버전도 구현 시 검증 후 고정하며, 이 문서는 특정 버전을 약속하지 않는다.
+검증된 빌드·설치 절차와 도구 버전은 [README](../README.md#빌드와-실행)에 있다. 프로젝트의 `local.properties`는 각 개발자의 SDK 경로를 지정하며 Git에서 제외한다. 전체 순서와 아직 통과하지 않은 단계는 [구현 계획](Implementation-Plan.md)을 따른다.
 
 ## 결과 기록 템플릿
 
 ```text
 일시:
-검증자:
+검증 역할(개인 이름 없이):
 휴대전화 / Android / One UI:
 차량 / 차량 펌웨어:
 음성 인식 엔진·모델:
 권한·기본 비서·association 설정:
 네트워크 / 차량 수면 / 잠금·주머니 상태:
+공식 앱 실행 상태 / 배터리 제한 / 충전 여부:
+실행 UUID / 조건 이름 / 시작·종료 시각:
+감지만·GATT / BT 보조 / 보조 스캔 / 제한 재시도 / autoConnect:
+시작 전 presence·후보 유무 / 이탈 완료 기준:
+관찰자 시계 offset(device-observer) / 측정 시각 / 오차:
+원본 JSONL·관찰 CSV 보존 위치(문서에 개인 경로 기입 금지):
+제외한 전화기 단독·합성 실행 UUID:
+실제 방문 기록 수 / typed 후보 수 / 최종 GATT 회차 수(각각):
+본시험 SDK status / 정리 SDK status / 첫 RX / 원격 해제 / 로컬 close / 예약 잔존:
+종료 시 로그 건강 / pending / dropped / 파일 bytes / 회수 성공:
 검증 항목:
 수행 절차:
 기대 관찰:

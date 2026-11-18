@@ -1,0 +1,5 @@
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="com.heytesla.app.AssistantSessionService"
+    android:recognitionService="com.heytesla.app.UnsupportedRecognitionService"
+    android:supportsAssist="true"
+    android:supportsLocalInteraction="false" />
